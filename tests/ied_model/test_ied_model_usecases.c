@@ -1,0 +1,288 @@
+#include <stdlib.h>
+#include <string.h>
+#include "unity.h"
+#include "stdbool_compat.h"
+#include "features/ied_model/domain/ied_model_usecases.h"
+#include "iec61850_dynamic_model.h"
+
+static IedModel* fixtureModel;
+static struct sIedModelHandle fixtureHandle;
+static IedModelHandle handle;
+
+/*
+ * Tiny in-memory IedModel, built directly via the dynamic model API (no file
+ * I/O, no SCL parsing - that's the loader's job and is covered by the E2E
+ * test in integration_tests/ instead). Shape:
+ *   TestIED / LD1 / LLN0
+ *     Mod        (DO, no CO child - must NOT be a control target)
+ *       stVal    (BOOLEAN, FC=ST - IS a read target)
+ *       ctlModel (ENUMERATED, FC=CF - must NOT be a read target)
+ *     TotW       (DO, no CO child)
+ *       mag      (FLOAT32, FC=MX - IS a read target)
+ *     CSWI       (DO, HAS a CO child - IS a control target)
+ *       Oper     (BOOLEAN, FC=CO)
+ *     DataSet "events", one ReportControlBlock, one GSEControlBlock
+ */
+static IedModel*
+buildFixtureModel(void) {
+    IedModel* model = IedModel_create("TestIED");
+    LogicalDevice* ld = LogicalDevice_create("LD1", model);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* mod = DataObject_create("Mod", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) mod, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("ctlModel", (ModelNode*) mod, IEC61850_ENUMERATED, IEC61850_FC_CF, 0, 0, 0);
+
+    DataObject* totW = DataObject_create("TotW", (ModelNode*) ln0, 0);
+    DataAttribute_create("mag", (ModelNode*) totW, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+
+    DataObject* cswi = DataObject_create("CSWI", (ModelNode*) ln0, 0);
+    DataAttribute_create("Oper", (ModelNode*) cswi, IEC61850_BOOLEAN, IEC61850_FC_CO, 0, 0, 0);
+
+    DataSet* dataSet = DataSet_create("events", ln0);
+    DataSetEntry_create(dataSet, "TestIEDLD1/LLN0$ST$Mod$stVal", -1, NULL);
+
+    ReportControlBlock_create("brcb01", ln0, "rpt01", true, "events", 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
+    GSEControlBlock_create("gcb01", ln0, "1000", "events", 1, false, -1, -1);
+
+    return model;
+}
+
+void
+setUp(void) {
+    fixtureModel = buildFixtureModel();
+    fixtureHandle.model = fixtureModel;
+    fixtureHandle.accessMode = IED_MODEL_ACCESS_READ_AND_WRITE; /* unused by usecases; gating lives in api.c */
+    fixtureHandle.iedName = "TestIED";
+    handle = &fixtureHandle;
+}
+
+void
+tearDown(void) {
+    IedModel_destroy(fixtureModel);
+}
+
+static const char*
+firstElement(LinkedList list) {
+    LinkedList element = LinkedList_getNext(list);
+    return element ? (const char*) LinkedList_getData(element) : NULL;
+}
+
+/* ---- GOOSE subscription targets ---- */
+
+void
+test_getGooseSubscriptionTargets_returnsCorrectReference(void) {
+    LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(handle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+
+    GooseSubscriptionTarget* target =
+        (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$GO$gcb01", target->objectReference);
+    /* fixture's gcb01 has no GSEControlBlock_addPhyComAddress call - no SCL
+     * <Communication> entry was ever attached. */
+    TEST_ASSERT_FALSE(target->hasAddress);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
+}
+
+void
+test_getGooseSubscriptionTargets_empty_whenModelHasNoGseControlBlocks(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getGooseSubscriptionTargets_populatesAddress_whenPhyComAddressPresent(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$stVal", -1, NULL);
+
+    GSEControlBlock* gcb = GSEControlBlock_create("gcbAddr", ln0, "1000", "ds1", 1, false, -1, -1);
+    uint8_t mac[6] = { 0x01, 0x0c, 0xcd, 0x01, 0x00, 0x05 };
+    GSEControlBlock_addPhyComAddress(gcb, PhyComAddress_create(4, 10, 2000, mac));
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    GooseSubscriptionTarget* target =
+        (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$GO$gcbAddr", target->objectReference);
+    TEST_ASSERT_TRUE(target->hasAddress);
+    TEST_ASSERT_EQUAL_UINT16(10, target->vlanId);
+    TEST_ASSERT_EQUAL_UINT8(4, target->vlanPriority);
+    TEST_ASSERT_EQUAL_UINT16(2000, target->appId);
+    TEST_ASSERT_EQUAL_MEMORY(mac, target->dstMac, 6);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
+    IedModel_destroy(bareModel);
+}
+
+/* ---- Report subscription targets ---- */
+
+void
+test_getReportSubscriptionTargets_returnsCorrectReference(void) {
+    LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(handle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+
+    ReportControlBlockTarget* target =
+        (ReportControlBlockTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    /* fixture's brcb01 is buffered=true on dataset "events" - must use ".BR." */
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0.BR.brcb01", target->objectReference);
+    TEST_ASSERT_TRUE(target->buffered);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$events", target->datasetReference);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
+}
+
+void
+test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$stVal", -1, NULL);
+    ReportControlBlock_create("urcb01", ln0, "rpt02", false, "ds1", 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    ReportControlBlockTarget* target =
+        (ReportControlBlockTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0.RP.urcb01", target->objectReference);
+    TEST_ASSERT_FALSE(target->buffered);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ds1", target->datasetReference);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getReportSubscriptionTargets_empty_whenModelHasNoRcbs(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
+    IedModel_destroy(bareModel);
+}
+
+/* ---- Read targets ---- */
+
+void
+test_getReadTargets_includesOnlyStAndMxAttributes(void) {
+    LinkedList targets = IedModelUseCases_getReadTargets(handle);
+
+    /* stVal (ST) and mag (MX) - exactly 2, ctlModel (CF) and Oper (CO) excluded. */
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(targets));
+
+    LinkedList element = LinkedList_getNext(targets);
+    bool foundStVal = false, foundMag = false, foundCtlModel = false, foundOper = false;
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        if (strstr(ref, "stVal")) foundStVal = true;
+        if (strstr(ref, "mag")) foundMag = true;
+        if (strstr(ref, "ctlModel")) foundCtlModel = true;
+        if (strstr(ref, "Oper")) foundOper = true;
+        element = LinkedList_getNext(element);
+    }
+
+    TEST_ASSERT_TRUE(foundStVal);
+    TEST_ASSERT_TRUE(foundMag);
+    TEST_ASSERT_FALSE(foundCtlModel);
+    TEST_ASSERT_FALSE(foundOper);
+
+    LinkedList_destroyDeep(targets, free);
+}
+
+void
+test_getReadTargets_empty_whenModelHasNoStOrMxAttributes(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataObject* cf = DataObject_create("Cfg", (ModelNode*) ln0, 0);
+    DataAttribute_create("setting", (ModelNode*) cf, IEC61850_INT32, IEC61850_FC_CF, 0, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getReadTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, free);
+    IedModel_destroy(bareModel);
+}
+
+/* ---- Control targets ---- */
+
+void
+test_getControlTargets_includesOnlyDataObjectsWithCoChild(void) {
+    LinkedList targets = IedModelUseCases_getControlTargets(handle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    TEST_ASSERT_TRUE(strstr(firstElement(targets), "CSWI") != NULL);
+
+    LinkedList_destroyDeep(targets, free);
+}
+
+void
+test_getControlTargets_empty_whenModelHasNoControllableDataObjects(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataObject* mod = DataObject_create("Mod", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) mod, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_AND_WRITE,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getControlTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, free);
+    IedModel_destroy(bareModel);
+}
+
+int
+main(void) {
+    UNITY_BEGIN();
+
+    RUN_TEST(test_getGooseSubscriptionTargets_returnsCorrectReference);
+    RUN_TEST(test_getGooseSubscriptionTargets_empty_whenModelHasNoGseControlBlocks);
+    RUN_TEST(test_getGooseSubscriptionTargets_populatesAddress_whenPhyComAddressPresent);
+
+    RUN_TEST(test_getReportSubscriptionTargets_returnsCorrectReference);
+    RUN_TEST(test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment);
+    RUN_TEST(test_getReportSubscriptionTargets_empty_whenModelHasNoRcbs);
+
+    RUN_TEST(test_getReadTargets_includesOnlyStAndMxAttributes);
+    RUN_TEST(test_getReadTargets_empty_whenModelHasNoStOrMxAttributes);
+
+    RUN_TEST(test_getControlTargets_includesOnlyDataObjectsWithCoChild);
+    RUN_TEST(test_getControlTargets_empty_whenModelHasNoControllableDataObjects);
+
+    return UNITY_END();
+}
