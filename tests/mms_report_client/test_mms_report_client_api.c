@@ -132,11 +132,56 @@ test_configDefaults_matchDocumentedValues(void) {
     TEST_ASSERT_EQUAL_UINT32(0, config.requestTimeoutMs);
     TEST_ASSERT_EQUAL_UINT32(1000, config.reconnectInitialDelayMs);
     TEST_ASSERT_EQUAL_UINT32(30000, config.reconnectMaxDelayMs);
+    TEST_ASSERT_NULL(config.acseAuthPassword);
 }
 
 void
 test_configDefaults_doesNotCrash_onNull(void) {
     MmsReportClientConfig_defaults(NULL);
+}
+
+/* ---- acseAuthPassword ownership ---- */
+
+void
+test_create_takesOwnedCopy_ofAcseAuthPassword_notAliased(void) {
+    fixtureModel = buildBareModel();
+    fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+    fixtureIedModelHandle = &fixtureIedHandle;
+
+    char password[] = "s3cret";
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+    config.acseAuthPassword = password;
+
+    MmsReportClientHandle client = MmsReportClient_create(fixtureIedModelHandle, "127.0.0.1", 102, &config, NULL);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_NOT_NULL(client->ownedAuthPassword);
+    TEST_ASSERT_EQUAL_STRING("s3cret", client->ownedAuthPassword);
+    TEST_ASSERT_TRUE(client->ownedAuthPassword != password);
+    TEST_ASSERT_EQUAL_STRING(client->ownedAuthPassword, client->config.acseAuthPassword);
+
+    /* Mutate the source buffer after create - the owned copy must be unaffected. */
+    password[0] = 'X';
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("s3cret", client->ownedAuthPassword,
+            "acseAuthPassword must be a deep copy, unaffected by later mutation of the caller's buffer");
+
+    MmsReportClient_destroy(client);
+}
+
+void
+test_create_leavesOwnedAuthPasswordNull_whenNotConfigured(void) {
+    fixtureModel = buildBareModel();
+    fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+    fixtureIedModelHandle = &fixtureIedHandle;
+
+    MmsReportClientHandle client = MmsReportClient_create(fixtureIedModelHandle, "127.0.0.1", 102, NULL, NULL);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_NULL(client->ownedAuthPassword);
+    TEST_ASSERT_NULL(client->config.acseAuthPassword);
+
+    MmsReportClient_destroy(client);
 }
 
 int
@@ -153,6 +198,9 @@ main(void) {
 
     RUN_TEST(test_configDefaults_matchDocumentedValues);
     RUN_TEST(test_configDefaults_doesNotCrash_onNull);
+
+    RUN_TEST(test_create_takesOwnedCopy_ofAcseAuthPassword_notAliased);
+    RUN_TEST(test_create_leavesOwnedAuthPasswordNull_whenNotConfigured);
 
     return UNITY_END();
 }

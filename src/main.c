@@ -12,7 +12,9 @@
  * real sequencing lives in src/orchestration/service/orchestration_api.c.
  * No config-file system exists yet, so host/port/IED name/interface come
  * from argv with hardcoded defaults matching integration_tests/ied_simulator's
- * "Reporter1" fixture.
+ * "Reporter1" fixture: [host] [mmsPort] [iedName] [interface] [ipcPort]
+ * [acseAuthPassword] - the last two are optional (ipcPort defaults to 8765,
+ * acseAuthPassword defaults to NULL/unauthenticated).
  *
  * Note this file never includes features/ipc_dispatcher/service/
  * ipc_dispatcher_api.h directly - orchestration owns that feature's entire
@@ -55,6 +57,13 @@ main(int argc, char** argv) {
     int mmsPort = (argc > 2) ? atoi(argv[2]) : 102;
     const char* iedName = (argc > 3) ? argv[3] : "Reporter1";
     const char* interfaceId = (argc > 4) ? argv[4] : "eth0";
+    /* Optional - only needed if the target IED requires ACSE authentication.
+     * NULL (the default, argv omitted) means every association attempt is
+     * unauthenticated, exactly as before this was added. argv[6] is stable
+     * for the whole process lifetime, so it's safe to borrow directly into
+     * both config structs below (their own doc comments describe this same
+     * borrowed-then-internally-copied convention). */
+    const char* acseAuthPassword = (argc > 6) ? argv[6] : NULL;
 
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
@@ -62,6 +71,12 @@ main(int argc, char** argv) {
     OrchestrationConfig config;
     OrchestrationConfig_defaults(&config);
     if (argc > 5) config.ipcDispatcherConfig.port = (uint16_t) atoi(argv[5]);
+    /* Same physical IED authenticates both associations with the same
+     * ACSE password in practice - scl_bootstrap's SCL-discovery connection
+     * and mms_report_client's reporting connection are independent
+     * IedConnections, so each needs it set explicitly. */
+    config.bootstrapConfig.acseAuthPassword = acseAuthPassword;
+    config.reportClientConfig.acseAuthPassword = acseAuthPassword;
 
     OrchestrationError createError;
     OrchestrationHandle handle = Orchestration_create(&config, &createError);
@@ -95,9 +110,10 @@ main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s'). "
+    printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s', ACSE auth %s). "
             "ipc_dispatcher listening on 127.0.0.1:%u. Ctrl+C to stop.\n",
-            host, mmsPort, iedName, interfaceId, (unsigned) config.ipcDispatcherConfig.port);
+            host, mmsPort, iedName, interfaceId, acseAuthPassword ? "enabled" : "disabled",
+            (unsigned) config.ipcDispatcherConfig.port);
 
     while (!g_stopRequested) {
         pause();

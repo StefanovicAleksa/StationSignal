@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include "features/mms_report_client/data/mms_report_client_connection.h"
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
+#include "features/mms_report_client/data/mms_report_client_auth.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 
 /*
@@ -165,6 +166,11 @@ MmsReportClientConnection_create(MmsReportClientHandle handle) {
     if (handle->config.requestTimeoutMs > 0) {
         IedConnection_setRequestTimeout(handle->connection, handle->config.requestTimeoutMs);
     }
+    /* Applied once, here, before the connection is ever used - covers every
+     * subsequent reconnect too, since supervisorLoop reuses this same
+     * IedConnection object rather than recreating it per attempt (see
+     * mms_report_client_auth.h). No-op if no password is configured. */
+    MmsReportClientAuth_configurePasswordAuth(handle->connection, handle->config.acseAuthPassword);
 
     IedConnection_installStateChangedHandler(handle->connection, onStateChanged, handle);
 

@@ -40,6 +40,7 @@ $(BIN): e2e_test_ipc_dispatcher.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c \
 		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \

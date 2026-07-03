@@ -13,6 +13,7 @@ MmsReportClientConfig_defaults(MmsReportClientConfig* config) {
     config->requestTimeoutMs = 0;
     config->reconnectInitialDelayMs = 1000;
     config->reconnectMaxDelayMs = 30000;
+    config->acseAuthPassword = NULL;
 }
 
 MmsReportClientHandle
@@ -39,8 +40,15 @@ MmsReportClient_create(IedModelHandle iedModel, const char* host, int port,
         MmsReportClientConfig_defaults(&handle->config);
     }
 
+    /* Owned copy taken before MmsReportClientConnection_create (which is what
+     * actually applies it to the IedConnection) - see MmsReportClientConfig's
+     * own field doc comment for why this outlives the caller's buffer. */
+    handle->ownedAuthPassword = MmsReportClientUtils_safeStringDup(handle->config.acseAuthPassword);
+    handle->config.acseAuthPassword = handle->ownedAuthPassword;
+
     MmsReportClientError connError = MmsReportClientConnection_create(handle);
     if (connError != MMS_REPORT_CLIENT_OK) {
+        free(handle->ownedAuthPassword);
         free(handle->host);
         free(handle);
         if (outError) *outError = connError;
@@ -169,6 +177,7 @@ MmsReportClient_destroy(MmsReportClientHandle client) {
         LinkedList_destroyDeep(client->memberRefCache, MmsReportClientUseCases_destroyMemberRefCacheEntry);
     }
     free(client->host);
+    free(client->ownedAuthPassword);
     free(client);
 }
 

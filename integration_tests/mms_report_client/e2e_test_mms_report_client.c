@@ -23,10 +23,20 @@
  * comment in sim_types.h): IED "Reporter1", LDevice "LD1", one buffered RCB
  * ("brcbMain", trgOps=dchg+qchg+gi) over dataset "ds1" containing
  * GGIO1.Ind1.stVal followed by GGIO1.Ind1.q.
+ *
+ * Also proves MmsReportClientConfig.acseAuthPassword end-to-end (see
+ * mms_report_client_auth.h) against a real SimServer_requireAuthentication-
+ * protected instance: a correct password connects and enables the RCB, a
+ * wrong one never does - same SimServer_requireAuthentication mechanism
+ * scl_bootstrap's own E2E test already exercises for the discovery side.
  */
 
 #define FIXTURE_PATH "fixtures/reporter1.cid"
 #define TEST_PORT 10203
+#define TEST_PORT_AUTH_CORRECT 10206 /* distinct from every other E2E test's port - see
+                                        integration_tests/orchestration's own registry comment */
+#define TEST_PORT_AUTH_WRONG 10207
+#define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
 
@@ -153,11 +163,97 @@ test_dataChangeOnServer_triggersReportWithNewValue(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves MmsReportClientAuth_configurePasswordAuth end-to-end against a
+ * real password-protected simulator IED: the reconnect supervisor thread
+ * must apply ACSE auth on its very first connect attempt (not just after a
+ * failed unauthenticated one - see mms_report_client_auth.h for why no
+ * retry dance is needed here) and successfully enable the RCB.
+ */
+void
+test_authRequired_correctPassword_connectsAndEnablesRcb(void) {
+    SimServer sim = SimServer_create();
+    SimServer_requireAuthentication(sim, TEST_PASSWORD);
+    SimServer_start(sim, TEST_PORT_AUTH_CORRECT);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+    config.acseAuthPassword = TEST_PASSWORD;
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_AUTH_CORRECT,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
+            "expected the correct ACSE password to let the supervisor thread connect and enable brcbMain");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Negative case: a password-protected IED with the wrong password configured
+ * must never successfully connect - the reconnect supervisor thread keeps
+ * retrying with exponential backoff forever, but brcbMain never gets
+ * enabled. Proves the auth failure doesn't silently fall back to an
+ * unauthenticated connection.
+ */
+void
+test_authRequired_wrongPassword_neverConnects(void) {
+    SimServer sim = SimServer_create();
+    SimServer_requireAuthentication(sim, TEST_PASSWORD);
+    SimServer_start(sim, TEST_PORT_AUTH_WRONG);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+    config.acseAuthPassword = "wrong-password";
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_AUTH_WRONG,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_FALSE_MESSAGE(waitUntil(&rcbEnabled),
+            "expected the wrong ACSE password to never let the supervisor thread connect");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_dataChangeOnServer_triggersReportWithNewValue);
+    RUN_TEST(test_authRequired_correctPassword_connectsAndEnablesRcb);
+    RUN_TEST(test_authRequired_wrongPassword_neverConnects);
 
     return UNITY_END();
 }

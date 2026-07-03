@@ -88,6 +88,15 @@ typedef struct {
     uint32_t requestTimeoutMs;         /* 0 = library default */
     uint32_t reconnectInitialDelayMs;  /* default 1000 */
     uint32_t reconnectMaxDelayMs;      /* default 30000 */
+    const char* acseAuthPassword;      /* NULL = no ACSE authentication (default) - same
+                                           borrowed-at-the-config-struct-level convention as
+                                           SclBootstrapConfig's own field of the same name;
+                                           MmsReportClient_create takes its own owned copy
+                                           (handle->ownedAuthPassword) for the handle's whole
+                                           lifetime, so the caller's buffer only needs to
+                                           survive the _create() call itself. Applied
+                                           unconditionally (no auth-then-retry dance - see
+                                           mms_report_client_auth.h for why that's fine here). */
 } MmsReportClientConfig;
 
 /*
@@ -102,6 +111,9 @@ struct sMmsReportClientHandle {
     char* host;              /* owned copy */
     int port;
     MmsReportClientConfig config;
+    char* ownedAuthPassword; /* owned copy of config.acseAuthPassword, re-pointed onto config
+                                 right after duplication - see MmsReportClientConfig's own
+                                 field doc comment */
 
     IedConnection connection; /* owned */
     LinkedList targets;        /* owned: ReportControlBlockTarget* list, our own

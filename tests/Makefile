@@ -72,6 +72,7 @@ test_mms_report_client_usecases: mms_report_client/test_mms_report_client_usecas
 test_mms_report_client_api: mms_report_client/test_mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
@@ -171,6 +172,7 @@ test_orchestration_api: orchestration/test_orchestration_api.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
@@ -226,6 +228,7 @@ test_ipc_dispatcher_api: ipc_dispatcher/test_ipc_dispatcher_api.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c \
 		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
