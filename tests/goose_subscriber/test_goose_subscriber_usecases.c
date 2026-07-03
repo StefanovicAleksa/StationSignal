@@ -24,7 +24,7 @@ test_buildRecord_copiesScalarFields(void) {
             2000, 1700000000000ULL,
             true, 10, 4, 2000,
             srcMac, dstMac,
-            NULL, 0);
+            NULL, NULL, 0, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Breaker1CB1/LLN0$GO$gcbStatus", record->goCbRef);
@@ -62,7 +62,7 @@ test_buildRecord_deepCopiesEntries_notAliased(void) {
             1, 0, 1, false, false, 2000, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            dataSetValues, 2);
+            dataSetValues, NULL, 0, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(2, record->entryCount);
@@ -84,6 +84,62 @@ test_buildRecord_deepCopiesEntries_notAliased(void) {
 }
 
 void
+test_buildRecord_populatesReference_fromMemberReferences(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newIntegerFromInt32(99));
+
+    uint8_t zeroMac[6] = { 0 };
+    char ref0[] = "Reporter1LD1/GGIO1$ST$Ind1$stVal";
+    char ref1[] = "Reporter1LD1/GGIO1$ST$Ind1$q";
+    const char* memberReferences[2] = { ref0, ref1 };
+
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, memberReferences, 2, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_STRING(ref0, record->entries[0].reference);
+    TEST_ASSERT_EQUAL_STRING(ref1, record->entries[1].reference);
+
+    /* Mutate the source buffer after the call - proves the reference is a
+     * deep copy, same aliasing guarantee as the value entries above. */
+    ref0[0] = 'X';
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Reporter1LD1/GGIO1$ST$Ind1$stVal", record->entries[0].reference,
+            "entry reference must be a deep copy, unaffected by later mutation of the source buffer");
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_referenceOutOfRange_leavesReferenceNull(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
+
+    uint8_t zeroMac[6] = { 0 };
+    const char* memberReferences[1] = { "Reporter1LD1/GGIO1$ST$Ind1$stVal" };
+
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, memberReferences, 1, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", record->entries[0].reference);
+    TEST_ASSERT_NULL(record->entries[1].reference);
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
 test_buildRecord_handlesNullDataSetValues_zeroEntries(void) {
     /* Real caller (the frame adapter) always derives entryCount from
      * dataSetValues itself (dataSetValues ? MmsValue_getArraySize(...) : 0),
@@ -95,7 +151,7 @@ test_buildRecord_handlesNullDataSetValues_zeroEntries(void) {
             0, 0, 0, false, false, 0, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            NULL, 0);
+            NULL, NULL, 0, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(0, record->entryCount);
@@ -113,7 +169,7 @@ test_buildRecord_hasVlanFalse_leavesVlanFieldsAtZero(void) {
             0, 0, 0, false, false, 0, 0,
             false, 10, 4, -1,
             zeroMac, zeroMac,
-            NULL, 0);
+            NULL, NULL, 0, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_FALSE(record->hasVlan);
@@ -182,6 +238,8 @@ main(void) {
 
     RUN_TEST(test_buildRecord_copiesScalarFields);
     RUN_TEST(test_buildRecord_deepCopiesEntries_notAliased);
+    RUN_TEST(test_buildRecord_populatesReference_fromMemberReferences);
+    RUN_TEST(test_buildRecord_referenceOutOfRange_leavesReferenceNull);
     RUN_TEST(test_buildRecord_handlesNullDataSetValues_zeroEntries);
     RUN_TEST(test_buildRecord_hasVlanFalse_leavesVlanFieldsAtZero);
     RUN_TEST(test_freeRecord_doesNotCrash_onNull);

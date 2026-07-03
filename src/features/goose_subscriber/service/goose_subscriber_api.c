@@ -10,10 +10,42 @@ freeTargetEntries(GooseSubscriberHandle handle) {
 
     for (int i = 0; i < handle->targetCount; i++) {
         IedModel_destroyGooseSubscriptionTarget(handle->targetEntries[i].target);
+        for (int j = 0; j < handle->targetEntries[i].memberCount; j++) {
+            free(handle->targetEntries[i].memberReferences[j]);
+        }
+        free(handle->targetEntries[i].memberReferences);
     }
     free(handle->targetEntries);
     handle->targetEntries = NULL;
     handle->targetCount = 0;
+}
+
+/*
+ * One-time, local resolution of a target's dataset member references (never
+ * over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery" rule).
+ * GOOSE has no server-supplied reference alternative (unlike MMS's optional
+ * DataRef), so this is always attempted, not just a fallback.
+ */
+static void
+resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedModel) {
+    entry->memberReferences = NULL;
+    entry->memberCount = 0;
+    if (!entry->target->datasetReference) return;
+
+    LinkedList refs = IedModel_getDataSetMemberReferences(iedModel, entry->target->datasetReference);
+    int count = refs ? LinkedList_size(refs) : 0;
+    if (count == 0) { if (refs) LinkedList_destroyDeep(refs, free); return; }
+
+    char** array = calloc((size_t) count, sizeof(char*));
+    if (!array) { LinkedList_destroyDeep(refs, free); return; }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(refs);
+    while (element) { array[i++] = (char*) LinkedList_getData(element); element = LinkedList_getNext(element); }
+    LinkedList_destroyStatic(refs); /* ownership moved into array[] */
+
+    entry->memberReferences = array;
+    entry->memberCount = count;
 }
 
 void
@@ -97,6 +129,7 @@ GooseSubscription_start(GooseSubscriberHandle handle) {
         entries[i].target = (GooseSubscriptionTarget*) LinkedList_getData(element);
         entries[i].rawSubscriber = NULL;
         entries[i].lastKnownValid = false;
+        resolveMemberReferences(&entries[i], handle->iedModel);
         i++;
         element = LinkedList_getNext(element);
     }

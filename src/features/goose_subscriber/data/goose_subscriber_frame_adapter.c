@@ -67,6 +67,9 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
 
     bool hasVlan = GooseSubscriber_isVlanSet(subscriber);
 
+    const char* const* memberRefs = entry ? (const char* const*) entry->memberReferences : NULL;
+    int memberRefCount = entry ? entry->memberCount : 0;
+
     GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
             GooseSubscriber_getGoCbRef(subscriber),
             GooseSubscriber_getGoId(subscriber),
@@ -83,7 +86,7 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
             hasVlan ? GooseSubscriber_getVlanPrio(subscriber) : 0,
             GooseSubscriber_getAppId(subscriber),
             srcMac, dstMac,
-            dataSetValues, entryCount);
+            dataSetValues, memberRefs, memberRefCount, entryCount);
 
     /* Allocation failure building the record: nothing safe to deliver - drop
      * this message rather than risk the caller dereferencing a partial one. */

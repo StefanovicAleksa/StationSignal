@@ -48,6 +48,10 @@ typedef enum {
 typedef struct {
     MmsValue* value; /* owned deep copy (MmsValue_clone); NULL only if the
                          element itself was NULL in the source array */
+    char* reference; /* owned copy, resolved from ied_model's SCL dataset -
+                         ALWAYS attempted (unlike MMS, GOOSE has no
+                         server-supplied alternative), NULL only if
+                         resolution failed (e.g. dataset lookup miss). */
 } GooseSubscriberEntry;
 
 /*
@@ -111,6 +115,11 @@ typedef struct {
  */
 typedef struct {
     GooseSubscriptionTarget* target;
+    char** memberReferences; /* owned array of owned strings, resolved once at
+                                 GooseSubscription_start via
+                                 IedModel_getDataSetMemberReferences(target->datasetReference);
+                                 index i matches GooseSubscriberEntry[i] */
+    int memberCount;
     GooseSubscriber rawSubscriber;
     bool lastKnownValid;
     uint64_t lastValidAtMs; /* Hal_getMonotonicTimeInMs() of the last frame the

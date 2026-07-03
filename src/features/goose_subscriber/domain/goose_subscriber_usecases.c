@@ -11,12 +11,13 @@ static void
 freeEntriesUpTo(GooseSubscriberEntry* entries, int builtCount) {
     for (int i = 0; i < builtCount; i++) {
         if (entries[i].value) MmsValue_delete(entries[i].value);
+        free(entries[i].reference);
     }
     free(entries);
 }
 
 static GooseSubscriberEntry*
-buildEntries(const MmsValue* dataSetValues, int entryCount) {
+buildEntries(const MmsValue* dataSetValues, const char* const* memberReferences, int memberCount, int entryCount) {
     if (entryCount <= 0) return NULL;
 
     GooseSubscriberEntry* entries = calloc((size_t) entryCount, sizeof(GooseSubscriberEntry));
@@ -26,6 +27,9 @@ buildEntries(const MmsValue* dataSetValues, int entryCount) {
         if (dataSetValues) {
             MmsValue* element = MmsValue_getElement((MmsValue*) dataSetValues, i);
             entries[i].value = element ? MmsValue_clone(element) : NULL;
+        }
+        if (memberReferences && i < memberCount && memberReferences[i]) {
+            entries[i].reference = GooseSubscriberUtils_safeStringDup(memberReferences[i]);
         }
     }
 
@@ -40,7 +44,9 @@ GooseSubscriberUseCases_buildRecord(
         uint32_t timeAllowedToLiveMs, uint64_t timestampMs,
         bool hasVlan, uint16_t vlanId, uint8_t vlanPrio, int32_t appId,
         const uint8_t srcMac[6], const uint8_t dstMac[6],
-        const MmsValue* dataSetValues, int entryCount) {
+        const MmsValue* dataSetValues,
+        const char* const* memberReferences, int memberCount,
+        int entryCount) {
     GooseSubscriberRecord* record = calloc(1, sizeof(GooseSubscriberRecord));
     if (!record) return NULL;
 
@@ -64,7 +70,7 @@ GooseSubscriberUseCases_buildRecord(
     if (srcMac) memcpy(record->srcMac, srcMac, 6);
     if (dstMac) memcpy(record->dstMac, dstMac, 6);
 
-    record->entries = buildEntries(dataSetValues, entryCount);
+    record->entries = buildEntries(dataSetValues, memberReferences, memberCount, entryCount);
     record->entryCount = record->entries ? entryCount : 0;
 
     return record;

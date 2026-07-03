@@ -27,7 +27,9 @@ GooseSubscriberUseCases_buildRecord(
         uint32_t timeAllowedToLiveMs, uint64_t timestampMs,
         bool hasVlan, uint16_t vlanId, uint8_t vlanPrio, int32_t appId,
         const uint8_t srcMac[6], const uint8_t dstMac[6],
-        const MmsValue* dataSetValues, int entryCount);
+        const MmsValue* dataSetValues,
+        const char* const* memberReferences, int memberCount,
+        int entryCount);
 
 /* Frees a record built by GooseSubscriberUseCases_buildRecord, including every
  * entry's cloned value and the entries array. NULL-safe. */
