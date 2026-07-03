@@ -63,6 +63,12 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   not a bare `char*` — this was a breaking change made when `goose_subscriber` needed the
   addressing data to configure `GooseSubscriber_setDstMac`/`setAppId` filters; there were no
   other consumers at the time.
+- `ied_model` also now exposes `IedModel_getDataSetMemberReferences` (ordered, heap-allocated
+  reference strings for one dataset, purely local — walks the already-parsed SCL `DataSet`,
+  never over-the-wire) and `GooseSubscriptionTarget` gained a `datasetReference` field
+  (mirroring `ReportControlBlockTarget`'s) — both added so `mms_report_client`/`goose_subscriber`
+  can label report/GOOSE entries by their dataset position. See "IPC / Reporting Out" below for
+  the full reference/quality field-availability picture this closed.
 - `integration_tests/ied_simulator/` is implemented: a small "Reporter1" fake IED
   (`src/sim_types.h`/`sim_server.c`) built directly via libiec61850's dynamic model API
   (not genmodel.jar codegen - see `scripts/generate_model.sh`'s comment for why, and where
@@ -147,14 +153,18 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   auth (one retry) via `SclBootstrapConfig.acseAuthPassword`. Proven end-to-end (including the
   auth-retry and negative-path cases) against a real `ied_simulator` IED in
   `integration_tests/scl_bootstrap/`.
-- `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use.
-- `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`[+`GI`], **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`.
+- `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use; `GooseSubscriptionTarget` carries the equivalent `datasetReference` for `goose_subscriber`. `IedModel_getDataSetMemberReferences(handle, datasetReference)` returns the ordered, heap-allocated member-reference strings backing one dataset (index i matches the i-th report/GOOSE entry) — purely local, walks the already-parsed SCL `DataSet`, never over-the-wire (see Hard Rules) — this is what both consumers use to label entries by position.
+- `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`[+`GI`], **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). `MmsReportEntry.reference` prefers the server's own `ClientReport_getDataReference` (only present if the RCB's `OptFlds` has `DataRef` set) and falls back to a per-RCB cache of `IedModel_getDataSetMemberReferences` results (built once at `MmsReportClient_start`, never rebuilt on reconnect) when the server omits it. Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`.
 - `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
   `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
   GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's
   addressing when present, and delivers normalized `GooseSubscriberRecord`s via a
   caller-registered callback (JSON stringification deferred to `ipc_dispatcher`, same as
-  `mms_report_client`). Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`.
+  `mms_report_client`). Unlike MMS, GOOSE never carries a reference on the wire at all, so
+  `GooseSubscriberEntry.reference` is always resolved via a per-target cache of
+  `IedModel_getDataSetMemberReferences` results (built once at `GooseSubscription_start`) —
+  no server-truth branch exists the way it does for `mms_report_client`. Works under every
+  `ied_model` `AccessMode`, including `REPORT_ONLY`.
   Public boundary: `src/features/goose_subscriber/service/goose_subscriber_api.h` — note the
   public functions are named `GooseSubscription_*`, not `GooseSubscriber_*`, deliberately:
   libiec61850's own `GooseSubscriber_create`/`GooseSubscriber_destroy` (`goose_subscriber.h`)
@@ -218,31 +228,40 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   shape or any websocket-facing feature that consumes these records.
 - **Field availability today** (`MmsReportEntry` in
   `src/features/mms_report_client/domain/mms_report_client_types.h`, `GooseSubscriberEntry` in
-  `src/features/goose_subscriber/domain/goose_subscriber_types.h`):
+  `src/features/goose_subscriber/domain/goose_subscriber_types.h`) — reference labeling is
+  **solved**, quality remains **conditional on SCL authoring**:
   - **value** — present on both: `entries[i].value` (`MmsValue*`).
-  - **reference** — MMS report: `entries[i].reference`, but only populated if the RCB's
-    `OptFlds` has `DataRef` enabled (can be `NULL` otherwise, check the actual RCB config
-    before assuming it's there). GOOSE: **no per-entry reference field at all** — GOOSE
-    entries are purely positional off the wire, decoded straight from the frame. To label a
-    GOOSE entry you must cross-reference its array index against the dataset member order
-    `ied_model` already parsed from SCL (the FCDA list backing that GoCB's dataset) — that
-    index→name mapping doesn't exist as code anywhere yet, it'd be new work.
-  - **quality** — **not a field on either struct.** In IEC 61850, quality (`q`) is a sibling
-    Data Attribute of `stVal`, not embedded in the value itself. `Quality` is
-    `typedef uint16_t Quality` (`third_party/include/iec61850_common.h:326`), wire-encoded as
-    a 4-byte bitstring `MmsValue`, decoded via `Quality_getValidity`/`Quality_isFlagSet`
-    (same header). Whether quality shows up at all depends on whether the SCL dataset
-    includes a `q` entry alongside `stVal` for that point — today's `ds1` fixture dataset
-    (see `integration_tests/ied_simulator/src/sim_types.h`) does not. Getting quality into the
-    pipeline is an **SCL/dataset change** (add the `q` DA to the relevant dataset), not just a
-    code change; the resulting `q` value arrives as its own `entries[i]`, paired with its
-    sibling `stVal` entry by position (report) or by position + the GOOSE index→name mapping
-    above (GOOSE).
-  - **timestamp** — both structs give one shared, record-level timestamp
+  - **reference** — now populated on both transports via `IedModel_getDataSetMemberReferences`
+    (`src/features/ied_model/service/ied_model_api.h`), which replays the dataset's own
+    already-parsed FCDA order back out as an ordered list of member-reference strings — purely
+    local, never over-the-wire (see Hard Rules). MMS report: `entries[i].reference` prefers the
+    server's own `ClientReport_getDataReference` when the RCB's `OptFlds` has `DataRef` enabled,
+    falling back to the SCL-derived reference (cached once per RCB at `MmsReportClient_start`,
+    in `MmsReportClientHandle.memberRefCache`) when the server omits it — `brcbMain` has no
+    `DataRef`, so it exercises the fallback path in practice. GOOSE: **always** uses the
+    SCL-derived reference (cached once per target in `GooseSubscriberTargetEntry.memberReferences`
+    at `GooseSubscription_start`) — GOOSE never carries a reference on the wire, no server-truth
+    branch exists. Only `NULL` if the target's `datasetReference` doesn't resolve or the entry
+    index is out of range of the dataset's member count.
+  - **quality** — still **not a field on either struct**, and that's inherent: in IEC 61850,
+    quality (`q`) is a sibling Data Attribute of `stVal`, not embedded in the value itself.
+    `Quality` is `typedef uint16_t Quality` (`third_party/include/iec61850_common.h:326`),
+    wire-encoded as a 4-byte bitstring `MmsValue`, decoded via
+    `Quality_getValidity`/`Quality_isFlagSet` (same header). Whether quality shows up at all
+    depends on whether the SCL dataset includes a `q` entry alongside `stVal` for that point.
+    `ds1` (see `integration_tests/ied_simulator/src/sim_server.c`) now does — proven end-to-end
+    in both `integration_tests/mms_report_client/` and `integration_tests/goose_subscriber/` —
+    but this is a per-dataset SCL authoring fact, not a code guarantee: any other IED/dataset
+    that doesn't put `q` in its FCDA list simply won't carry a quality entry, and nothing in
+    `mms_report_client`/`goose_subscriber` fabricates one. When present, `q` arrives as its own
+    `entries[i]`, reference-labeled exactly like any other member (e.g. `...Ind1$q` next to
+    `...Ind1$stVal`) — nothing yet pairs a value with its sibling quality into one combined data
+    point; that pairing (matching by common DO/LN prefix) is `ipc_dispatcher`'s job, not built.
+  - **timestamp** — both structs still give one shared, record-level timestamp
     (`record->timestampMs`), not a per-entry timestamp. MMS report: only if `hasTimestamp`
     (driven by the RCB's `OptFlds.TimeStamp`). GOOSE: the frame's own publish time, always
     present. Per-DA `t` attributes, if ever needed per-value, would again show up as their own
-    dataset entry, not a struct field.
+    dataset entry, not a struct field. Untouched by the reference-labeling work above.
 
 ## Interaction Style
 - No fluff, no filler. Peer-to-peer technical register.
