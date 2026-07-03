@@ -14,7 +14,9 @@ freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
 
 static MmsReportEntry*
 buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
-        const char* const* dataReferences, int entryCount) {
+        const char* const* dataReferences,
+        const char* const* fallbackReferences, int fallbackCount,
+        int entryCount) {
     if (entryCount <= 0) return NULL;
 
     MmsReportEntry* entries = calloc((size_t) entryCount, sizeof(MmsReportEntry));
@@ -25,9 +27,9 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
             MmsValue* element = MmsValue_getElement((MmsValue*) dataSetValues, i);
             entries[i].value = element ? MmsValue_clone(element) : NULL;
         }
-        if (dataReferences && dataReferences[i]) {
-            entries[i].reference = MmsReportClientUtils_safeStringDup(dataReferences[i]);
-        }
+        const char* ref = (dataReferences && dataReferences[i]) ? dataReferences[i]
+                : (fallbackReferences && i < fallbackCount) ? fallbackReferences[i] : NULL;
+        if (ref) entries[i].reference = MmsReportClientUtils_safeStringDup(ref);
         entries[i].reason = reasons ? reasons[i] : IEC61850_REASON_UNKNOWN;
     }
 
@@ -45,6 +47,7 @@ MmsReportClientUseCases_buildReportRecord(
         const MmsValue* dataSetValues,
         const ReasonForInclusion* reasons,
         const char* const* dataReferences,
+        const char* const* fallbackReferences, int fallbackCount,
         int entryCount) {
     MmsReportRecord* record = calloc(1, sizeof(MmsReportRecord));
     if (!record) return NULL;
@@ -62,7 +65,8 @@ MmsReportClientUseCases_buildReportRecord(
     record->hasSeqNum = hasSeqNum;
     record->seqNum = seqNum;
 
-    record->entries = buildEntries(dataSetValues, reasons, dataReferences, entryCount);
+    record->entries = buildEntries(dataSetValues, reasons, dataReferences, fallbackReferences, fallbackCount,
+            entryCount);
     record->entryCount = record->entries ? entryCount : 0;
 
     return record;
@@ -86,4 +90,14 @@ MmsReportClientUseCases_computeNextBackoffDelay(uint32_t currentDelayMs, uint32_
     uint64_t doubled = (uint64_t) currentDelayMs * 2;
     if (doubled > maxMs) return maxMs;
     return (uint32_t) doubled;
+}
+
+void
+MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
+    if (!entry) return;
+    MmsReportClientMemberRefCacheEntry* e = (MmsReportClientMemberRefCacheEntry*) entry;
+    for (int i = 0; i < e->memberCount; i++) free(e->memberReferences[i]);
+    free(e->memberReferences);
+    free(e->rcbReference);
+    free(e);
 }

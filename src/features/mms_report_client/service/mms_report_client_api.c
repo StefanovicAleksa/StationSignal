@@ -75,6 +75,62 @@ MmsReportClient_setRcbStatusCallback(MmsReportClientHandle client,
     client->rcbStatusCallbackParam = userParam;
 }
 
+/*
+ * One-time, local resolution of each target's dataset member references
+ * (never over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery"
+ * rule), used as a fallback for MmsReportEntry.reference when the server's
+ * RCB doesn't have DataRef in its OptFlds. Built once at start; never rebuilt
+ * on reconnect (same lifetime as client->targets).
+ */
+static LinkedList
+buildMemberRefCache(MmsReportClientHandle client) {
+    LinkedList cache = LinkedList_create();
+    if (!cache) return NULL;
+
+    LinkedList element = LinkedList_getNext(client->targets);
+    while (element) {
+        ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+        if (target->datasetReference) {
+            LinkedList refs = IedModel_getDataSetMemberReferences(client->iedModel, target->datasetReference);
+            int count = refs ? LinkedList_size(refs) : 0;
+            if (count > 0) {
+                char** array = calloc((size_t) count, sizeof(char*));
+                if (array) {
+                    int i = 0;
+                    LinkedList refElement = LinkedList_getNext(refs);
+                    while (refElement) {
+                        array[i++] = (char*) LinkedList_getData(refElement);
+                        refElement = LinkedList_getNext(refElement);
+                    }
+                    /* ownership of each string transferred into array[];
+                     * LinkedList_destroyStatic (NOT _destroy/_destroyDeep)
+                     * discards only the list shell - same pattern
+                     * goose_subscriber_api.c already uses for its own targets list. */
+                    LinkedList_destroyStatic(refs);
+
+                    MmsReportClientMemberRefCacheEntry* cacheEntry =
+                            malloc(sizeof(MmsReportClientMemberRefCacheEntry));
+                    if (cacheEntry) {
+                        cacheEntry->rcbReference = MmsReportClientUtils_safeStringDup(target->objectReference);
+                        cacheEntry->memberReferences = array;
+                        cacheEntry->memberCount = count;
+                        LinkedList_add(cache, cacheEntry);
+                    } else {
+                        for (int j = 0; j < count; j++) free(array[j]);
+                        free(array);
+                    }
+                } else {
+                    LinkedList_destroyDeep(refs, free);
+                }
+            } else if (refs) {
+                LinkedList_destroyDeep(refs, free);
+            }
+        }
+        element = LinkedList_getNext(element);
+    }
+    return cache;
+}
+
 MmsReportClientError
 MmsReportClient_start(MmsReportClientHandle client) {
     if (!client) return MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT;
@@ -87,6 +143,8 @@ MmsReportClient_start(MmsReportClientHandle client) {
         client->targets = NULL;
         return MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT;
     }
+
+    client->memberRefCache = buildMemberRefCache(client);
 
     return MmsReportClientConnection_start(client);
 }
@@ -106,6 +164,9 @@ MmsReportClient_destroy(MmsReportClientHandle client) {
 
     if (client->targets) {
         LinkedList_destroyDeep(client->targets, IedModel_destroyReportControlBlockTarget);
+    }
+    if (client->memberRefCache) {
+        LinkedList_destroyDeep(client->memberRefCache, MmsReportClientUseCases_destroyMemberRefCacheEntry);
     }
     free(client->host);
     free(client);

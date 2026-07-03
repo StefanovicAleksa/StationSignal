@@ -43,6 +43,18 @@ typedef struct {
 } MmsReportEntry;
 
 /*
+ * Locally-resolved fallback for MmsReportEntry.reference, cached once per RCB
+ * at MmsReportClient_start time from ied_model's SCL-derived dataset
+ * (IedModel_getDataSetMemberReferences) - never re-resolved per report. Used
+ * only when the server's report omits a data-reference for a given index.
+ */
+typedef struct {
+    char* rcbReference;      /* owned copy, matches ReportControlBlockTarget.objectReference - lookup key */
+    char** memberReferences; /* owned array of owned strings, index i matches MmsReportEntry[i] for this RCB */
+    int memberCount;
+} MmsReportClientMemberRefCacheEntry;
+
+/*
  * A single fully-decoded, fully-owned report. Delivered to the caller's
  * MmsReportClientCallback; the caller owns it after the callback returns and
  * must free it with MmsReportClient_destroyReportRecord.
@@ -95,6 +107,11 @@ struct sMmsReportClientHandle {
     LinkedList targets;        /* owned: ReportControlBlockTarget* list, our own
                                   copy from IedModel_getReportSubscriptionTargets,
                                   cached for re-enable on reconnect */
+    LinkedList memberRefCache; /* owned: MmsReportClientMemberRefCacheEntry* list,
+                                   built once in MmsReportClient_start from ied_model's
+                                   SCL dataset, one entry per target with a resolvable
+                                   datasetReference - same lifetime as `targets`
+                                   (survives reconnects, not rebuilt per-report) */
 
     MmsReportClientCallback reportCallback;
     void* reportCallbackParam;

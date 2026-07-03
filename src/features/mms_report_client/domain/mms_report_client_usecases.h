@@ -32,12 +32,19 @@ MmsReportClientUseCases_buildReportRecord(
         const MmsValue* dataSetValues,
         const ReasonForInclusion* reasons,
         const char* const* dataReferences,
+        const char* const* fallbackReferences, int fallbackCount,
         int entryCount);
 
 /* Frees a record built by MmsReportClientUseCases_buildReportRecord, including
  * every entry's cloned value/reference and the entries array. NULL-safe. */
 void
 MmsReportClientUseCases_freeReportRecord(MmsReportRecord* record);
+
+/* LinkedListValueDeleteFunction-compatible: frees an
+ * MmsReportClientMemberRefCacheEntry (rcbReference, each memberReferences[i],
+ * the array, then the struct itself). NULL-safe. */
+void
+MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry);
 
 /*
  * Pure doubling-with-cap backoff calculation. currentDelayMs == 0 means "no

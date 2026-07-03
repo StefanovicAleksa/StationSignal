@@ -19,7 +19,7 @@ test_buildReportRecord_copiesScalarFields(void) {
             false, NULL,
             true, 1700000000000ULL,
             true, 7,
-            NULL, NULL, NULL, 0);
+            NULL, NULL, NULL, NULL, 0, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Breaker1CB1/LLN0.BR.brcbMain", record->rcbReference);
@@ -51,7 +51,7 @@ test_buildReportRecord_deepCopiesEntries_notAliased(void) {
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
-            dataSetValues, reasons, dataReferences, 2);
+            dataSetValues, reasons, dataReferences, NULL, 0, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(2, record->entryCount);
@@ -81,13 +81,80 @@ test_buildReportRecord_deepCopiesEntries_notAliased(void) {
 }
 
 void
+test_buildReportRecord_prefersServerDataReference_overFallback(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    const char* dataReferences[1] = { "Server/Supplied.reference" };
+    const char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, NULL, dataReferences, fallbackReferences, 1, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_STRING("Server/Supplied.reference", record->entries[0].reference);
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_usesFallbackReference_whenServerDataReferenceMissing(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    char fallbackBuf[] = "Fallback/Resolved.reference";
+    const char* fallbackReferences[1] = { fallbackBuf };
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, NULL, NULL, fallbackReferences, 1, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_STRING("Fallback/Resolved.reference", record->entries[0].reference);
+
+    /* Mutate the source buffer after the call - proves the fallback string is
+     * deep-copied too, same aliasing guarantee as server-supplied references. */
+    fallbackBuf[0] = 'X';
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Fallback/Resolved.reference", record->entries[0].reference,
+            "fallback reference must be a deep copy, unaffected by later mutation of the source buffer");
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_fallbackOutOfRange_leavesReferenceNull(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
+
+    const char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, NULL, NULL, fallbackReferences, 1, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_STRING("Fallback/Resolved.reference", record->entries[0].reference);
+    TEST_ASSERT_NULL(record->entries[1].reference);
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
 test_buildReportRecord_copiesEntryId_whenPresent(void) {
     MmsValue* entryId = MmsValue_newOctetString(8, 8);
 
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             true, entryId, false, 0, false, 0,
-            NULL, NULL, NULL, 0);
+            NULL, NULL, NULL, NULL, 0, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_TRUE(record->hasEntryId);
@@ -141,6 +208,9 @@ main(void) {
 
     RUN_TEST(test_buildReportRecord_copiesScalarFields);
     RUN_TEST(test_buildReportRecord_deepCopiesEntries_notAliased);
+    RUN_TEST(test_buildReportRecord_prefersServerDataReference_overFallback);
+    RUN_TEST(test_buildReportRecord_usesFallbackReference_whenServerDataReferenceMissing);
+    RUN_TEST(test_buildReportRecord_fallbackOutOfRange_leavesReferenceNull);
     RUN_TEST(test_buildReportRecord_copiesEntryId_whenPresent);
     RUN_TEST(test_freeReportRecord_doesNotCrash_onNull);
 

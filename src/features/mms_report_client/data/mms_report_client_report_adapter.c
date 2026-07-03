@@ -20,6 +20,22 @@ lookupBuffered(MmsReportClientHandle handle, const char* rcbReference) {
     return false;
 }
 
+/* Locally-resolved fallback for entries whose server-side report omitted a
+ * data-reference - see MmsReportClientMemberRefCacheEntry's doc comment. */
+static const MmsReportClientMemberRefCacheEntry*
+lookupMemberRefCache(MmsReportClientHandle handle, const char* rcbReference) {
+    if (!handle->memberRefCache || !rcbReference) return NULL;
+
+    LinkedList element = LinkedList_getNext(handle->memberRefCache);
+    while (element) {
+        MmsReportClientMemberRefCacheEntry* entry =
+                (MmsReportClientMemberRefCacheEntry*) LinkedList_getData(element);
+        if (entry->rcbReference && strcmp(entry->rcbReference, rcbReference) == 0) return entry;
+        element = LinkedList_getNext(element);
+    }
+    return NULL;
+}
+
 void
 MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     MmsReportClientHandle handle = (MmsReportClientHandle) parameter;
@@ -28,6 +44,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     char* rcbReference = ClientReport_getRcbReference(report);
     char* rptId = ClientReport_getRptId(report);
     bool buffered = lookupBuffered(handle, rcbReference);
+    const MmsReportClientMemberRefCacheEntry* fallback = lookupMemberRefCache(handle, rcbReference);
 
     MmsValue* dataSetValues = ClientReport_getDataSetValues(report);
     int entryCount = dataSetValues ? MmsValue_getArraySize(dataSetValues) : 0;
@@ -55,7 +72,10 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
             entryId != NULL, entryId,
             hasTimestamp, hasTimestamp ? ClientReport_getTimestamp(report) : 0,
             hasSeqNum, hasSeqNum ? ClientReport_getSeqNum(report) : 0,
-            dataSetValues, reasons, dataReferences, entryCount);
+            dataSetValues, reasons, dataReferences,
+            fallback ? (const char* const*) fallback->memberReferences : NULL,
+            fallback ? fallback->memberCount : 0,
+            entryCount);
 
     free(reasons);
     free(dataReferences);
