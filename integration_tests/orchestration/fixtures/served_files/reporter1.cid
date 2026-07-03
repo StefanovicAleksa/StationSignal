@@ -26,6 +26,7 @@
           <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
             <DataSet name="ds1" desc="Indication dataset">
               <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="q" />
             </DataSet>
             <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
                 intgPd="60000" bufTime="0">

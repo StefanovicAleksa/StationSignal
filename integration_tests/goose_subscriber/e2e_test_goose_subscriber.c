@@ -46,6 +46,8 @@ static volatile bool sawValidStatus;
 static volatile bool sawTrueValue;
 static char lastGoCbRef[256];
 static int lastEntryCount;
+static char lastEntry0Reference[256];
+static char lastEntry1Reference[256];
 
 static void
 onStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status, GooseParseError lastParseError) {
@@ -62,6 +64,17 @@ onRecord(void* userParam, const GooseSubscriberRecord* record) {
     strncpy(lastGoCbRef, record->goCbRef ? record->goCbRef : "", sizeof(lastGoCbRef) - 1);
     lastGoCbRef[sizeof(lastGoCbRef) - 1] = '\0';
     lastEntryCount = record->entryCount;
+
+    if (record->entryCount > 0) {
+        strncpy(lastEntry0Reference, record->entries[0].reference ? record->entries[0].reference : "",
+                sizeof(lastEntry0Reference) - 1);
+        lastEntry0Reference[sizeof(lastEntry0Reference) - 1] = '\0';
+    }
+    if (record->entryCount > 1) {
+        strncpy(lastEntry1Reference, record->entries[1].reference ? record->entries[1].reference : "",
+                sizeof(lastEntry1Reference) - 1);
+        lastEntry1Reference[sizeof(lastEntry1Reference) - 1] = '\0';
+    }
 
     if (record->entryCount > 0 && record->entries[0].value
             && MmsValue_getType(record->entries[0].value) == MMS_BOOLEAN
@@ -88,6 +101,8 @@ setUp(void) {
     sawTrueValue = false;
     lastEntryCount = 0;
     lastGoCbRef[0] = '\0';
+    lastEntry0Reference[0] = '\0';
+    lastEntry1Reference[0] = '\0';
 }
 
 void
@@ -124,7 +139,14 @@ test_dataChangeOnServer_triggersGooseRecordWithNewValue(void) {
             "expected a GOOSE record carrying the new value after flipping GGIO1.Ind1.stVal");
 
     TEST_ASSERT_EQUAL_STRING(EXPECTED_GOCB_REF, lastGoCbRef);
-    TEST_ASSERT_EQUAL_INT(1, lastEntryCount);
+    TEST_ASSERT_EQUAL_INT(2, lastEntryCount);
+
+    /* GOOSE never carries a server-supplied reference - these are always
+     * resolved via the new IedModel_getDataSetMemberReferences-backed path,
+     * the primary end-to-end proof point for goose_subscriber's always-on
+     * reference labeling. */
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", lastEntry0Reference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$q", lastEntry1Reference);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&sawValidStatus),
             "expected the liveness thread to observe a VALID GOOSE feed at some point during the run");

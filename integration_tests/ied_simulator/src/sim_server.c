@@ -41,6 +41,7 @@ SimServer_create(void) {
      * this entry fail server-side resolution, which in turn fails the whole
      * dataset's access check and RptEna with DATA_ACCESS_ERROR_OBJECT_VALUE_INVALID. */
     DataSetEntry_create(dataSet, "GGIO1$ST$Ind1$stVal", -1, NULL);
+    DataSetEntry_create(dataSet, "GGIO1$ST$Ind1$q", -1, NULL);
 
     /* dataSetName left NULL (no server-side default dataset) - the client
      * (mms_report_client) always explicitly sets DatSet alongside RptEna on

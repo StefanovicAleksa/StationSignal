@@ -22,7 +22,7 @@
  * Fixture/model shape (kept in sync by hand - see the cross-referencing
  * comment in sim_types.h): IED "Reporter1", LDevice "LD1", one buffered RCB
  * ("brcbMain", trgOps=dchg+qchg+gi) over dataset "ds1" containing
- * GGIO1.Ind1.stVal.
+ * GGIO1.Ind1.stVal followed by GGIO1.Ind1.q.
  */
 
 #define FIXTURE_PATH "fixtures/reporter1.cid"
@@ -36,6 +36,8 @@ static char lastRcbReference[256];
 static int lastEntryCount;
 static bool lastEntryValue;
 static ReasonForInclusion lastReason;
+static char lastEntry0Reference[256];
+static char lastEntry1Reference[256];
 
 static void
 onRcbStatus(void* userParam, const char* rcbReference, bool enabled, IedClientError lastError) {
@@ -55,6 +57,16 @@ onReport(void* userParam, const MmsReportRecord* record) {
     if (record->entryCount > 0 && record->entries[0].value) {
         lastEntryValue = MmsValue_getBoolean(record->entries[0].value);
         lastReason = record->entries[0].reason;
+    }
+    if (record->entryCount > 0) {
+        strncpy(lastEntry0Reference, record->entries[0].reference ? record->entries[0].reference : "",
+                sizeof(lastEntry0Reference) - 1);
+        lastEntry0Reference[sizeof(lastEntry0Reference) - 1] = '\0';
+    }
+    if (record->entryCount > 1) {
+        strncpy(lastEntry1Reference, record->entries[1].reference ? record->entries[1].reference : "",
+                sizeof(lastEntry1Reference) - 1);
+        lastEntry1Reference[sizeof(lastEntry1Reference) - 1] = '\0';
     }
     reportReceived = true;
 
@@ -77,6 +89,8 @@ setUp(void) {
     reportReceived = false;
     lastEntryCount = 0;
     lastRcbReference[0] = '\0';
+    lastEntry0Reference[0] = '\0';
+    lastEntry1Reference[0] = '\0';
 }
 
 void
@@ -121,10 +135,17 @@ test_dataChangeOnServer_triggersReportWithNewValue(void) {
             "expected a report after flipping GGIO1.Ind1.stVal");
 
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0.BR.brcbMain", lastRcbReference);
-    TEST_ASSERT_EQUAL_INT(1, lastEntryCount);
+    TEST_ASSERT_EQUAL_INT(2, lastEntryCount);
     TEST_ASSERT_TRUE(lastEntryValue);
     TEST_ASSERT_TRUE_MESSAGE((lastReason & IEC61850_REASON_DATA_CHANGE) != 0,
             "expected the report's reason-for-inclusion to include data-change");
+
+    /* brcbMain's OptFlds has no DataRef (see sim_server.c) - these are the
+     * locally-resolved fallback references, proving the new
+     * IedModel_getDataSetMemberReferences-backed path end-to-end against a
+     * real IedModelHandle/SCL/MmsReportClient_start. */
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", lastEntry0Reference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$q", lastEntry1Reference);
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);

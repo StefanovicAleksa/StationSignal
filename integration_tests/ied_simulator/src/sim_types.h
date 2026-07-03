@@ -24,7 +24,8 @@
  * ("brcbMain", trgOps=dchg+qchg+gi) AND one GSEControlBlock ("gcbInd",
  * appID="1000") over the same dataset ("ds1") containing GGIO1.Ind1.stVal
  * (SPS - the read/reported/published indication point flipped by
- * SimServer_setIndication) - one flip drives both the mms_report_client and
+ * SimServer_setIndication) followed by GGIO1.Ind1.q (its sibling Quality
+ * attribute) - one flip drives both the mms_report_client and
  * goose_subscriber E2E tests. gcbInd's <Communication>/<GSE><Address> (VLAN
  * 10, priority 4, APPID 0x1000, multicast dst MAC 01-0c-cd-01-00-01) is
  * mirrored into integration_tests/mms_report_client/fixtures/reporter1.cid
