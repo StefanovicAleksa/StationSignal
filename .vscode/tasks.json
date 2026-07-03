@@ -1,0 +1,65 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "Build Backend Engine",
+            "command": "/usr/bin/gcc",
+            "args": [
+                "-g",
+                "${workspaceFolder}/src/main.c",
+                "-o",
+                "${workspaceFolder}/build_out",
+                "-I${workspaceFolder}/src",
+                "-idirafter${workspaceFolder}/third_party/include",
+                "-L${workspaceFolder}/third_party/lib",
+                "-liec61850",
+                "-lpcap",
+                "-lpthread"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "type": "shell",
+            "label": "Build ied_model Smoke Test",
+            "command": "/usr/bin/gcc",
+            "args": [
+                "-g",
+                "-Wall",
+                "${workspaceFolder}/tools/smoke_tests/ied_model_test.c",
+                "${workspaceFolder}/src/features/ied_model/service/ied_model_api.c",
+                "${workspaceFolder}/src/features/ied_model/domain/ied_model_usecases.c",
+                "${workspaceFolder}/src/features/ied_model/data/ied_model_scl_loader.c",
+                "${workspaceFolder}/src/features/ied_model/utils/ied_model_utils.c",
+                "-o",
+                "${workspaceFolder}/tools/smoke_tests/ied_model_test",
+                "-I${workspaceFolder}/src",
+                "-idirafter${workspaceFolder}/third_party/include",
+                "-L${workspaceFolder}/third_party/lib",
+                "-liec61850",
+                "-lhal",
+                "-lmxml",
+                "-lpthread"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        }
+    ]
+}

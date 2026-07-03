@@ -1,0 +1,253 @@
+# IEC 61850 GOOSE/MMS Reporter — Backend Daemon
+
+## Purpose
+Backend daemon that reports IEC 61850 traffic: sniffs GOOSE messages off the wire and
+subscribes to MMS report control blocks (BRCB), normalizes both into JSON, and forwards
+them to the consuming API layer. This file governs this repo (root = the daemon itself).
+
+## Commands
+- Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
+  built manually (same throwaway-linkage-probe convention as the smoke tests below) by
+  compiling it together with every `.c` file under `src/orchestration/` and all four
+  `src/features/<feature>/` directories (`service`/`data`/`domain`/`utils`), e.g.:
+  `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/orchestration/*/*.c
+  src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib -liec61850 -lhal -lmxml
+  -lpthread && sudo /tmp/goose_rep_daemon [host] [mmsPort] [iedName] [interface]` — this is a
+  manual stopgap, not a substitute for a real build system; don't invent or guess a permanent
+  build command, ask before assuming one.
+- Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
+- Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
+- Run unit tests: `cd tests && make run` — strictly unit, no file I/O beyond two
+  self-contained temp-file cases (`ied_model`, `orchestration`), fast. `tests/Makefile` does
+  **not** auto-discover — it's an explicit `TESTS` list plus one hand-written build rule per
+  binary; adding a new feature's unit tests means editing this Makefile, not just dropping
+  files in a new `tests/<feature>/` directory.
+- Run the `ied_model` E2E test: `cd integration_tests/ied_model && make run` — loads a
+  real fixture (`fixtures/breaker1.cid`) through the real service API.
+- Run the `scl_bootstrap` E2E test: `cd integration_tests/scl_bootstrap && make run` — runs a
+  real `ied_simulator` "Reporter1" IED in-process with its MMS file services pointed at a real
+  fixture directory, TCP-probes and fetches its SCL file over a real MMS association (plus
+  ACSE-password-auth-retry and negative-path cases). No `sudo` needed — plain TCP/MMS only.
+- Run the `mms_report_client` E2E test: `cd integration_tests/mms_report_client && make run`
+  — runs a real `ied_simulator` "Reporter1" IED in-process, connects the real service, flips
+  a value server-side, asserts a real report arrives.
+- Run the `goose_subscriber` E2E test: `cd integration_tests/goose_subscriber && sudo make run`
+  — runs the same "Reporter1" IED in-process publishing real GOOSE on `lo`, connects the real
+  service, flips a value server-side, asserts a real GOOSE-carried record and a `VALID`
+  liveness transition both arrive. **Needs `sudo`** — the only test in this repo that opens a
+  raw Ethernet socket (every other test/E2E path is plain TCP/loopback MMS, no elevated
+  privilege needed).
+- Run the `orchestration` E2E test: `cd integration_tests/orchestration && sudo make run` —
+  runs the same "Reporter1" IED in-process (MMS file services + buffered reports + GOOSE all
+  at once) and drives the real, full `scl_bootstrap -> ied_model -> mms_report_client ->
+  goose_subscriber` sequence against it over loopback, asserting both a real report and a real
+  GOOSE record arrive. **Needs `sudo`** — inherits the GOOSE-subscriber step's raw-socket
+  requirement.
+- Raw-socket loopback smoke test (build manually, no Makefile — throwaway linkage/behavior
+  probe): `gcc -g -Wall -Isrc -idirafter third_party/include tools/smoke_tests/goose_loopback_smoke_test.c
+  -o /tmp/goose_loopback_smoke_test -Lthird_party/lib -liec61850 -lhal -lpthread && sudo
+  /tmp/goose_loopback_smoke_test` — proves a bare `GoosePublisher`/`GooseReceiver` pair
+  round-trips a real GOOSE frame over `lo` before trusting that assumption in the E2E test above.
+- Run via `sudo` once built — raw socket access required for GOOSE sniffing.
+
+## Current State (update as this evolves)
+- `src/main.c` now wires the real thing: `OrchestrationConfig_defaults` -> `Orchestration_create`
+  -> registers `printf`-based passthrough logging callbacks -> `Orchestration_run` (host/port/
+  IED name/interface from argv, hardcoded defaults matching `integration_tests/ied_simulator`'s
+  "Reporter1" fixture) -> blocks on `SIGINT`/`SIGTERM` -> `Orchestration_destroy` for clean
+  teardown. All four `src/features/` (`scl_bootstrap/`, `ied_model/`, `mms_report_client/`,
+  `goose_subscriber/`) plus `src/orchestration/` are implemented (see Architecture below);
+  `ipc_dispatcher` is not started yet.
+- `ied_model`'s `IedModel_getGooseSubscriptionTargets` returns `GooseSubscriptionTarget*`
+  (object reference plus optional VLAN/APPID/dst-MAC parsed from SCL's `<GSE><Address>`),
+  not a bare `char*` — this was a breaking change made when `goose_subscriber` needed the
+  addressing data to configure `GooseSubscriber_setDstMac`/`setAppId` filters; there were no
+  other consumers at the time.
+- `integration_tests/ied_simulator/` is implemented: a small "Reporter1" fake IED
+  (`src/sim_types.h`/`sim_server.c`) built directly via libiec61850's dynamic model API
+  (not genmodel.jar codegen - see `scripts/generate_model.sh`'s comment for why, and where
+  genmodel.jar actually lives in the sibling checkout if a larger simulated device ever
+  needs it). Zero includes from `src/` - fully decoupled from prod code. `src/main.c` there
+  is a standalone manual-testing binary (`cd integration_tests/ied_simulator && make run`,
+  periodically flips its indication point); `src/sim_server.c` is also linked directly into
+  `integration_tests/mms_report_client/e2e_test_mms_report_client.c` and
+  `integration_tests/goose_subscriber/e2e_test_goose_subscriber.c` (client/subscriber and
+  server run in the same test process over loopback/`lo` - libiec61850 supports this fine).
+  It publishes both a buffered report (`brcbMain`) and GOOSE (`gcbInd`, on `lo`) over the same
+  dataset (`ds1`, `GGIO1.Ind1.stVal`) — one `SimServer_setIndication` flip drives both E2E tests.
+- **Two non-obvious libiec61850 dynamic-model gotchas hit while building the simulator**
+  (worth knowing before touching `sim_server.c` or writing another dynamic-model-based
+  server): (1) `DataSetEntry_create`'s variable reference is `"<lnName>$<fc>$<doName>$<daName>"`
+  with **no** LD-wire-name prefix (confirmed against `libiec61850/examples/server_example_dynamic/`);
+  including one makes the entry silently fail server-side resolution, which fails the whole
+  dataset's access check and `RptEna` with `DATA_ACCESS_ERROR_OBJECT_VALUE_INVALID`.
+  (2) `DataSet_create`'s `name` argument already gets `"<lnName>$"` prepended internally
+  (`dynamic_model.c`) - pass the bare local name (`"ds1"`), not `"LLN0$ds1"`, or it double-prefixes
+  and fails `IedModel_lookupDataSet`'s server-side match against a client-supplied `DatSet`
+  reference (`DATA_ACCESS_ERROR_TEMPORARILY_UNAVAILABLE`).
+- `third_party/lib` has `libiec61850.a`, `libhal.a`, `libmxml.a`, and `libunity.a` already built and vendored — do not rebuild these from source, link against them directly. `libunity.a` is test-only (Unity test framework) — never linked into the daemon binary itself, only into test binaries under `tests/`/`integration_tests/`.
+- `third_party/include` has the full libiec61850 header set flattened in already (goose_receiver.h, goose_subscriber.h, mms_client_connection.h, reporting.h, etc.), plus `mxml.h` and `unity.h`/`unity_internals.h` — read these instead of guessing function signatures.
+- `third_party/include/stdbool.h` is a broken vendored shim (`#define bool int`, no `true`/`false` — meant only for MSVC), no include guard, that can shadow the real system `<stdbool.h>`. Real builds use `-idirafter third_party/include` (never plain `-I`) so gcc prefers the real header, but IDE tooling (VS Code's C/C++ extension) doesn't reliably honor the same ordering through `includePath` alone. Don't hand-edit the vendored file — instead, any of our own code that uses `bool`/`true`/`false` should `#include "stdbool_compat.h"` (at `src/stdbool_compat.h`) instead of `<stdbool.h>` directly; it self-heals regardless of which `stdbool.h` a given toolchain resolves.
+- `libmxml.a`/`mxml.h` (Mini-XML v3.3.1, Apache-2.0) is vendored for SCL (`.icd`/`.cid`/`.scd`) parsing — no XML/SCL parser exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/mxml` (not committed here — only the build artifacts are vendored, matching the libiec61850 pattern). Smoke test proving linkage + real SCL parsing: `tools/smoke_tests/mxml_smoke_test.c`.
+- No libpcap/Npcap present in `third_party/` — that's a system dependency, link against the system lib, don't vendor it.
+- Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves.
+- `build_out` at repo root is currently a stray compiled binary from a manual verification build, not an empty directory — this line is inaccurate until cleaned up or the doc is corrected; don't rely on it being a directory.
+- **Include convention**: one project-wide include root, `-Isrc`, for all our own code — every intra-project `#include` is fully qualified from `src/` (e.g. `#include "features/ied_model/service/ied_model_api.h"`), never a bare filename or `../` relative path. Vendored third-party headers stay bare filenames against `-idirafter third_party/include` (see above). `.vscode/c_cpp_properties.json`/`tasks.json` are kept in sync with this — update both if the include strategy ever changes.
+
+## Testing
+- `tests/<feature>/test_*.c` — strict unit tests (Unity framework), one file per source
+  file (e.g. `tests/ied_model/test_ied_model_api.c` tests `ied_model_api.c`). Fast,
+  hermetic: fixtures are tiny in-memory models/mxml nodes built directly via the
+  dynamic model API, or handles constructed directly (`struct sIedModelHandle` is
+  visible to test code) rather than mocked. `tests/Makefile` is an explicit `TESTS` list
+  plus one hand-written build rule per binary — it does **not** auto-discover, so a new
+  feature's tests need a Makefile edit, not just new files. A feature's data-layer/loader
+  code is deliberately *not* unit-tested here if its correctness is better proven
+  end-to-end (see `ied_model`) — don't duplicate that coverage, extend the E2E test
+  instead. Two self-contained temp-file cases exist (`tests/ied_model/test_ied_model_api.c`,
+  `tests/orchestration/test_orchestration_staging.c`) — the only file I/O permitted here.
+- `integration_tests/<feature>/` — E2E tests of a real feature's public API against a
+  real, self-authored fixture file (e.g. `integration_tests/ied_model/fixtures/breaker1.cid`
+  + `e2e_test_ied_model.c`), also Unity-based (`-lunity` against the vendored
+  `third_party/lib/libunity.a`). Unlike `ied_simulator/` (below), these intentionally
+  link against real `src/` code — the decoupling rule is specifically about the IED
+  simulator acting as a fake external device, not about integration tests of our own
+  features.
+
+## Architecture — Feature-First
+- Repo root is the daemon. `integration_tests/ied_simulator/` holds IED simulators,
+  fully decoupled from prod source; other `integration_tests/<feature>/` dirs hold
+  E2E tests of real features (see Testing above) and do link against `src/`.
+- Inside `src/features/<feature_name>/` (to be created as features are built):
+  - `*_types.h` — domain entities, enums, opaque pointers (encapsulation boundary)
+  - `*_api.h` — public service-layer API (orchestrator entry points)
+  - `*.c` — implementation, third-party integration, static helpers
+  - For features with real business logic worth isolating from third-party integration
+    (see `ied_model/`), the above nests inside `domain/`/`data/`/`utils/`/`service/`
+    subfolders: `domain/` holds `*_types.h` + pure logic with no third-party includes,
+    `data/` holds third-party/file/library integration, `utils/` holds shared helpers,
+    `service/*_api.h` is still the one public header other features may include. Simple
+    features can skip the subfolders and just use the three files directly.
+- `src/main.c` wires dependencies only — no business logic.
+- Expected features: `scl_bootstrap/`, `ied_model/`, `goose_subscriber/`, `mms_report_client/`,
+  `ipc_dispatcher/` — don't invent unrelated features. `src/orchestration/` is a separate,
+  top-level sibling of `src/features/` (not itself in this feature list) that sequences these
+  features together — see its own bullet below.
+- `scl_bootstrap/` (implemented) — one-shot, synchronous bootstrap/probe utility: given a
+  caller-supplied list of candidate host addresses, TCP-probes each for MMS on a given port,
+  and for each one found, browses its file directory and fetches one SCL file (`.icd`/`.cid`/
+  `.scd`/`.ssd`/`.sed`) over standard MMS file services, returning the raw bytes + filename.
+  Does **not** load anything into `ied_model` and does **not** enable GOOSE/MMS reporting —
+  purely discovery. Public boundary: `src/features/scl_bootstrap/service/scl_bootstrap_api.h`.
+  Unlike `mms_report_client`/`goose_subscriber`, there is no `_start`/`_stop` pair —
+  `SclBootstrap_scanAndFetch` blocks and returns the complete, authoritative result set (one
+  `SclBootstrapResult` per input host, including the ones that didn't pan out) in one call;
+  scanning a network is fundamentally a do-it-once, get-a-complete-answer operation, unlike the
+  other two features' long-running background workers. Optionally gated behind ACSE password
+  auth (one retry) via `SclBootstrapConfig.acseAuthPassword`. Proven end-to-end (including the
+  auth-retry and negative-path cases) against a real `ied_simulator` IED in
+  `integration_tests/scl_bootstrap/`.
+- `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use.
+- `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`[+`GI`], **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`.
+- `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
+  `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
+  GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's
+  addressing when present, and delivers normalized `GooseSubscriberRecord`s via a
+  caller-registered callback (JSON stringification deferred to `ipc_dispatcher`, same as
+  `mms_report_client`). Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`.
+  Public boundary: `src/features/goose_subscriber/service/goose_subscriber_api.h` — note the
+  public functions are named `GooseSubscription_*`, not `GooseSubscriber_*`, deliberately:
+  libiec61850's own `GooseSubscriber_create`/`GooseSubscriber_destroy` (`goose_subscriber.h`)
+  would otherwise collide (identical names, different signatures) with this feature's public
+  API of the same shape. GOOSE is connectionless (no MMS/TCP association), so there is no
+  reconnect-supervisor thread the way `mms_report_client` has one — instead there's a single
+  low-rate **liveness-polling** thread (see the "Hard Rules" exception below) that watches
+  `GooseSubscriber_isValid()` per target and reports `VALID`/`STALE`/`INVALID_STATE`
+  transitions via an optional status callback. Ethernet interface name is caller-supplied (no
+  interface-name parsing in SCL, matching `mms_report_client`'s host/port convention). Proven
+  end-to-end against a real `ied_simulator` IED publishing real GOOSE frames over `lo` in
+  `integration_tests/goose_subscriber/` (requires `sudo` — see Commands).
+- `src/orchestration/` (implemented) — sequences all four features above for **one IED**:
+  `scl_bootstrap` (probe a host list, fetch SCL bytes) -> stage those bytes to a temp file ->
+  `ied_model` (load from that file) -> `mms_report_client` (start against the winning
+  candidate's own host/port — not a separately supplied parameter, since bootstrap and
+  reporting target the same physical IED) -> `goose_subscriber` (start on a caller-supplied
+  interface). Public boundary: `src/orchestration/service/orchestration_api.h`. A top-level
+  sibling of `src/features/`, not itself a "feature" in the Expected-features sense above —
+  its whole job is sequencing already-implemented features, not talking to libiec61850
+  directly (zero direct third-party includes in its own domain layer). `Orchestration_run` is
+  one blocking call on the caller's thread (no orchestration-owned thread — `scl_bootstrap` is
+  already synchronous, and `mms_report_client`/`goose_subscriber`'s own `_start()` calls each
+  return synchronously once their background thread is launched). The staged temp file is
+  unlinked immediately after `ied_model` loads it (fully parsed into memory in one call, so it
+  has zero purpose afterward) rather than deferred. Fail-hard: if any stage fails, everything
+  started by earlier stages in that same `Orchestration_run` call is torn down (reverse order)
+  before returning, leaving the handle re-runnable — including tearing down an
+  already-started `mms_report_client` if `goose_subscriber` is the stage that fails, no
+  degraded report-only success mode. `Orchestration_stop`/`_destroy` tear down in the same
+  reverse order (goose -> report client -> ied_model release). Single-IED scope only; no
+  multi-IED support. `src/main.c` is now wired to this (see Current State above). Proven
+  end-to-end against a real `ied_simulator` IED (MMS file services + buffered reports + GOOSE
+  simultaneously) in `integration_tests/orchestration/` (requires `sudo` — see Commands).
+
+## The Two Workers
+- **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,
+  `goose_subscriber.h`) via `GooseReceiver_start()`'s library-managed raw-socket reception
+  thread — not libpcap/Npcap (libiec61850's own `hal_ethernet` PAL provides the raw
+  AF_PACKET-style socket directly; no separate capture library is used or vendored). Event-driven
+  on frame arrival, never polled for *reception*. Implemented in `src/features/goose_subscriber/`.
+- **MMS Report Client** — `IedConnection` (see `iec61850_client.h` for the client-side `ClientReportControlBlock`/`ClientReport`/`ReportCallbackFunction` API; `reporting.h` is the *server*-side implementation, not what a client uses), driven entirely by BRCB/URCB. Never poll for data; BRCB/URCB pushes reports on the IED's configured triggering conditions. Implemented in `src/features/mms_report_client/`.
+- Both workers normalize output to a common JSON report shape before it reaches IPC.
+
+## Hard Rules (with reasons)
+- **libiec61850 is mandatory** for all protocol handling — never hand-roll GOOSE or MMS parsing; this is a correctness and safety liability in this domain.
+- **No cyclic polling**, on either worker — polling defeats the reporter's whole reason for existing (event-driven, low-latency). **One narrow, deliberate exception**: `goose_subscriber`'s liveness thread (`data/goose_subscriber_connection.c`) polls `GooseSubscriber_isValid()` at a low rate purely to detect *staleness* (a publisher going silent) — GOOSE is connectionless and has no push signal for that (unlike `IedConnection`'s state-changed handler). It never gates or delays actual record delivery, which stays 100% event-driven via `GooseListener`; it only detects the absence of frames, which is structurally unobservable any other way in a connectionless protocol.
+- **No over-the-wire tree discovery.** Parse `.scd`/`.icd` at boot to know what to subscribe to — runtime discovery is slow and fragile against flaky IEDs.
+- **No dangling connections.** Explicit pooling, keep-alives, exponential backoff on the MMS side — IEDs drop connections under load.
+- **Don't touch `third_party/`** — it's pre-built and vendored; if headers seem to be missing something, say so, don't hand-edit.
+- **Don't add dependencies without asking** — dependency surface is deliberately minimal.
+- **If unsure of exact IEC 61850 semantics** (FC codes, data attribute types, BRCB trigger options), say so and cite the spec section or the relevant `third_party/include` header — don't guess.
+
+## IPC / Reporting Out
+- Normalize C structs (GOOSE frame, MMS report) to JSON.
+- Dispatch via Unix Domain Sockets or ZMQ to the high-level API (FastAPI/Go) — this is the "reporting" surface; treat message shape as a stable contract, flag breaking changes explicitly.
+- **Target consumer needs four fields per data point: value, reference, quality, timestamp**
+  (timestamp is the lowest priority of the four, but still wanted — confirmed with the actual
+  end user this app is built for). Neither `MmsReportRecord` nor `GooseSubscriberRecord` gives
+  you all four directly today — read the gaps below before designing `ipc_dispatcher`'s JSON
+  shape or any websocket-facing feature that consumes these records.
+- **Field availability today** (`MmsReportEntry` in
+  `src/features/mms_report_client/domain/mms_report_client_types.h`, `GooseSubscriberEntry` in
+  `src/features/goose_subscriber/domain/goose_subscriber_types.h`):
+  - **value** — present on both: `entries[i].value` (`MmsValue*`).
+  - **reference** — MMS report: `entries[i].reference`, but only populated if the RCB's
+    `OptFlds` has `DataRef` enabled (can be `NULL` otherwise, check the actual RCB config
+    before assuming it's there). GOOSE: **no per-entry reference field at all** — GOOSE
+    entries are purely positional off the wire, decoded straight from the frame. To label a
+    GOOSE entry you must cross-reference its array index against the dataset member order
+    `ied_model` already parsed from SCL (the FCDA list backing that GoCB's dataset) — that
+    index→name mapping doesn't exist as code anywhere yet, it'd be new work.
+  - **quality** — **not a field on either struct.** In IEC 61850, quality (`q`) is a sibling
+    Data Attribute of `stVal`, not embedded in the value itself. `Quality` is
+    `typedef uint16_t Quality` (`third_party/include/iec61850_common.h:326`), wire-encoded as
+    a 4-byte bitstring `MmsValue`, decoded via `Quality_getValidity`/`Quality_isFlagSet`
+    (same header). Whether quality shows up at all depends on whether the SCL dataset
+    includes a `q` entry alongside `stVal` for that point — today's `ds1` fixture dataset
+    (see `integration_tests/ied_simulator/src/sim_types.h`) does not. Getting quality into the
+    pipeline is an **SCL/dataset change** (add the `q` DA to the relevant dataset), not just a
+    code change; the resulting `q` value arrives as its own `entries[i]`, paired with its
+    sibling `stVal` entry by position (report) or by position + the GOOSE index→name mapping
+    above (GOOSE).
+  - **timestamp** — both structs give one shared, record-level timestamp
+    (`record->timestampMs`), not a per-entry timestamp. MMS report: only if `hasTimestamp`
+    (driven by the RCB's `OptFlds.TimeStamp`). GOOSE: the frame's own publish time, always
+    present. Per-DA `t` attributes, if ever needed per-value, would again show up as their own
+    dataset entry, not a struct field.
+
+## Interaction Style
+- No fluff, no filler. Peer-to-peer technical register.
+- Use opaque pointers / forward declaration to enforce API boundaries.
+
+## Output Format
+- Small fixes: just the diff/code, no ceremony.
+- New features or architectural changes: (1) where it fits in feature-first layout, (2) the code, (3) Watch Out — link order, memory safety, thread risk.
