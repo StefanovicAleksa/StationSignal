@@ -225,12 +225,21 @@ MmsReportClientConnection_destroy(MmsReportClientHandle handle) {
         Thread_destroy(handle->supervisorThread);
         handle->supervisorThread = NULL;
     }
-    if (handle->wakeSignal) {
-        Semaphore_destroy(handle->wakeSignal);
-        handle->wakeSignal = NULL;
-    }
+    /* IedConnection_destroy can synchronously re-fire onStateChanged (it
+     * internally closes the connection again even if already closed by
+     * MmsReportClientConnection_stop), which unconditionally posts
+     * handle->wakeSignal - so the semaphore must still be alive when this
+     * runs. Destroying it first (the previous order) left a freed semaphore
+     * for that callback to post to, a use-after-free that crashed
+     * intermittently whenever a caller destroyed an actively-connecting
+     * client (e.g. orchestration rolling back an already-started
+     * mms_report_client after a later stage fails). */
     if (handle->connection) {
         IedConnection_destroy(handle->connection);
         handle->connection = NULL;
+    }
+    if (handle->wakeSignal) {
+        Semaphore_destroy(handle->wakeSignal);
+        handle->wakeSignal = NULL;
     }
 }
