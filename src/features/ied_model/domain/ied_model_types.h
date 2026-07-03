@@ -63,6 +63,9 @@ typedef struct {
  */
 typedef struct {
     char* objectReference;  /* e.g. "Breaker1CB1/LLN0$GO$gcbStatus" - owned copy */
+    char* datasetReference; /* e.g. "Breaker1CB1/LLN0$ds1" - owned copy, or NULL
+                                if the GCB's dataSetName was empty. Mirrors
+                                ReportControlBlockTarget.datasetReference. */
     bool hasAddress;         /* true only if SCL had a matching <GSE><Address> */
     uint16_t vlanId;         /* valid only if hasAddress */
     uint8_t vlanPriority;    /* valid only if hasAddress */

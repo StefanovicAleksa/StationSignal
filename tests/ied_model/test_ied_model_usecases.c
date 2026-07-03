@@ -79,6 +79,7 @@ test_getGooseSubscriptionTargets_returnsCorrectReference(void) {
     GooseSubscriptionTarget* target =
         (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
     TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$GO$gcb01", target->objectReference);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$events", target->datasetReference);
     /* fixture's gcb01 has no GSEControlBlock_addPhyComAddress call - no SCL
      * <Communication> entry was ever attached. */
     TEST_ASSERT_FALSE(target->hasAddress);
@@ -121,11 +122,33 @@ test_getGooseSubscriptionTargets_populatesAddress_whenPhyComAddressPresent(void)
     GooseSubscriptionTarget* target =
         (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
     TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$GO$gcbAddr", target->objectReference);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ds1", target->datasetReference);
     TEST_ASSERT_TRUE(target->hasAddress);
     TEST_ASSERT_EQUAL_UINT16(10, target->vlanId);
     TEST_ASSERT_EQUAL_UINT8(4, target->vlanPriority);
     TEST_ASSERT_EQUAL_UINT16(2000, target->appId);
     TEST_ASSERT_EQUAL_MEMORY(mac, target->dstMac, 6);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getGooseSubscriptionTargets_datasetReferenceNull_whenGcbHasNoDataset(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    GSEControlBlock_create("gcbNoDs", ln0, "1000", NULL, 1, false, -1, -1);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    GooseSubscriptionTarget* target =
+        (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_NULL(target->datasetReference);
 
     LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
     IedModel_destroy(bareModel);
@@ -186,6 +209,83 @@ test_getReportSubscriptionTargets_empty_whenModelHasNoRcbs(void) {
 
     LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
     IedModel_destroy(bareModel);
+}
+
+void
+test_getReportSubscriptionTargets_datasetReferenceNull_whenRcbHasNoDataset(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    ReportControlBlock_create("brcbNoDs", ln0, "rptNoDs", true, NULL, 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    ReportControlBlockTarget* target =
+        (ReportControlBlockTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_NULL(target->datasetReference);
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
+    IedModel_destroy(bareModel);
+}
+
+/* ---- Data set member references ---- */
+
+void
+test_getDataSetMemberReferences_returnsSingleEntry_forEventsDataset(void) {
+    LinkedList refs = IedModelUseCases_getDataSetMemberReferences(handle, "TestIEDLD1/LLN0$events");
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(refs));
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$ST$Mod$stVal", firstElement(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getDataSetMemberReferences_preservesOrder_forMultiEntryDataset(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$stVal", -1, NULL);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$q", -1, NULL);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getDataSetMemberReferences(&bareHandle, "BareLD1/LLN0$ds1");
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(refs));
+    LinkedList element = LinkedList_getNext(refs);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Mod$stVal", (const char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Mod$q", (const char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(refs, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getDataSetMemberReferences_empty_whenDatasetReferenceIsNull(void) {
+    LinkedList refs = IedModelUseCases_getDataSetMemberReferences(handle, NULL);
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getDataSetMemberReferences_empty_whenDatasetReferenceDoesNotResolve(void) {
+    LinkedList refs = IedModelUseCases_getDataSetMemberReferences(handle, "TestIEDLD1/LLN0$doesNotExist");
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
 }
 
 /* ---- Read targets ---- */
@@ -273,10 +373,17 @@ main(void) {
     RUN_TEST(test_getGooseSubscriptionTargets_returnsCorrectReference);
     RUN_TEST(test_getGooseSubscriptionTargets_empty_whenModelHasNoGseControlBlocks);
     RUN_TEST(test_getGooseSubscriptionTargets_populatesAddress_whenPhyComAddressPresent);
+    RUN_TEST(test_getGooseSubscriptionTargets_datasetReferenceNull_whenGcbHasNoDataset);
 
     RUN_TEST(test_getReportSubscriptionTargets_returnsCorrectReference);
     RUN_TEST(test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment);
     RUN_TEST(test_getReportSubscriptionTargets_empty_whenModelHasNoRcbs);
+    RUN_TEST(test_getReportSubscriptionTargets_datasetReferenceNull_whenRcbHasNoDataset);
+
+    RUN_TEST(test_getDataSetMemberReferences_returnsSingleEntry_forEventsDataset);
+    RUN_TEST(test_getDataSetMemberReferences_preservesOrder_forMultiEntryDataset);
+    RUN_TEST(test_getDataSetMemberReferences_empty_whenDatasetReferenceIsNull);
+    RUN_TEST(test_getDataSetMemberReferences_empty_whenDatasetReferenceDoesNotResolve);
 
     RUN_TEST(test_getReadTargets_includesOnlyStAndMxAttributes);
     RUN_TEST(test_getReadTargets_empty_whenModelHasNoStOrMxAttributes);

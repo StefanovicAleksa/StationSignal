@@ -36,6 +36,14 @@ IedModel_release(IedModelHandle handle);
 LinkedList IedModel_getGooseSubscriptionTargets(IedModelHandle handle);
 LinkedList IedModel_getReportSubscriptionTargets(IedModelHandle handle);
 
+/* Available at IED_MODEL_ACCESS_REPORT_ONLY and above (i.e. always) - purely
+ * local, built from the already-parsed SCL DataSet, never touches the network
+ * (see CLAUDE.md's "no over-the-wire tree discovery" rule). Returns a
+ * LinkedList of heap-allocated char* member-reference strings, ordered to
+ * match the dataset's own entry order. Caller owns the list and its elements:
+ * LinkedList_destroyDeep(list, free). */
+LinkedList IedModel_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference);
+
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModel_destroyReportControlBlockTarget(void* target);
 

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "features/ied_model/domain/ied_model_usecases.h"
+#include "iec61850_dynamic_model.h"
 
 /* ---- recursive tree walkers over the built model ---- */
 
@@ -65,19 +66,31 @@ IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle) {
          * documented example ("simpleIOGenericIO/LLN0$GO$gcbEvents"). */
         size_t len = strlen(lnRef) + strlen("$GO$") + strlen(gcb->name) + 1;
         char* ref = malloc(len);
+        if (ref) snprintf(ref, len, "%s$GO$%s", lnRef, gcb->name);
+
+        /* Dataset object-reference notation, "$"-joined, mirrors
+         * getReportSubscriptionTargets's datasetRef convention above. */
+        char* datasetRef = NULL;
+        if (gcb->dataSetName && gcb->dataSetName[0] != '\0') {
+            size_t dsLen = strlen(lnRef) + strlen("$") + strlen(gcb->dataSetName) + 1;
+            datasetRef = malloc(dsLen);
+            if (datasetRef) snprintf(datasetRef, dsLen, "%s$%s", lnRef, gcb->dataSetName);
+        }
+        free(lnRef);
+
         if (!ref) {
-            free(lnRef);
+            free(datasetRef);
             continue;
         }
-        snprintf(ref, len, "%s$GO$%s", lnRef, gcb->name);
-        free(lnRef);
 
         GooseSubscriptionTarget* target = calloc(1, sizeof(GooseSubscriptionTarget));
         if (!target) {
             free(ref);
+            free(datasetRef);
             continue;
         }
         target->objectReference = ref;
+        target->datasetReference = datasetRef;
 
         if (gcb->address) {
             target->hasAddress = true;
@@ -98,6 +111,7 @@ IedModelUseCases_destroyGooseSubscriptionTarget(void* target) {
     if (!target) return;
     GooseSubscriptionTarget* gooseTarget = (GooseSubscriptionTarget*) target;
     free(gooseTarget->objectReference);
+    free(gooseTarget->datasetReference);
     free(gooseTarget);
 }
 
@@ -156,6 +170,26 @@ IedModelUseCases_destroyReportControlBlockTarget(void* target) {
     free(rcbTarget->objectReference);
     free(rcbTarget->datasetReference);
     free(rcbTarget);
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    for (DataSetEntry* entry = DataSet_getFirstEntry(dataSet); entry; entry = DataSetEntry_getNext(entry)) {
+        if (!entry->logicalDeviceName || !entry->variableName) continue;
+        size_t len = strlen(entry->logicalDeviceName) + 1 + strlen(entry->variableName) + 1;
+        char* ref = malloc(len);
+        if (ref) {
+            snprintf(ref, len, "%s/%s", entry->logicalDeviceName, entry->variableName);
+            LinkedList_add(result, ref);
+        }
+    }
+    return result;
 }
 
 LinkedList

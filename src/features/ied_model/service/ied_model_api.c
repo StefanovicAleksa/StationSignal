@@ -54,6 +54,11 @@ IedModel_getReportSubscriptionTargets(IedModelHandle handle) {
     return IedModelUseCases_getReportSubscriptionTargets(handle);
 }
 
+LinkedList
+IedModel_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference) {
+    return IedModelUseCases_getDataSetMemberReferences(handle, datasetReference);
+}
+
 void
 IedModel_destroyReportControlBlockTarget(void* target) {
     IedModelUseCases_destroyReportControlBlockTarget(target);

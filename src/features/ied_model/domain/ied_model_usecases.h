@@ -27,12 +27,20 @@
  * AccessMode gating is NOT done here - these always compute the full result for
  * the model as built. The service layer (ied_model_api.c) decides which of these
  * to call based on the handle's AccessMode.
+ *
+ * getDataSetMemberReferences returns an ordered LinkedList of heap-allocated
+ * char* member-reference strings for one dataset (index i matches the i-th
+ * DataSetEntry / MmsReportEntry[i] / GooseSubscriberEntry[i] built from that
+ * same dataset). Returns an empty (never NULL) list if datasetReference is
+ * NULL or doesn't resolve. Caller owns the list and its elements
+ * (LinkedList_destroyDeep(list, free)).
  */
 
 LinkedList IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle);
 LinkedList IedModelUseCases_getReportSubscriptionTargets(IedModelHandle handle);
 LinkedList IedModelUseCases_getReadTargets(IedModelHandle handle);
 LinkedList IedModelUseCases_getControlTargets(IedModelHandle handle);
+LinkedList IedModelUseCases_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference);
 
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModelUseCases_destroyReportControlBlockTarget(void* target);
