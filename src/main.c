@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <signal.h>
 #include <unistd.h>
 #include "linked_list.h"
@@ -12,6 +13,12 @@
  * No config-file system exists yet, so host/port/IED name/interface come
  * from argv with hardcoded defaults matching integration_tests/ied_simulator's
  * "Reporter1" fixture.
+ *
+ * Note this file never includes features/ipc_dispatcher/service/
+ * ipc_dispatcher_api.h directly - orchestration owns that feature's entire
+ * lifecycle end-to-end (bind/start/stop/destroy, plus wiring its callbacks
+ * onto mms_report_client/goose_subscriber internally). This file only
+ * configures it via OrchestrationConfig.ipcDispatcherConfig.
  */
 
 static volatile sig_atomic_t g_stopRequested = 0;
@@ -20,13 +27,6 @@ static void
 onSignal(int sig) {
     (void) sig;
     g_stopRequested = 1;
-}
-
-static void
-onReport(void* userParam, const MmsReportRecord* record) {
-    (void) userParam;
-    printf("[report] %s entries=%d\n", record->rcbReference ? record->rcbReference : "?", record->entryCount);
-    MmsReportClient_destroyReportRecord((MmsReportRecord*) record);
 }
 
 static void
@@ -40,13 +40,6 @@ onRcbStatus(void* userParam, const char* rcbReference, bool enabled, IedClientEr
     (void) userParam;
     printf("[mms_report_client] RCB %s %s (lastError=%d)\n", rcbReference ? rcbReference : "?",
             enabled ? "enabled" : "disabled", lastError);
-}
-
-static void
-onGooseRecord(void* userParam, const GooseSubscriberRecord* record) {
-    (void) userParam;
-    printf("[goose] %s entries=%d\n", record->goCbRef ? record->goCbRef : "?", record->entryCount);
-    GooseSubscription_destroyRecord((GooseSubscriberRecord*) record);
 }
 
 static void
@@ -68,6 +61,7 @@ main(int argc, char** argv) {
 
     OrchestrationConfig config;
     OrchestrationConfig_defaults(&config);
+    if (argc > 5) config.ipcDispatcherConfig.port = (uint16_t) atoi(argv[5]);
 
     OrchestrationError createError;
     OrchestrationHandle handle = Orchestration_create(&config, &createError);
@@ -76,10 +70,13 @@ main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    Orchestration_setReportCallback(handle, onReport, NULL);
+    /* Report/GOOSE data records are always relayed via ipc_dispatcher,
+     * wired internally by orchestration itself - no setter for those slots
+     * exists here. Connection-state/RCB-status/liveness diagnostics stay on
+     * printf passthroughs, out of ipc_dispatcher's v1 scope (data records
+     * only). */
     Orchestration_setReportConnStateCallback(handle, onReportConnState, NULL);
     Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
-    Orchestration_setGooseRecordCallback(handle, onGooseRecord, NULL);
     Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
 
     LinkedList hostList = LinkedList_create();
@@ -98,8 +95,9 @@ main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s'). Ctrl+C to stop.\n",
-            host, mmsPort, iedName, interfaceId);
+    printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s'). "
+            "ipc_dispatcher listening on 127.0.0.1:%u. Ctrl+C to stop.\n",
+            host, mmsPort, iedName, interfaceId, (unsigned) config.ipcDispatcherConfig.port);
 
     while (!g_stopRequested) {
         pause();

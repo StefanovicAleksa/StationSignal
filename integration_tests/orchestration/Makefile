@@ -1,14 +1,19 @@
-# E2E test of the full orchestration sequence (scl_bootstrap -> ied_model ->
-# mms_report_client -> goose_subscriber) against a real, running IED server
-# (integration_tests/ied_simulator/'s "Reporter1" model, with its MMS file
-# services pointed at a real fixture directory AND publishing a live,
-# triggerable GOOSE Control Block) over loopback. Scoped to this directory
-# only - does not imply or replace a root daemon build command. Unity is
-# vendored as a prebuilt static lib in third_party/, same as
-# libiec61850/libmxml - linked via -lunity.
+# E2E test of the full orchestration sequence (ipc_dispatcher -> scl_bootstrap
+# -> ied_model -> mms_report_client -> goose_subscriber) against a real,
+# running IED server (integration_tests/ied_simulator/'s "Reporter1" model,
+# with its MMS file services pointed at a real fixture directory AND
+# publishing a live, triggerable GOOSE Control Block) over loopback. Scoped
+# to this directory only - does not imply or replace a root daemon build
+# command. Unity is vendored as a prebuilt static lib in third_party/, same
+# as libiec61850/libmxml - linked via -lunity.
 #
 # Union of goose_subscriber's (raw socket) and scl_bootstrap's (MMS file
-# services) link lines, plus every orchestration .c file.
+# services) link lines, plus every orchestration + ipc_dispatcher .c file.
+# ipc_dispatcher is now wired internally by orchestration_api.c itself (see
+# that file), so this test observes report/GOOSE data records via a real
+# websocket connection to orchestration's own ipc_dispatcher port, not via
+# Orchestration_setReportCallback/_setGooseRecordCallback (removed) - see
+# e2e_test_orchestration.c's own header comment.
 #
 # Links ied_simulator/src/sim_server.c directly (server and both clients run
 # in the same test process/binary, over loopback/"lo" - libiec61850 supports
@@ -30,11 +35,12 @@ SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
 IED_MODEL   := $(SRC)/features/ied_model
 MMS_REPORT_CLIENT := $(SRC)/features/mms_report_client
 GOOSE_SUBSCRIBER := $(SRC)/features/goose_subscriber
+IPC_DISPATCHER := $(SRC)/features/ipc_dispatcher
 IED_SIMULATOR := $(ROOT)/integration_tests/ied_simulator
 
 CC      := gcc
 CFLAGS  := -g -Wall -I$(SRC) -I$(IED_SIMULATOR)/src -idirafter $(THIRD_PARTY_INCLUDE)
-LDFLAGS := -L$(THIRD_PARTY_LIB) -liec61850 -lhal -lmxml -lunity -lpthread
+LDFLAGS := -L$(THIRD_PARTY_LIB) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lunity -lpthread
 
 BIN := e2e_test_orchestration
 
@@ -68,6 +74,14 @@ $(BIN): e2e_test_orchestration.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
 		$(GOOSE_SUBSCRIBER)/domain/goose_subscriber_usecases.c \
 		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
+		$(IPC_DISPATCHER)/service/ipc_dispatcher_api.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ring_buffer.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
+		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c \
 		$(IED_SIMULATOR)/src/sim_server.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 

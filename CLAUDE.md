@@ -8,13 +8,13 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 ## Commands
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
-  compiling it together with every `.c` file under `src/orchestration/` and all four
+  compiling it together with every `.c` file under `src/orchestration/` and all five
   `src/features/<feature>/` directories (`service`/`data`/`domain`/`utils`), e.g.:
   `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/orchestration/*/*.c
   src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib -liec61850 -lhal -lmxml
-  -lpthread && sudo /tmp/goose_rep_daemon [host] [mmsPort] [iedName] [interface]` — this is a
-  manual stopgap, not a substitute for a real build system; don't invent or guess a permanent
-  build command, ask before assuming one.
+  -lwebsockets -lcjson -lpthread && sudo /tmp/goose_rep_daemon [host] [mmsPort] [iedName]
+  [interface] [ipcPort]` — this is a manual stopgap, not a substitute for a real build system;
+  don't invent or guess a permanent build command, ask before assuming one.
 - Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
 - Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
 - Run unit tests: `cd tests && make run` — strictly unit, no file I/O beyond two
@@ -39,10 +39,18 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   privilege needed).
 - Run the `orchestration` E2E test: `cd integration_tests/orchestration && sudo make run` —
   runs the same "Reporter1" IED in-process (MMS file services + buffered reports + GOOSE all
-  at once) and drives the real, full `scl_bootstrap -> ied_model -> mms_report_client ->
-  goose_subscriber` sequence against it over loopback, asserting both a real report and a real
-  GOOSE record arrive. **Needs `sudo`** — inherits the GOOSE-subscriber step's raw-socket
-  requirement.
+  at once) and drives the real, full `ipc_dispatcher -> scl_bootstrap -> ied_model ->
+  mms_report_client -> goose_subscriber` sequence against it over loopback, connecting a real
+  hand-rolled websocket client to orchestration's own `ipc_dispatcher` port and asserting both a
+  real MMS-report JSON message and a real GOOSE JSON message arrive over it. **Needs `sudo`** —
+  inherits the GOOSE-subscriber step's raw-socket requirement.
+- Run the `ipc_dispatcher` E2E test: `cd integration_tests/ipc_dispatcher && make run` —
+  starts a real `IpcDispatcher` directly (real bind, real libwebsockets service thread, not
+  through orchestration), connects a hand-rolled minimal websocket test client, drives hand-built
+  `MmsReportRecord`/`GooseSubscriberRecord` fixtures through `IpcDispatcher_onMmsReport`/
+  `_onGooseRecord`, and asserts real JSON arrives over the real socket. No `sudo` needed
+  (loopback TCP only, same as `mms_report_client`) and no `ied_simulator` needed — unlike the
+  other E2E tests, this feature has no external IED to talk to, only its own transport.
 - Raw-socket loopback smoke test (build manually, no Makefile — throwaway linkage/behavior
   probe): `gcc -g -Wall -Isrc -idirafter third_party/include tools/smoke_tests/goose_loopback_smoke_test.c
   -o /tmp/goose_loopback_smoke_test -Lthird_party/lib -liec61850 -lhal -lpthread && sudo
@@ -51,13 +59,33 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 - Run via `sudo` once built — raw socket access required for GOOSE sniffing.
 
 ## Current State (update as this evolves)
-- `src/main.c` now wires the real thing: `OrchestrationConfig_defaults` -> `Orchestration_create`
-  -> registers `printf`-based passthrough logging callbacks -> `Orchestration_run` (host/port/
-  IED name/interface from argv, hardcoded defaults matching `integration_tests/ied_simulator`'s
-  "Reporter1" fixture) -> blocks on `SIGINT`/`SIGTERM` -> `Orchestration_destroy` for clean
-  teardown. All four `src/features/` (`scl_bootstrap/`, `ied_model/`, `mms_report_client/`,
-  `goose_subscriber/`) plus `src/orchestration/` are implemented (see Architecture below);
-  `ipc_dispatcher` is not started yet.
+- `src/main.c` now wires the real thing: `OrchestrationConfig_defaults` (which also defaults
+  `config.ipcDispatcherConfig`, overridable via an optional 5th argv slot for the websocket
+  port) -> `Orchestration_create` -> registers the three remaining `printf`-based
+  connection-state/RCB-status/liveness-diagnostic passthroughs (report/GOOSE DATA records have
+  no caller-facing setter at all anymore - see `ipc_dispatcher`'s own bullet below for why) ->
+  `Orchestration_run` (host/port/IED name/interface from argv, hardcoded defaults matching
+  `integration_tests/ied_simulator`'s "Reporter1" fixture) -> blocks on `SIGINT`/`SIGTERM` ->
+  `Orchestration_destroy`. Notably, `main.c` never includes
+  `features/ipc_dispatcher/service/ipc_dispatcher_api.h` at all - orchestration owns that
+  feature's entire lifecycle end-to-end (see below), the same way it already owns ied_model/
+  mms_report_client/goose_subscriber's. All five `src/features/` (`scl_bootstrap/`,
+  `ied_model/`, `mms_report_client/`, `goose_subscriber/`, `ipc_dispatcher/`) plus
+  `src/orchestration/` are now implemented (see Architecture below) — every feature named in the
+  Expected-features list exists.
+- **Bugfix surfaced by wiring `ipc_dispatcher` into orchestration's own rollback paths**:
+  `MmsReportClientConnection_destroy` (`src/features/mms_report_client/data/mms_report_client_connection.c`)
+  used to destroy `handle->wakeSignal` (the semaphore) *before* `IedConnection_destroy` - but
+  `IedConnection_destroy` can synchronously re-fire `onStateChanged` (it internally closes the
+  connection again even if `MmsReportClientConnection_stop` already closed it), which
+  unconditionally posts that semaphore. This use-after-free crashed intermittently whenever a
+  caller destroyed an actively-connecting client - previously unreachable in practice because
+  the only code path that destroys an already-started `MmsReportClientHandle` mid-connection is
+  orchestration's own "a later stage failed, roll back the already-started report client"
+  rollback branch, and every prior orchestration E2E run happened to have GOOSE succeed (via
+  `sudo`), so that branch was never actually exercised until orchestration started deterministically
+  reaching it in an environment without `CAP_NET_RAW`. Fixed by destroying the connection before
+  the semaphore (reverse of the old order) - see that function's own comment for the full story.
 - `ied_model`'s `IedModel_getGooseSubscriptionTargets` returns `GooseSubscriptionTarget*`
   (object reference plus optional VLAN/APPID/dst-MAC parsed from SCL's `<GSE><Address>`),
   not a bare `char*` — this was a breaking change made when `goose_subscriber` needed the
@@ -91,12 +119,17 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   (`dynamic_model.c`) - pass the bare local name (`"ds1"`), not `"LLN0$ds1"`, or it double-prefixes
   and fails `IedModel_lookupDataSet`'s server-side match against a client-supplied `DatSet`
   reference (`DATA_ACCESS_ERROR_TEMPORARILY_UNAVAILABLE`).
-- `third_party/lib` has `libiec61850.a`, `libhal.a`, `libmxml.a`, and `libunity.a` already built and vendored — do not rebuild these from source, link against them directly. `libunity.a` is test-only (Unity test framework) — never linked into the daemon binary itself, only into test binaries under `tests/`/`integration_tests/`.
-- `third_party/include` has the full libiec61850 header set flattened in already (goose_receiver.h, goose_subscriber.h, mms_client_connection.h, reporting.h, etc.), plus `mxml.h` and `unity.h`/`unity_internals.h` — read these instead of guessing function signatures.
+- `third_party/lib` has `libiec61850.a`, `libhal.a`, `libmxml.a`, `libunity.a`, `libwebsockets.a`,
+  and `libcjson.a` already built and vendored — do not rebuild these from source, link against
+  them directly. `libunity.a` is test-only (Unity test framework) — never linked into the daemon
+  binary itself, only into test binaries under `tests/`/`integration_tests/`.
+- `third_party/include` has the full libiec61850 header set flattened in already (goose_receiver.h, goose_subscriber.h, mms_client_connection.h, reporting.h, etc.), plus `mxml.h`, `unity.h`/`unity_internals.h`, `cJSON.h`, and `libwebsockets.h` (+ its generated `lws_config.h` sibling, plus a `libwebsockets/` **subdirectory** of ~120 headers — unlike every other vendored header set, these are deliberately **not** flattened, because `libwebsockets.h` itself `#include`s them via `<libwebsockets/lws-*.h>` path-qualified angle-bracket includes; flattening would require hand-editing 100+ generated includes, so the one exception to the flat-vendoring convention is preserving this one subdirectory) — read these instead of guessing function signatures.
 - `third_party/include/stdbool.h` is a broken vendored shim (`#define bool int`, no `true`/`false` — meant only for MSVC), no include guard, that can shadow the real system `<stdbool.h>`. Real builds use `-idirafter third_party/include` (never plain `-I`) so gcc prefers the real header, but IDE tooling (VS Code's C/C++ extension) doesn't reliably honor the same ordering through `includePath` alone. Don't hand-edit the vendored file — instead, any of our own code that uses `bool`/`true`/`false` should `#include "stdbool_compat.h"` (at `src/stdbool_compat.h`) instead of `<stdbool.h>` directly; it self-heals regardless of which `stdbool.h` a given toolchain resolves.
 - `libmxml.a`/`mxml.h` (Mini-XML v3.3.1, Apache-2.0) is vendored for SCL (`.icd`/`.cid`/`.scd`) parsing — no XML/SCL parser exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/mxml` (not committed here — only the build artifacts are vendored, matching the libiec61850 pattern). Smoke test proving linkage + real SCL parsing: `tools/smoke_tests/mxml_smoke_test.c`.
 - No libpcap/Npcap present in `third_party/` — that's a system dependency, link against the system lib, don't vendor it.
-- Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves.
+- Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves. **This vendored build has double-precision assertions excluded** (`TEST_ASSERT_EQUAL_DOUBLE`/`_FLOAT` fail with "Unity Double Precision Disabled") — compare floating-point values with a plain C `==`/epsilon check instead, not a Unity float/double macro (see `tests/ipc_dispatcher/test_ipc_dispatcher_value_codec.c` for the pattern).
+- `libwebsockets.a`/`libwebsockets.h` (libwebsockets, MIT) is vendored for `ipc_dispatcher`'s websocket transport — no websocket implementation exists elsewhere in this repo; do not hand-roll one for production code (the E2E test's minimal client is the one deliberate exception — see `ipc_dispatcher/`'s own bullet below for why). Source built from a sibling checkout at `/home/aleksa/code/goose_rep/libwebsockets` (not committed here, same convention as mxml/Unity's build) via CMake with `-DLWS_WITH_SSL=OFF -DLWS_WITHOUT_EXTENSIONS=ON -DLWS_WITH_SHARED=OFF -DLWS_WITH_STATIC=ON -DLWS_WITHOUT_TESTAPPS=ON` (no TLS needed — internal-only, loopback). Link flag is `-lwebsockets` (the archive is named `libwebsockets.a`, not `liblws.a`).
+- `libcjson.a`/`cJSON.h` (cJSON, MIT) is vendored for `ipc_dispatcher`'s JSON serialization — no JSON library exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/cJSON` (not committed here, same convention) via CMake with `-DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF` (cJSON's own `BUILD_SHARED_AND_STATIC_LIBS` option does **not** suppress the shared build by itself — `BUILD_SHARED_LIBS=OFF` is the flag that actually produces a static-only `libcjson.a`). Push-only in this repo (serialize only, no parse counterpart in production code — cJSON's own parser is only used by tests, to assert JSON shape without brittle string matching).
 - `build_out` at repo root is currently a stray compiled binary from a manual verification build, not an empty directory — this line is inaccurate until cleaned up or the doc is corrected; don't rely on it being a directory.
 - **Include convention**: one project-wide include root, `-Isrc`, for all our own code — every intra-project `#include` is fully qualified from `src/` (e.g. `#include "features/ied_model/service/ied_model_api.h"`), never a bare filename or `../` relative path. Vendored third-party headers stay bare filenames against `-idirafter third_party/include` (see above). `.vscode/c_cpp_properties.json`/`tasks.json` are kept in sync with this — update both if the include strategy ever changes.
 
@@ -136,9 +169,11 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
     features can skip the subfolders and just use the three files directly.
 - `src/main.c` wires dependencies only — no business logic.
 - Expected features: `scl_bootstrap/`, `ied_model/`, `goose_subscriber/`, `mms_report_client/`,
-  `ipc_dispatcher/` — don't invent unrelated features. `src/orchestration/` is a separate,
-  top-level sibling of `src/features/` (not itself in this feature list) that sequences these
-  features together — see its own bullet below.
+  `ipc_dispatcher/` — all five now implemented; don't invent unrelated features. `src/orchestration/`
+  is a separate, top-level sibling of `src/features/` (not itself in this feature list) that
+  sequences all five together — see its own bullet below. `ipc_dispatcher`'s lifecycle is owned
+  entirely by orchestration (not by `src/main.c` directly) — `main.c` only ever configures it via
+  `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config.
 - `scl_bootstrap/` (implemented) — one-shot, synchronous bootstrap/probe utility: given a
   caller-supplied list of candidate host addresses, TCP-probes each for MMS on a given port,
   and for each one found, browses its file directory and fetches one SCL file (`.icd`/`.cid`/
@@ -177,28 +212,96 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   interface-name parsing in SCL, matching `mms_report_client`'s host/port convention). Proven
   end-to-end against a real `ied_simulator` IED publishing real GOOSE frames over `lo` in
   `integration_tests/goose_subscriber/` (requires `sudo` — see Commands).
-- `src/orchestration/` (implemented) — sequences all four features above for **one IED**:
-  `scl_bootstrap` (probe a host list, fetch SCL bytes) -> stage those bytes to a temp file ->
-  `ied_model` (load from that file) -> `mms_report_client` (start against the winning
-  candidate's own host/port — not a separately supplied parameter, since bootstrap and
-  reporting target the same physical IED) -> `goose_subscriber` (start on a caller-supplied
-  interface). Public boundary: `src/orchestration/service/orchestration_api.h`. A top-level
-  sibling of `src/features/`, not itself a "feature" in the Expected-features sense above —
-  its whole job is sequencing already-implemented features, not talking to libiec61850
-  directly (zero direct third-party includes in its own domain layer). `Orchestration_run` is
-  one blocking call on the caller's thread (no orchestration-owned thread — `scl_bootstrap` is
-  already synchronous, and `mms_report_client`/`goose_subscriber`'s own `_start()` calls each
-  return synchronously once their background thread is launched). The staged temp file is
-  unlinked immediately after `ied_model` loads it (fully parsed into memory in one call, so it
-  has zero purpose afterward) rather than deferred. Fail-hard: if any stage fails, everything
-  started by earlier stages in that same `Orchestration_run` call is torn down (reverse order)
-  before returning, leaving the handle re-runnable — including tearing down an
-  already-started `mms_report_client` if `goose_subscriber` is the stage that fails, no
-  degraded report-only success mode. `Orchestration_stop`/`_destroy` tear down in the same
-  reverse order (goose -> report client -> ied_model release). Single-IED scope only; no
-  multi-IED support. `src/main.c` is now wired to this (see Current State above). Proven
+- `src/orchestration/` (implemented) — sequences all five features above for **one IED**:
+  `ipc_dispatcher` (bind + start its websocket service thread — first, deliberately, so a bind
+  failure fails fast before touching the network-facing MMS/GOOSE side at all) -> `scl_bootstrap`
+  (probe a host list, fetch SCL bytes) -> stage those bytes to a temp file -> `ied_model` (load
+  from that file) -> `mms_report_client` (start against the winning candidate's own host/port —
+  not a separately supplied parameter, since bootstrap and reporting target the same physical
+  IED; its report callback is unconditionally wired to `IpcDispatcher_onMmsReport`) ->
+  `goose_subscriber` (start on a caller-supplied interface; same unconditional
+  `IpcDispatcher_onGooseRecord` wiring). Public boundary:
+  `src/orchestration/service/orchestration_api.h`. A top-level sibling of `src/features/`, not
+  itself a "feature" in the Expected-features sense above — its whole job is sequencing
+  already-implemented features, not talking to libiec61850/libwebsockets/cJSON directly (zero
+  direct third-party includes in its own domain layer). `Orchestration_run` is one blocking call
+  on the caller's thread (no orchestration-owned thread — `scl_bootstrap` is already synchronous,
+  and `mms_report_client`/`goose_subscriber`/`ipc_dispatcher`'s own `_start()` calls each return
+  synchronously once their background thread is launched). The staged temp file is unlinked
+  immediately after `ied_model` loads it (fully parsed into memory in one call, so it has zero
+  purpose afterward) rather than deferred. Fail-hard: if any stage fails, everything started by
+  earlier stages in that same `Orchestration_run` call is torn down (reverse order) before
+  returning, leaving the handle re-runnable — including tearing down an already-started
+  `ipc_dispatcher`/`mms_report_client` if a later stage fails, no degraded partial-success mode.
+  `Orchestration_stop`/`_destroy` tear down in the same reverse order (goose -> report client ->
+  ipc_dispatcher -> ied_model release — ipc_dispatcher stops only after both producers are torn
+  down, guaranteeing no more producer-thread calls can land on it once it stops). Single-IED
+  scope only; no multi-IED support. `src/main.c` is now wired to this (see Current State above),
+  and never reaches into `ipc_dispatcher` directly (see that feature's own bullet). Proven
   end-to-end against a real `ied_simulator` IED (MMS file services + buffered reports + GOOSE
-  simultaneously) in `integration_tests/orchestration/` (requires `sudo` — see Commands).
+  simultaneously, plus a real websocket client observing orchestration's own `ipc_dispatcher`
+  output) in `integration_tests/orchestration/` (requires `sudo` — see Commands).
+- `ipc_dispatcher/` (implemented) — relays normalized `MmsReportRecord`/`GooseSubscriberRecord`
+  data out over a websocket, hosted internally only (`127.0.0.1`, no TLS, no
+  `IpcDispatcherConfig` field even exists to bind elsewhere), for a separate API layer/frontend
+  to consume. Push-only (no client-sent message handling at all — the vhost's protocol callback
+  never handles `LWS_CALLBACK_RECEIVE`). Public boundary:
+  `src/features/ipc_dispatcher/service/ipc_dispatcher_api.h`. Its two callback-adapter functions
+  (`IpcDispatcher_onMmsReport`/`_onGooseRecord`) match `MmsReportClientCallback`/
+  `GooseSubscriberCallback`'s signatures exactly and are registered **by `src/orchestration/`
+  itself, unconditionally** — there is deliberately no `Orchestration_setReportCallback`/
+  `_setGooseRecordCallback` for `src/main.c` (or any other caller) to reach around this with;
+  `ipc_dispatcher`'s entire lifecycle (create/start/stop/destroy) is owned by
+  `OrchestrationHandle` end to end, the same way `iedModel`/`reportClient`/`gooseSubscriber`
+  already are — `main.c` only ever configures it via `OrchestrationConfig.ipcDispatcherConfig`
+  and never includes this feature's own service header. Each adapter always calls the matching
+  `_destroyReportRecord`/`_destroyRecord` before returning — ownership transfers to whichever
+  single consumer is registered, which is exactly why there's no way to *also* register a
+  second, caller-supplied observer for report/GOOSE data records (two consumers can't both
+  own+destroy the same record; the three connection-state/RCB-status/liveness-diagnostic
+  callbacks are untouched and remain directly caller-settable via orchestration, unrelated to
+  ipc_dispatcher). Quality (`q`) pairing — flagged as unbuilt in "IPC / Reporting Out" below for
+  a long time — is
+  now solved here: `domain/ipc_dispatcher_usecases.c`'s `IpcDispatcherUseCases_pairQuality`
+  splits each dataset-position reference on its **last** `$` (reference format confirmed via
+  `IedModelUseCases_getDataSetMemberReferences`: `"<LDName>/<LN>$<FC>$<DO>$<DA>"`) and groups
+  entries sharing a common prefix, merging a `q`-suffixed sibling into its value entry's one JSON
+  data point (a lone `q` with no value sibling is dropped, not fabricated into a value-less
+  point). Quality validity is decoded via `Quality_fromMmsValue`/`Quality_getValidity`
+  (`iec61850_common.h`) into a named 4-value enum; the remaining detail/test/substituted/derived
+  bits are copied verbatim into one raw `uint16_t` passthrough field rather than individually
+  named in v1. `MmsValue` scalars are converted to JSON-friendly types by `MmsValue_getType()`
+  (`utils/ipc_dispatcher_value_codec.c`) — boolean/integer/unsigned/float/string map directly;
+  anything else (structures, arrays, octet strings, etc. — not reachable from today's
+  leaf-DA-only FCDA datasets) falls back to an owned `"<unsupported:...>"` placeholder string,
+  never silently dropped. **Threading is the crux of this feature**: `mms_report_client`'s
+  reconnect-supervisor thread and `goose_subscriber`'s `GooseReceiver` reception thread each
+  call an adapter directly and must never block, but libwebsockets requires all `lws_write`/
+  context access to happen on the one thread running `lws_service()` — so each adapter only
+  ever (a) serializes to JSON and (b) pushes it onto a bounded, mutex-guarded broadcast ring
+  (`data/ipc_dispatcher_ring_buffer.c`, `hal_thread.h`'s `Semaphore` as a binary mutex, same
+  primitive `goose_subscriber` already uses) then (c) calls `lws_cancel_service` — the *only*
+  libwebsockets call ever made from a producer thread. `ipc_dispatcher`'s own dedicated
+  service-loop thread (`data/ipc_dispatcher_ws_server.c`, `hal_thread.h`'s `Thread`, same pattern
+  as `goose_subscriber`'s liveness thread) drains the ring per-connection via a read cursor;
+  a lagging/slow client's own cursor jumps forward and drops its own unseen messages
+  (start-from-now on connect, no backlog replay) — this cost is strictly per-connection and
+  never feeds back into the MMS/GOOSE producer threads. `lws_service`'s 1000ms loop timeout is a
+  bounded safety net, not a data-driving poll (real wakeups come from `lws_cancel_service`) —
+  same class of narrow "no cyclic polling" exception as `goose_subscriber`'s liveness thread.
+  `IpcDispatcher_stop` fully tears down the lws context (not just the service thread) so a
+  subsequent `IpcDispatcher_start` on the same handle can cleanly rebind the same port — unlike
+  `GooseReceiver`, an lws context's listening socket has no "stop servicing, keep the bind" mode.
+  JSON envelope shape (stable contract — see "IPC / Reporting Out" below for the full example
+  and field-by-field notes): `{schemaVersion, type: "MMS_REPORT"|"GOOSE", source: {...},
+  hasTimestamp, timestampMs?, dataPoints: [{reference, value, quality}]}`.
+  Proven end-to-end (real bind, a hand-rolled minimal RFC6455 test client — deliberately **not**
+  libwebsockets client mode, so a bug shared by both ends of the same library can't hide from
+  the test, same philosophy `integration_tests/ied_simulator/` already applies at the protocol
+  level — real JSON delivery for both a synthetic MMS report and a synthetic GOOSE record) in
+  `integration_tests/ipc_dispatcher/` — no `sudo`, no `ied_simulator` needed (loopback TCP only,
+  and records are hand-built rather than sourced from a real IED, since this feature's job
+  starts after `mms_report_client`/`goose_subscriber` have already normalized one).
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,
@@ -220,16 +323,24 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 
 ## IPC / Reporting Out
 - Normalize C structs (GOOSE frame, MMS report) to JSON.
-- Dispatch via Unix Domain Sockets or ZMQ to the high-level API (FastAPI/Go) — this is the "reporting" surface; treat message shape as a stable contract, flag breaking changes explicitly.
+- Dispatch via a websocket (`ipc_dispatcher/`, loopback-only, `libwebsockets` + `cJSON`) to the
+  high-level API (FastAPI/Go) and frontend — this is the "reporting" surface; treat message
+  shape as a stable contract, flag breaking changes explicitly. See `ipc_dispatcher/`'s own
+  Architecture bullet above for the full envelope shape, threading design, and quality-pairing
+  algorithm.
 - **Target consumer needs four fields per data point: value, reference, quality, timestamp**
   (timestamp is the lowest priority of the four, but still wanted — confirmed with the actual
-  end user this app is built for). Neither `MmsReportRecord` nor `GooseSubscriberRecord` gives
-  you all four directly today — read the gaps below before designing `ipc_dispatcher`'s JSON
-  shape or any websocket-facing feature that consumes these records.
+  end user this app is built for). `ipc_dispatcher` now assembles all four into one JSON data
+  point per value (pairing `q` in as part of this) — the notes below describe what
+  `MmsReportRecord`/`GooseSubscriberRecord` give it to work with, which is still useful context
+  for anyone touching `mms_report_client`/`goose_subscriber`'s record shape.
 - **Field availability today** (`MmsReportEntry` in
   `src/features/mms_report_client/domain/mms_report_client_types.h`, `GooseSubscriberEntry` in
   `src/features/goose_subscriber/domain/goose_subscriber_types.h`) — reference labeling is
-  **solved**, quality remains **conditional on SCL authoring**:
+  **solved**, quality pairing into one combined data point is **solved** (in `ipc_dispatcher`,
+  not in these two structs themselves — they still carry `q` as its own sibling entry, matching
+  the wire's own DA-per-entry shape), quality's very *presence* remains **conditional on SCL
+  authoring**:
   - **value** — present on both: `entries[i].value` (`MmsValue*`).
   - **reference** — now populated on both transports via `IedModel_getDataSetMemberReferences`
     (`src/features/ied_model/service/ied_model_api.h`), which replays the dataset's own
@@ -255,8 +366,9 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
     that doesn't put `q` in its FCDA list simply won't carry a quality entry, and nothing in
     `mms_report_client`/`goose_subscriber` fabricates one. When present, `q` arrives as its own
     `entries[i]`, reference-labeled exactly like any other member (e.g. `...Ind1$q` next to
-    `...Ind1$stVal`) — nothing yet pairs a value with its sibling quality into one combined data
-    point; that pairing (matching by common DO/LN prefix) is `ipc_dispatcher`'s job, not built.
+    `...Ind1$stVal`) at the `mms_report_client`/`goose_subscriber` layer — `ipc_dispatcher` is
+    what pairs it with its sibling value (matching by common DO/LN prefix, i.e. everything up to
+    the last `$`) into one combined JSON data point; see its Architecture bullet above.
   - **timestamp** — both structs still give one shared, record-level timestamp
     (`record->timestampMs`), not a per-entry timestamp. MMS report: only if `hasTimestamp`
     (driven by the RCB's `OptFlds.TimeStamp`). GOOSE: the frame's own publish time, always

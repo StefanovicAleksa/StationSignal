@@ -18,6 +18,7 @@ OrchestrationUtils_errorToString(OrchestrationError err) {
         case ORCHESTRATION_OK: return "OK";
         case ORCHESTRATION_ERR_INVALID_ARGUMENT: return "invalid argument";
         case ORCHESTRATION_ERR_OUT_OF_MEMORY: return "out of memory";
+        case ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED: return "ipc_dispatcher websocket bind/start failed";
         case ORCHESTRATION_ERR_BOOTSTRAP_FAILED: return "SCL bootstrap failed";
         case ORCHESTRATION_ERR_STAGING_FAILED: return "temp-file staging failed";
         case ORCHESTRATION_ERR_MODEL_LOAD_FAILED: return "IED model load failed";

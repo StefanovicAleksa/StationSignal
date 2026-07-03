@@ -38,6 +38,7 @@ test_errorToString_returnsNonNull_forEveryKnownError(void) {
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_OK));
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_INVALID_ARGUMENT));
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_OUT_OF_MEMORY));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED));
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_BOOTSTRAP_FAILED));
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_STAGING_FAILED));
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString(ORCHESTRATION_ERR_MODEL_LOAD_FAILED));

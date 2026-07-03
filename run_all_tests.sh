@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Runs all tests in this repo: unit tests (tests/) then every E2E test under
-# integration_tests/ (ied_model, mms_report_client, scl_bootstrap, goose_subscriber).
-# Requires sudo (goose_subscriber opens a raw AF_PACKET socket for GOOSE -
-# CAP_NET_RAW, per CLAUDE.md) - script re-execs itself under sudo if needed.
+# integration_tests/ (ied_model, mms_report_client, scl_bootstrap,
+# ipc_dispatcher, goose_subscriber, orchestration).
+# Requires sudo (goose_subscriber/orchestration open a raw AF_PACKET socket
+# for GOOSE - CAP_NET_RAW, per CLAUDE.md) - script re-execs itself under
+# sudo if needed.
 # Always `make clean`s each suite before `make run`: these Makefiles link
 # third_party/lib/libiec61850.a as a linker flag, not a tracked prerequisite,
 # so a swapped-in .a (e.g. after rebuilding the vendored library) would
@@ -29,7 +31,9 @@ run_suite "unit tests" "tests"
 run_suite "e2e: ied_model" "integration_tests/ied_model"
 run_suite "e2e: mms_report_client" "integration_tests/mms_report_client"
 run_suite "e2e: scl_bootstrap" "integration_tests/scl_bootstrap"
+run_suite "e2e: ipc_dispatcher" "integration_tests/ipc_dispatcher"
 run_suite "e2e: goose_subscriber" "integration_tests/goose_subscriber"
+run_suite "e2e: orchestration" "integration_tests/orchestration"
 
 echo
 if [ ${#FAILED[@]} -eq 0 ]; then
