@@ -107,6 +107,55 @@ typedef struct {
 } GooseSubscriberConfig;
 
 /*
+ * Per-target Gap-4 decomposition metadata plus the value-diff cache used by
+ * the group-aware event filter (see goose_subscriber_usecases.c's buildEntries
+ * doc comment) - mirrors mms_report_client's MmsReportClientMemberRefCacheEntry,
+ * minus any ReasonForInclusion concept (GOOSE has none): every candidate is
+ * diff-gated unconditionally, a NULL cache slot being the only thing that
+ * unconditionally survives (the case that lets the first-frame/post-recovery
+ * full snapshot through). Extracted as its own struct, rather than folding
+ * these fields directly into GooseSubscriberTargetEntry's public shape, so
+ * goose_subscriber_usecases.c's pure-logic functions stay constructible with
+ * plain data in unit tests, with no GooseSubscriptionTarget/GooseSubscriber
+ * dependency - same rationale as MmsReportClientMemberRefCacheEntry's own
+ * separation from ReportControlBlockTarget.
+ */
+typedef struct {
+    char** memberReferences; /* owned array of owned strings, resolved once at
+                                 GooseSubscription_start via
+                                 IedModel_getDataSetMemberReferences(target->datasetReference);
+                                 index i matches GooseSubscriberEntry[i] */
+    int memberCount;
+
+    /* Gap 4 (structure decomposition): memberLeafReferences[i] is NULL if
+     * raw member i is already leaf-level (nothing to decompose); otherwise
+     * an owned array of memberLeafCounts[i] owned leaf-reference strings,
+     * from IedModel_getDataSetMemberLeafReferences, resolved once here
+     * alongside memberReferences. */
+    char*** memberLeafReferences;
+    int* memberLeafCounts;
+
+    /* Value-diff cache. One slot per *expanded leaf* position: a
+     * non-decomposed member i occupies exactly 1 slot at leafSlotOffsets[i];
+     * a decomposed member i occupies memberLeafCounts[i] consecutive slots
+     * starting there. totalLeafSlots is the flattened slot count (allocated
+     * size of lastForwardedValues). Each slot starts NULL (never forwarded
+     * yet); mutated in place by GooseSubscriberUseCases_buildRecord. Needed
+     * because Gap 2's stNum dedup only catches whole-frame heartbeat
+     * retransmissions - a real stNum-advancing change on ANY dataset member
+     * would otherwise still forward every member, including untouched
+     * siblings (e.g. a Quality DA that didn't change alongside a value that
+     * did), the same noise problem mms_report_client's hybrid filter solves
+     * on the MMS side. Reset (not just Gap 2's hasForwardedStNum) on a
+     * STALE/INVALID_STATE -> VALID transition - see the frame adapter - so a
+     * recovery redelivers a full snapshot instead of diffing against stale
+     * pre-outage values. */
+    int* leafSlotOffsets;
+    int totalLeafSlots;
+    MmsValue** lastForwardedValues;
+} GooseSubscriberMemberRefCache;
+
+/*
  * One cached target plus its live GooseSubscriber and last-known liveness
  * state, for O(1) indexed iteration by the liveness thread. Owns `target`
  * (moved from the LinkedList returned by IedModel_getGooseSubscriptionTargets
@@ -115,11 +164,7 @@ typedef struct {
  */
 typedef struct {
     GooseSubscriptionTarget* target;
-    char** memberReferences; /* owned array of owned strings, resolved once at
-                                 GooseSubscription_start via
-                                 IedModel_getDataSetMemberReferences(target->datasetReference);
-                                 index i matches GooseSubscriberEntry[i] */
-    int memberCount;
+    GooseSubscriberMemberRefCache memberRefCache;
     GooseSubscriber rawSubscriber;
     bool lastKnownValid;
     uint64_t lastValidAtMs; /* Hal_getMonotonicTimeInMs() of the last frame the
@@ -132,7 +177,61 @@ typedef struct {
                                 comment for why this, rather than re-polling
                                 isValid() itself, is what the liveness thread
                                 now checks for staleness. */
+
+    /* Heartbeat dedup: a GOOSE publisher retransmits its last state
+     * periodically per MinTime/MaxTime even with no real change (sqNum
+     * increments, stNum stays the same) - GooseSubscriber_isValid() accepts
+     * these retransmissions as fresh, non-duplicate frames, so without this
+     * the frame adapter would forward a record on every heartbeat, not just
+     * on genuine state changes. hasForwardedStNum=false means "nothing
+     * forwarded yet for this target" (either truly first-ever, or reset
+     * after a STALE/INVALID_STATE -> VALID transition so the next real frame
+     * is always delivered at least once even if its stNum numerically
+     * collides with a pre-stale value). Unlike lastKnownValid/lastValidAtMs,
+     * these two fields are read/written ONLY by the frame adapter
+     * (GooseReceiver's single reception thread, confirmed serial across all
+     * targets) - the liveness thread never touches them, so they are
+     * deliberately NOT guarded by targetStateLock. memberRefCache's own
+     * lastForwardedValues is reset alongside hasForwardedStNum on the same
+     * STALE/INVALID_STATE -> VALID transition, for the same reason - see
+     * that struct's own doc comment. */
+    bool hasForwardedStNum;
+    uint32_t lastForwardedStNum;
 } GooseSubscriberTargetEntry;
+
+/*
+ * One (reference, value) pair kept by GooseSubscriberCrossTargetDedupCache -
+ * mirrors mms_report_client's MmsReportClientDedupEntry exactly. Both owned.
+ */
+typedef struct {
+    char* reference;
+    MmsValue* value;
+} GooseSubscriberDedupEntry;
+
+/*
+ * Cross-target duplicate-content suppression - the GOOSE equivalent of
+ * mms_report_client's MmsReportClientCrossRcbDedupCache (see its own doc
+ * comment for the full rationale). A deep copy of the last record this
+ * subscriber actually forwarded to recordCallback, from ANY target - not to
+ * be confused with GooseSubscriberMemberRefCache's per-target value-diff
+ * cache, which only ever compares a frame against that SAME target's own
+ * history. Some real networks configure multiple GoCBs across independent
+ * LNs that publish the exact same underlying event (mirroring the MMS
+ * redundant-RCB pattern) - each target's own per-position filter starts
+ * independent, so both frames would otherwise survive their own filter and
+ * reach the websocket as apparent duplicates.
+ * GooseSubscriberUseCases_shouldForwardAcrossTarget is the single decision
+ * point: a record whose (reference, value) content exactly matches this
+ * cache AND whose goCbRef differs from the one that produced it is
+ * suppressed; anything else (first-ever content, a genuine change, or a
+ * repeat from the SAME goCbRef - already that target's own filter's
+ * concern) updates this cache and is forwarded.
+ */
+typedef struct {
+    char* goCbRef;                        /* owned; NULL means nothing forwarded yet */
+    GooseSubscriberDedupEntry* entries;   /* owned array of entryCount owned entries */
+    int entryCount;
+} GooseSubscriberCrossTargetDedupCache;
 
 /*
  * Internal representation. Defined here (rather than hidden behind an
@@ -150,6 +249,9 @@ struct sGooseSubscriberHandle {
     GooseReceiver receiver;                     /* owned */
     GooseSubscriberTargetEntry* targetEntries;  /* owned array */
     int targetCount;
+    GooseSubscriberCrossTargetDedupCache crossTargetDedupCache; /* zero-initialized by
+                                   calloc in GooseSubscription_create (NULL goCbRef means
+                                   "nothing forwarded yet") - see its own doc comment above */
 
     GooseSubscriberCallback recordCallback;
     void* recordCallbackParam;

@@ -15,6 +15,20 @@
           <MinTime>10</MinTime>
           <MaxTime>5000</MaxTime>
         </GSE>
+        <!-- Redundant instance of gcbInd over the identical ds1 dataset -
+             reproduces a real network's duplicate-publisher pattern, for
+             goose_subscriber's cross-target duplicate-content suppression
+             E2E test. -->
+        <GSE ldInst="LD1" cbName="gcbDup">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-02</P>
+            <P type="APPID">1001</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
       </ConnectedAP>
     </SubNetwork>
   </Communication>
@@ -35,6 +49,7 @@
               <RptEnabled max="1" />
             </ReportControl>
             <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />
+            <GSEControl name="gcbDup" appID="1001" datSet="ds1" type="GOOSE" confRev="1" />
           </LN0>
           <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="" />
         </LDevice>

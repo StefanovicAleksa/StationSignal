@@ -101,6 +101,36 @@ test_convert_unsupportedType_producesRawPlaceholder(void) {
     IpcDispatcherValueCodec_freeScalar(&scalar);
 }
 
+void
+test_convert_bitString_decodesAsRawUnsignedInteger(void) {
+    /* Covers CODEDENUM-typed value DAs (Dbpos/Tcmd) that wire-encode as a
+     * bitstring - deliberately a raw integer, not a named enum, since this
+     * function can't know which specific CODEDENUM a given bitstring
+     * represents (see this function's own doc comment). */
+    fixtureValue = MmsValue_newBitString(2);
+    MmsValue_setBitStringFromInteger(fixtureValue, 2); /* e.g. Dbpos "on" */
+
+    IpcScalarValue scalar = IpcDispatcherValueCodec_convert(fixtureValue);
+
+    TEST_ASSERT_EQUAL_INT(IPC_SCALAR_UINT64, scalar.type);
+    TEST_ASSERT_EQUAL_UINT64(2, scalar.value.u64);
+
+    IpcDispatcherValueCodec_freeScalar(&scalar);
+}
+
+void
+test_convert_bitString_zeroValue(void) {
+    fixtureValue = MmsValue_newBitString(2);
+    MmsValue_setBitStringFromInteger(fixtureValue, 0); /* e.g. Dbpos "intermediate-state" */
+
+    IpcScalarValue scalar = IpcDispatcherValueCodec_convert(fixtureValue);
+
+    TEST_ASSERT_EQUAL_INT(IPC_SCALAR_UINT64, scalar.type);
+    TEST_ASSERT_EQUAL_UINT64(0, scalar.value.u64);
+
+    IpcDispatcherValueCodec_freeScalar(&scalar);
+}
+
 /* ---- decodeQuality ---- */
 
 void
@@ -153,6 +183,8 @@ main(void) {
     RUN_TEST(test_convert_visibleString_isDeepCopied);
     RUN_TEST(test_convert_nullValue_producesRawNullPlaceholder);
     RUN_TEST(test_convert_unsupportedType_producesRawPlaceholder);
+    RUN_TEST(test_convert_bitString_decodesAsRawUnsignedInteger);
+    RUN_TEST(test_convert_bitString_zeroValue);
 
     RUN_TEST(test_decodeQuality_good);
     RUN_TEST(test_decodeQuality_questionableWithTestFlag);

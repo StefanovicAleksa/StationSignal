@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "hal_time.h"
@@ -139,11 +140,23 @@ GooseSubscriberConnection_create(GooseSubscriberHandle handle) {
             GooseSubscriber_setAppId(sub, entry->target->appId);
         }
 
+        /* TEMPORARY diagnostic - remove once GOOSE reception silence is
+         * root-caused. Prints exactly the filter this repo applies per
+         * target, straight from parsed SCL, for direct comparison against a
+         * tshark capture of the live publisher's actual frames. */
+        fprintf(stderr, "[GOOSE_DIAG] target=%s hasAddress=%d dstMac=%02X-%02X-%02X-%02X-%02X-%02X appId=0x%04X vlanId=0x%04X\n",
+                entry->target->objectReference, entry->target->hasAddress,
+                entry->target->dstMac[0], entry->target->dstMac[1], entry->target->dstMac[2],
+                entry->target->dstMac[3], entry->target->dstMac[4], entry->target->dstMac[5],
+                entry->target->appId, entry->target->vlanId);
+
         GooseSubscriber_setListener(sub, GooseSubscriberFrameAdapter_onGooseReceived, handle);
 
         entry->rawSubscriber = sub;
         entry->lastKnownValid = false;
         entry->lastValidAtMs = 0;
+        entry->hasForwardedStNum = false;
+        entry->lastForwardedStNum = 0;
 
         GooseReceiver_addSubscriber(handle->receiver, sub); /* must precede start(), per its doc note */
     }

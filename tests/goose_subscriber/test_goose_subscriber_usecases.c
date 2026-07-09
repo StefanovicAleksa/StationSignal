@@ -24,7 +24,7 @@ test_buildRecord_copiesScalarFields(void) {
             2000, 1700000000000ULL,
             true, 10, 4, 2000,
             srcMac, dstMac,
-            NULL, NULL, 0, 0);
+            NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Breaker1CB1/LLN0$GO$gcbStatus", record->goCbRef);
@@ -62,7 +62,7 @@ test_buildRecord_deepCopiesEntries_notAliased(void) {
             1, 0, 1, false, false, 2000, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            dataSetValues, NULL, 0, 2);
+            dataSetValues, NULL, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(2, record->entryCount);
@@ -92,14 +92,17 @@ test_buildRecord_populatesReference_fromMemberReferences(void) {
     uint8_t zeroMac[6] = { 0 };
     char ref0[] = "Reporter1LD1/GGIO1$ST$Ind1$stVal";
     char ref1[] = "Reporter1LD1/GGIO1$ST$Ind1$q";
-    const char* memberReferences[2] = { ref0, ref1 };
+    char* memberReferences[2] = { ref0, ref1 };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberReferences = memberReferences;
+    cache.memberCount = 2;
 
     GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
             "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
             1, 0, 1, false, false, 2000, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            dataSetValues, memberReferences, 2, 2);
+            dataSetValues, &cache, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING(ref0, record->entries[0].reference);
@@ -122,14 +125,18 @@ test_buildRecord_referenceOutOfRange_leavesReferenceNull(void) {
     MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
 
     uint8_t zeroMac[6] = { 0 };
-    const char* memberReferences[1] = { "Reporter1LD1/GGIO1$ST$Ind1$stVal" };
+    char ref0[] = "Reporter1LD1/GGIO1$ST$Ind1$stVal";
+    char* memberReferences[1] = { ref0 };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberReferences = memberReferences;
+    cache.memberCount = 1;
 
     GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
             "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
             1, 0, 1, false, false, 2000, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            dataSetValues, memberReferences, 1, 2);
+            dataSetValues, &cache, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", record->entries[0].reference);
@@ -151,7 +158,7 @@ test_buildRecord_handlesNullDataSetValues_zeroEntries(void) {
             0, 0, 0, false, false, 0, 0,
             false, 0, 0, -1,
             zeroMac, zeroMac,
-            NULL, NULL, 0, 0);
+            NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(0, record->entryCount);
@@ -169,7 +176,7 @@ test_buildRecord_hasVlanFalse_leavesVlanFieldsAtZero(void) {
             0, 0, 0, false, false, 0, 0,
             false, 10, 4, -1,
             zeroMac, zeroMac,
-            NULL, NULL, 0, 0);
+            NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_FALSE(record->hasVlan);
@@ -182,6 +189,680 @@ test_buildRecord_hasVlanFalse_leavesVlanFieldsAtZero(void) {
 void
 test_freeRecord_doesNotCrash_onNull(void) {
     GooseSubscriberUseCases_freeRecord(NULL);
+}
+
+/* ---- buildRecord: Gap 4 structure decomposition ---- */
+
+void
+test_buildRecord_decomposesStructuredEntry_intoFlatLeaves(void) {
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    uint8_t zeroMac[6] = { 0 };
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(2, record->entryCount);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$stVal", record->entries[0].reference);
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(record->entries[0].value));
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_decomposition_countMismatch_fallsBackToRawEntry(void) {
+    /* Claims 3 leaves, but the actual structure only has 2 elements - must
+     * not mis-pair labels to values. */
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    uint8_t zeroMac[6] = { 0 };
+    char ref0[] = "Breaker1CB1/XCBR1.Pos";
+    char* memberReferences[1] = { ref0 };
+    char* leafRefs0[3] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q", "Breaker1CB1/XCBR1.Pos$t" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 3 }; /* mismatch: structVal only has 2 elements */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberReferences = memberReferences;
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a leaf-count mismatch must fall back to one raw (non-decomposed) entry, not mis-paired leaves");
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos", record->entries[0].reference);
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+/* ---- buildRecord: per-position value-diff filter ---- */
+
+void
+test_buildRecord_firstEverValue_isForwarded_andSeedsCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { NULL }; /* never forwarded yet */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "the very first frame for a position must survive - it's the only chance to deliver "
+            "that position's initial value, GOOSE's equivalent of an MMS GI snapshot");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "the cache slot must be seeded after the first forward");
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(cache.lastForwardedValues[0]));
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_unchangedValue_isDroppedAfterSeed(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* already forwarded once, same value */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a re-send of an unchanged value must be dropped once the cache is seeded");
+    TEST_ASSERT_NULL(record->entries);
+
+    MmsValue_delete(lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_changedValue_isForwarded_andUpdatesCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) }; /* last forwarded value differs */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount, "an entry whose value genuinely differs must survive");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_TRUE_MESSAGE(MmsValue_getBoolean(cache.lastForwardedValues[0]),
+            "the cache must be updated to the new value after forwarding");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+/* ---- buildRecord: group-aware forwarding (value <-> quality pairing) ---- */
+
+void
+test_buildRecord_valueForwarded_dragsUnchangedQualitySibling(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "quality's own diff-check says unchanged, but it must still be dragged along "
+            "because its value sibling (same DO) genuinely changed");
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$stVal", record->entries[0].reference);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_qualityForwarded_dragsUnchangedValueSibling(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(false)); /* stVal: matches cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(true));  /* q: differs from cache */
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "a genuine quality-only change must not be dropped as a lone entry - its unchanged "
+            "value sibling must be dragged along too, matching what ipc_dispatcher needs to pair them");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_bothSiblingsUnchanged_neitherForwarded(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(false));
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(0, record->entryCount);
+    TEST_ASSERT_NULL(record->entries);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_ungroupableEntry_fallsBackToSoloDiffCheck(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true)); /* differs from cache */
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    /* memberReferences left NULL - this entry's reference can never resolve,
+     * so it must be its own ungroupable singleton, behaving exactly like the
+     * plain solo diff-check. */
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_NULL(record->entries[0].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void) {
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(structVal, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "the unchanged q leaf must be dragged along by its changed stVal sibling, even "
+            "though both leaves came from the same decomposed DO-level position (Gap 4)");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp(void) {
+    /* Real device shape: cVal.mag.f (2 raw dataset positions - "cVal$mag$f"
+     * and "q" - authored as separate DA-level FCDA entries, not decomposed
+     * from one DO-level entry) nests 3 "$"-segments below the CMV instance
+     * ("phsA") that q actually belongs to. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newFloat(50.0f)); /* cVal.mag.f: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newFloat(49.0f), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsA$q",
+    };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "q must be dragged along by its changed cVal.mag.f sibling despite being several "
+            "\"$\"-segments shallower than the nested measured value's own reference");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
+    /* Two independent CMV instances (phsA, phsB) - phsA's value must never
+     * accidentally group with phsB's q just because "PhV" is a shared
+     * ancestor of both. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newFloat(50.0f)); /* phsA's cVal.mag.f: differs */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* phsB's q: matches cache */
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newFloat(49.0f), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsB$q",
+    };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "phsB's unrelated, unchanged q must NOT be dragged along by phsA's changed value");
+    TEST_ASSERT_EQUAL_STRING("LD0/MMXU1$MX$PhV$phsA$cVal$mag$f", record->entries[0].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+/* ---- resetValueDiffCache ---- */
+
+void
+test_resetValueDiffCache_nullsOutEveryPopulatedSlot(void) {
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(true), MmsValue_newBoolean(false) };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    GooseSubscriberUseCases_resetValueDiffCache(&cache);
+
+    TEST_ASSERT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_NULL(cache.lastForwardedValues[1]);
+}
+
+void
+test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull(void) {
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.totalLeafSlots = 0;
+    cache.lastForwardedValues = NULL;
+
+    GooseSubscriberUseCases_resetValueDiffCache(&cache); /* must not crash */
+}
+
+void
+test_resetValueDiffCache_isNoOp_whenMemberRefCacheIsNull(void) {
+    GooseSubscriberUseCases_resetValueDiffCache(NULL); /* must not crash */
+}
+
+void
+test_buildRecord_afterResetValueDiffCache_unchangedValueForwardedAgain(void) {
+    /* Simulates a recovery: the same value was already forwarded once before
+     * (seeded below), then the publisher goes STALE and comes back VALID -
+     * the frame adapter resets the cache, and the first frame after recovery
+     * carries the exact same, unchanged value. It must still be forwarded
+     * (the whole point of resetting on recovery), proving the fix for the
+     * "recovery silently drops an unchanged snapshot" regression. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* forwarded before the "outage" */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    GooseSubscriberUseCases_resetValueDiffCache(&cache);
+    TEST_ASSERT_NULL_MESSAGE(cache.lastForwardedValues[0], "reset must clear the pre-outage cache");
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a value identical to what was forwarded before a recovery must still be delivered "
+            "once the cache has been reset");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+/* ---- isDuplicateValue ---- */
+
+void
+test_isDuplicateValue_falseWhenCachedIsNull(void) {
+    MmsValue* newValue = MmsValue_newBoolean(true);
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(NULL, newValue));
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_trueWhenEqual(void) {
+    MmsValue* cached = MmsValue_newBoolean(true);
+    MmsValue* newValue = MmsValue_newBoolean(true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_falseWhenDifferent(void) {
+    MmsValue* cached = MmsValue_newBoolean(true);
+    MmsValue* newValue = MmsValue_newBoolean(false);
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+/* ---- shouldForwardAcrossTarget (cross-target duplicate-content suppression) ---- */
+
+static GooseSubscriberEntry*
+makeCrossTargetDedupEntries(const char* ref0, bool val0, const char* ref1, bool val1) {
+    GooseSubscriberEntry* entries = calloc(2, sizeof(GooseSubscriberEntry));
+    entries[0].reference = strdup(ref0);
+    entries[0].value = MmsValue_newBoolean(val0);
+    entries[1].reference = strdup(ref1);
+    entries[1].value = MmsValue_newBoolean(val1);
+    return entries;
+}
+
+static void
+freeCrossTargetDedupEntries(GooseSubscriberEntry* entries, int count) {
+    for (int i = 0; i < count; i++) {
+        free(entries[i].reference);
+        if (entries[i].value) MmsValue_delete(entries[i].value);
+    }
+    free(entries);
+}
+
+void
+test_shouldForwardAcrossTarget_firstEverContent_isForwarded_andSeedsCache(void) {
+    GooseSubscriberCrossTargetDedupCache cache = { 0 };
+    GooseSubscriberEntry* entries = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+
+    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries, 2);
+
+    TEST_ASSERT_TRUE_MESSAGE(result, "nothing cached yet - must always forward");
+    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbA", cache.goCbRef);
+    TEST_ASSERT_EQUAL_INT(2, cache.entryCount);
+
+    freeCrossTargetDedupEntries(entries, 2);
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossTarget_sameTargetIdenticalContent_isStillForwarded(void) {
+    /* A repeat from the SAME GoCB is this stage's non-concern - that
+     * target's own per-position filter already decided to forward it. */
+    GooseSubscriberCrossTargetDedupCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+
+    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries2, 2);
+
+    TEST_ASSERT_TRUE(result);
+
+    freeCrossTargetDedupEntries(entries1, 2);
+    freeCrossTargetDedupEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossTarget_differentTargetIdenticalContent_isSuppressed(void) {
+    GooseSubscriberCrossTargetDedupCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+
+    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entries2, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result,
+            "a different GoCB reporting byte-identical content must be suppressed as a duplicate");
+
+    freeCrossTargetDedupEntries(entries1, 2);
+    freeCrossTargetDedupEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossTarget_differentTargetDifferentContent_isForwarded(void) {
+    GooseSubscriberCrossTargetDedupCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+
+    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", false, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entries2, 2);
+
+    TEST_ASSERT_TRUE_MESSAGE(result, "genuinely different content from a different GoCB must be forwarded");
+    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbB", cache.goCbRef);
+
+    freeCrossTargetDedupEntries(entries1, 2);
+    freeCrossTargetDedupEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossTarget_suppressionDoesNotDisturbEstablishedBaseline(void) {
+    GooseSubscriberCrossTargetDedupCache cache = { 0 };
+    GooseSubscriberEntry* entriesA = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entriesA, 2));
+
+    GooseSubscriberEntry* entriesB = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entriesB, 2));
+
+    GooseSubscriberEntry* entriesC = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbC", entriesC, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result, "C must still be recognized as a duplicate of A's original content, "
+            "even though B's suppressed record never touched the cache");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("LD/LLN0$GO$gcbA", cache.goCbRef,
+            "the cache must still reflect A, the only one actually forwarded");
+
+    freeCrossTargetDedupEntries(entriesA, 2);
+    freeCrossTargetDedupEntries(entriesB, 2);
+    freeCrossTargetDedupEntries(entriesC, 2);
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossTarget_isNoOp_whenCacheIsNull(void) {
+    GooseSubscriberEntry* entries = makeCrossTargetDedupEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(NULL, "LD/LLN0$GO$gcbA", entries, 2));
+    freeCrossTargetDedupEntries(entries, 2);
+}
+
+void
+test_destroyCrossTargetDedupCache_doesNotCrash_onNull(void) {
+    GooseSubscriberUseCases_destroyCrossTargetDedupCache(NULL);
 }
 
 /* ---- detectStatusTransition ---- */
@@ -232,6 +913,24 @@ test_computeLivenessPollIntervalMs_fallsBackTo1000ms_whenNoTalKnown(void) {
     TEST_ASSERT_EQUAL_UINT32(1000, GooseSubscriberUseCases_computeLivenessPollIntervalMs(0, -1));
 }
 
+/* ---- isDuplicateStNum ---- */
+
+void
+test_isDuplicateStNum_falseWhenNothingForwardedYet(void) {
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateStNum(false, 0, 1));
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateStNum(false, 5, 5));
+}
+
+void
+test_isDuplicateStNum_trueWhenStNumUnchanged(void) {
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_isDuplicateStNum(true, 5, 5));
+}
+
+void
+test_isDuplicateStNum_falseWhenStNumAdvanced(void) {
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateStNum(true, 5, 6));
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -243,6 +942,37 @@ main(void) {
     RUN_TEST(test_buildRecord_handlesNullDataSetValues_zeroEntries);
     RUN_TEST(test_buildRecord_hasVlanFalse_leavesVlanFieldsAtZero);
     RUN_TEST(test_freeRecord_doesNotCrash_onNull);
+    RUN_TEST(test_buildRecord_decomposesStructuredEntry_intoFlatLeaves);
+    RUN_TEST(test_buildRecord_decomposition_countMismatch_fallsBackToRawEntry);
+
+    RUN_TEST(test_buildRecord_firstEverValue_isForwarded_andSeedsCache);
+    RUN_TEST(test_buildRecord_unchangedValue_isDroppedAfterSeed);
+    RUN_TEST(test_buildRecord_changedValue_isForwarded_andUpdatesCache);
+
+    RUN_TEST(test_buildRecord_valueForwarded_dragsUnchangedQualitySibling);
+    RUN_TEST(test_buildRecord_qualityForwarded_dragsUnchangedValueSibling);
+    RUN_TEST(test_buildRecord_bothSiblingsUnchanged_neitherForwarded);
+    RUN_TEST(test_buildRecord_ungroupableEntry_fallsBackToSoloDiffCheck);
+    RUN_TEST(test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf);
+    RUN_TEST(test_buildRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
+    RUN_TEST(test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
+
+    RUN_TEST(test_resetValueDiffCache_nullsOutEveryPopulatedSlot);
+    RUN_TEST(test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull);
+    RUN_TEST(test_resetValueDiffCache_isNoOp_whenMemberRefCacheIsNull);
+    RUN_TEST(test_buildRecord_afterResetValueDiffCache_unchangedValueForwardedAgain);
+
+    RUN_TEST(test_isDuplicateValue_falseWhenCachedIsNull);
+    RUN_TEST(test_isDuplicateValue_trueWhenEqual);
+    RUN_TEST(test_isDuplicateValue_falseWhenDifferent);
+
+    RUN_TEST(test_shouldForwardAcrossTarget_firstEverContent_isForwarded_andSeedsCache);
+    RUN_TEST(test_shouldForwardAcrossTarget_sameTargetIdenticalContent_isStillForwarded);
+    RUN_TEST(test_shouldForwardAcrossTarget_differentTargetIdenticalContent_isSuppressed);
+    RUN_TEST(test_shouldForwardAcrossTarget_differentTargetDifferentContent_isForwarded);
+    RUN_TEST(test_shouldForwardAcrossTarget_suppressionDoesNotDisturbEstablishedBaseline);
+    RUN_TEST(test_shouldForwardAcrossTarget_isNoOp_whenCacheIsNull);
+    RUN_TEST(test_destroyCrossTargetDedupCache_doesNotCrash_onNull);
 
     RUN_TEST(test_detectStatusTransition_validToInvalid_reportsStale);
     RUN_TEST(test_detectStatusTransition_invalidToValid_reportsValid);
@@ -251,6 +981,10 @@ main(void) {
     RUN_TEST(test_computeLivenessPollIntervalMs_usesConfiguredValueWhenSet);
     RUN_TEST(test_computeLivenessPollIntervalMs_derivesFromMinTal_flooredAt50ms);
     RUN_TEST(test_computeLivenessPollIntervalMs_fallsBackTo1000ms_whenNoTalKnown);
+
+    RUN_TEST(test_isDuplicateStNum_falseWhenNothingForwardedYet);
+    RUN_TEST(test_isDuplicateStNum_trueWhenStNumUnchanged);
+    RUN_TEST(test_isDuplicateStNum_falseWhenStNumAdvanced);
 
     return UNITY_END();
 }

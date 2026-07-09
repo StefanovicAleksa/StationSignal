@@ -59,6 +59,11 @@ IpcDispatcherValueCodec_convert(const MmsValue* value) {
             scalar.value.u64 = MmsValue_getUtcTimeInMs(value);
             return scalar;
 
+        case MMS_BIT_STRING:
+            scalar.type = IPC_SCALAR_UINT64;
+            scalar.value.u64 = (uint64_t) MmsValue_getBitStringAsInteger(value);
+            return scalar;
+
         default: {
             char placeholder[64];
             snprintf(placeholder, sizeof(placeholder), "<unsupported:%s>", MmsValue_getTypeString(mutableValue));

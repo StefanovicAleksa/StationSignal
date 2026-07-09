@@ -27,15 +27,33 @@
  *                                       unexpected as a plain "value" entry
  *                                       (record-level timestamp is separate)
  *                                       but handled defensively, not asserted against
- *   everything else (MMS_STRUCTURE/MMS_ARRAY/MMS_BIT_STRING/MMS_OCTET_STRING/
+ *   MMS_BIT_STRING                  -> IPC_SCALAR_UINT64 (MmsValue_getBitStringAsInteger,
+ *                                       little-endian bit order per that
+ *                                       function's own doc comment) - covers
+ *                                       CODEDENUM-typed value DAs (e.g.
+ *                                       Dbpos/Tcmd, see IedModelUtils_mapBType)
+ *                                       that wire-encode as a bitstring, not
+ *                                       just quality's own bitstring (which
+ *                                       never reaches this function at all -
+ *                                       pairQuality excludes every "q"-named
+ *                                       entry from ever being treated as a
+ *                                       value, routing it to _decodeQuality
+ *                                       below instead). Deliberately a raw
+ *                                       integer, not a named enum string -
+ *                                       this function has no way to know
+ *                                       which specific CODEDENUM a given
+ *                                       bitstring represents (Dbpos's own
+ *                                       0..3 meaning per IEC 61850-7-3 differs
+ *                                       from Tcmd's), so guessing a decoded
+ *                                       label without per-type verification
+ *                                       would violate this repo's own "don't
+ *                                       guess IEC 61850 semantics" rule - the
+ *                                       raw bit pattern is always correct
+ *                                       regardless of which CODEDENUM it is.
+ *   everything else (MMS_STRUCTURE/MMS_ARRAY/MMS_OCTET_STRING/
  *   MMS_GENERALIZED_TIME/MMS_BINARY_TIME/MMS_BCD/MMS_OBJ_ID/
  *   MMS_DATA_ACCESS_ERROR)          -> IPC_SCALAR_RAW, value.str = owned
  *                                       "<unsupported:...>" placeholder -
- *                                       today's reachable dataset entries
- *                                       (ied_simulator's sim_types.h) are
- *                                       MMS_BOOLEAN (SPS stVal) +
- *                                       MMS_BIT_STRING (q, handled via
- *                                       _decodeQuality, not this path);
  *                                       structure/array nesting is out of
  *                                       scope since dataset FCDA entries are
  *                                       individual DA leaves, not whole DOs.

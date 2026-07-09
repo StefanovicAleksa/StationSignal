@@ -16,24 +16,355 @@ freeEntriesUpTo(GooseSubscriberEntry* entries, int builtCount) {
     free(entries);
 }
 
+bool
+GooseSubscriberUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue) {
+    if (!cached) return false;
+    return MmsValue_equals((MmsValue*) cached, (MmsValue*) newValue);
+}
+
+/* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
+ * clone, if any, and clones newValue into its place). NULL-safe/no-op if
+ * memberRefCache/lastForwardedValues is absent or slot is out of range - a
+ * position with no resolvable cache slot simply never gets its value cached,
+ * which is fine since shouldForwardAndUpdateCache also never diff-checks it. */
+static void
+updateValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, const MmsValue* newValue) {
+    if (!memberRefCache || !memberRefCache->lastForwardedValues) return;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return;
+
+    if (memberRefCache->lastForwardedValues[slot]) MmsValue_delete(memberRefCache->lastForwardedValues[slot]);
+    memberRefCache->lastForwardedValues[slot] = newValue ? MmsValue_clone((MmsValue*) newValue) : NULL;
+}
+
+void
+GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache) {
+    if (!memberRefCache || !memberRefCache->lastForwardedValues) return;
+    for (int i = 0; i < memberRefCache->totalLeafSlots; i++) {
+        if (memberRefCache->lastForwardedValues[i]) {
+            MmsValue_delete(memberRefCache->lastForwardedValues[i]);
+            memberRefCache->lastForwardedValues[i] = NULL;
+        }
+    }
+}
+
+/*
+ * The group-aware filter's per-candidate decision point. slot is the
+ * value-diff cache index for this exact wire position, or -1 if no cache
+ * slot is available for it (no memberRefCache at all, or this position isn't
+ * in it) - in that case there's nothing to diff against, so it always
+ * survives, matching the memberRefCache == NULL passthrough behavior.
+ *
+ * Unlike mms_report_client's equivalent, GOOSE has no ReasonForInclusion to
+ * trust unconditionally - every candidate is diff-gated: forward only if the
+ * value differs from the cache, or the cache slot is still NULL (nothing has
+ * ever been forwarded for this position - the case that lets the first
+ * frame ever, or the first frame after a recovery, deliver a full snapshot).
+ */
+static bool
+shouldForwardAndUpdateCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, const MmsValue* value) {
+    if (slot < 0) return true;
+
+    MmsValue* cached = memberRefCache->lastForwardedValues[slot];
+    if (GooseSubscriberUseCases_isDuplicateValue(cached, value)) return false;
+
+    updateValueDiffCache(memberRefCache, slot, value);
+    return true;
+}
+
+typedef struct {
+    GooseSubscriberEntry* entries;
+    int count;
+    int capacity;
+} GooseEntryBuilder;
+
+/* Appends one owned, cloned/duplicated entry. Returns false (entry NOT
+ * appended) only on allocation failure, so the caller knows not to also
+ * update the value-diff cache for it. */
+static bool
+appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* reference) {
+    if (builder->count == builder->capacity) {
+        int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
+        GooseSubscriberEntry* grown = realloc(builder->entries, sizeof(GooseSubscriberEntry) * (size_t) newCapacity);
+        if (!grown) return false;
+        builder->entries = grown;
+        builder->capacity = newCapacity;
+    }
+
+    GooseSubscriberEntry* entry = &builder->entries[builder->count++];
+    entry->value = value ? MmsValue_clone((MmsValue*) value) : NULL;
+    entry->reference = reference ? GooseSubscriberUtils_safeStringDup(reference) : NULL;
+    return true;
+}
+
+/* One not-yet-filtered leaf, gathered by collectCandidates before any
+ * forward/drop decision is made - value/reference are borrowed (from
+ * dataSetValues, a flattened array, or memberRefCache's own strings), never
+ * cloned/duped here (appendGooseEntry does that only for leaves that
+ * actually end up forwarded). slot mirrors shouldForwardAndUpdateCache's own
+ * -1-means-"no cache slot" convention. */
+typedef struct {
+    const MmsValue* value;
+    const char* reference;
+    int slot;
+} EntryCandidate;
+
+typedef struct {
+    EntryCandidate* items;
+    int count;
+    int capacity;
+} CandidateBuilder;
+
+/* Same grow-or-skip-on-OOM posture as appendGooseEntry (a single allocation
+ * failure drops one candidate rather than aborting the whole record). */
+static void
+appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* reference, int slot) {
+    if (builder->count == builder->capacity) {
+        int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
+        EntryCandidate* grown = realloc(builder->items, sizeof(EntryCandidate) * (size_t) newCapacity);
+        if (!grown) return;
+        builder->items = grown;
+        builder->capacity = newCapacity;
+    }
+    EntryCandidate* c = &builder->items[builder->count++];
+    c->value = value;
+    c->reference = reference;
+    c->slot = slot;
+}
+
+/* Tracks flattened-structure arrays (GooseSubscriberUtils_flattenStructure
+ * results) so they can be freed once at the very end - candidates now
+ * outlive the per-position loop that produces them (see collectCandidates). */
+typedef struct {
+    MmsValue*** arrays;
+    int count;
+    int capacity;
+} FlattenedArrayList;
+
+static void
+trackFlattenedArray(FlattenedArrayList* list, MmsValue** array) {
+    if (list->count == list->capacity) {
+        int newCapacity = (list->capacity == 0) ? 4 : (list->capacity * 2);
+        MmsValue*** grown = realloc(list->arrays, sizeof(MmsValue**) * (size_t) newCapacity);
+        if (!grown) {
+            free(array); /* can't track it - free now rather than leak */
+            return;
+        }
+        list->arrays = grown;
+        list->capacity = newCapacity;
+    }
+    list->arrays[list->count++] = array;
+}
+
+static void
+freeFlattenedArrays(FlattenedArrayList* list) {
+    for (int i = 0; i < list->count; i++) free(list->arrays[i]);
+    free(list->arrays);
+}
+
+/*
+ * Gap 4 decomposition: for each raw dataset position i, if
+ * memberRefCache->memberLeafReferences[i] is non-NULL (its FCDA was DO-level
+ * - see IedModel_getDataSetMemberLeafReferences's own doc comment), flatten
+ * its structured value (GooseSubscriberUtils_flattenStructure) and, if the
+ * flattened leaf count matches memberLeafCounts[i] (the wire-order
+ * assumption held), expand into that many leaf entries instead of one. A
+ * count mismatch falls back to a single non-decomposed entry for that one
+ * position, matching pre-Gap-4 behavior, rather than mis-pairing labels to
+ * values. Every (possibly decomposed-leaf) value is recorded as an
+ * EntryCandidate for the group-aware filter in buildEntries to decide on
+ * afterwards, rather than deciding forward/drop inline.
+ */
+static void
+collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* memberRefCache,
+        int entryCount, CandidateBuilder* candidates, FlattenedArrayList* flattenedArrays) {
+    for (int i = 0; i < entryCount; i++) {
+        MmsValue* rawValue = dataSetValues ? MmsValue_getElement((MmsValue*) dataSetValues, i) : NULL;
+
+        bool hasCacheEntry = memberRefCache && i < memberRefCache->memberCount;
+        bool isDecomposed = hasCacheEntry && memberRefCache->memberLeafReferences
+                && memberRefCache->memberLeafReferences[i];
+        bool hasSlots = hasCacheEntry && memberRefCache->leafSlotOffsets;
+
+        if (isDecomposed) {
+            int flattenedCount = 0;
+            MmsValue** flattened = GooseSubscriberUtils_flattenStructure(rawValue, &flattenedCount);
+
+            if (flattened && flattenedCount == memberRefCache->memberLeafCounts[i]) {
+                trackFlattenedArray(flattenedArrays, flattened);
+                for (int k = 0; k < flattenedCount; k++) {
+                    int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
+                    appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k], slot);
+                }
+                continue; /* raw position i fully handled via decomposition */
+            }
+            /* Count mismatch (or flatten failure) - fall through to the
+             * non-decomposed path below for this one position. */
+            free(flattened);
+        }
+
+        int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] : -1;
+        const char* ref = (hasCacheEntry && memberRefCache->memberReferences) ? memberRefCache->memberReferences[i]
+                : NULL;
+
+        appendCandidate(candidates, rawValue, ref, slot);
+    }
+}
+
+/* Splits `reference` on its LAST "$" into a prefix (length outPrefixLen) and
+ * a daName (outDaName points just past the last "$", into the original
+ * string). Mirrors mms_report_client_usecases.c's own splitReference (itself
+ * mirroring ipc_dispatcher's IpcDispatcherUseCases_splitReference) exactly -
+ * duplicated locally rather than shared, per this codebase's small-
+ * duplication convention between features. Returns false if reference is
+ * NULL or has no "$" at all. */
+static bool
+splitReference(const char* reference, size_t* outPrefixLen, const char** outDaName) {
+    if (!reference) return false;
+    const char* lastDollar = strrchr(reference, '$');
+    if (!lastDollar) return false;
+    *outPrefixLen = (size_t) (lastDollar - reference);
+    *outDaName = lastDollar + 1;
+    return true;
+}
+
+/* One "q" candidate's own "$"-prefix - the scope its quality applies to.
+ * reference is borrowed (points into one of buildEntries' own candidates). */
+typedef struct {
+    const char* reference;
+    size_t prefixLen;
+} GroupAnchor;
+
+/*
+ * Resolves which "q" anchor scope `reference` belongs to, by finding the
+ * LONGEST anchor that `reference` is genuinely nested under (starts with
+ * anchor + "$") - mirrors mms_report_client_usecases.c's own
+ * resolveGroupAnchor exactly. A flat attribute (e.g. "...Ind1$stVal") matches
+ * its DO's own "q" anchor directly; a deeply nested CONSTRUCTED-DA chain
+ * (e.g. a CMV's "...PhV$phsA$cVal$mag$f") matches the "...PhV$phsA" anchor
+ * several segments up instead. Returns -1 if no anchor is an ancestor of
+ * reference.
+ */
+static int
+resolveGroupAnchor(const char* reference, const GroupAnchor* anchors, int anchorCount) {
+    if (!reference) return -1;
+
+    int best = -1;
+    size_t bestLen = 0;
+    size_t refLen = strlen(reference);
+
+    for (int i = 0; i < anchorCount; i++) {
+        size_t len = anchors[i].prefixLen;
+        if (refLen <= len) continue;
+        if (reference[len] != '$') continue;
+        if (strncmp(reference, anchors[i].reference, len) != 0) continue;
+
+        if (best == -1 || len > bestLen) {
+            best = i;
+            bestLen = len;
+        }
+    }
+    return best;
+}
+
+/*
+ * Builds the final, flat entry list for one GOOSE message in three phases,
+ * mirroring mms_report_client's buildEntries exactly except for the absence
+ * of any ReasonForInclusion-equivalent signal (GOOSE has none - every
+ * candidate is diff-gated, never trusted unconditionally):
+ *   1. collectCandidates - every (possibly Gap-4-decomposed) leaf across
+ *      every raw dataset position, undecided.
+ *   2. Per-candidate diff filter (shouldForwardAndUpdateCache), then a
+ *      group-aware pass: every "q" candidate's reference anchors a group
+ *      scope (its own "$"-prefix); every candidate (including "q" itself)
+ *      resolves to the LONGEST anchor it's nested under (resolveGroupAnchor).
+ *      A candidate that didn't individually qualify still forwards if ANY
+ *      other candidate resolving to the SAME anchor does - this is what
+ *      keeps a value+quality pair (or any other sibling DA under the same
+ *      DO/SDO) travelling together, in both directions. A candidate with no
+ *      resolvable anchor at all is its own ungroupable singleton - falls
+ *      back to its own diff-check.
+ *   3. Emit - every forwarded candidate's cache slot is (re-)updated (a
+ *      no-op if shouldForwardAndUpdateCache already updated it) and
+ *      appended to the output.
+ */
 static GooseSubscriberEntry*
-buildEntries(const MmsValue* dataSetValues, const char* const* memberReferences, int memberCount, int entryCount) {
+buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* memberRefCache,
+        int entryCount, int* outEntryCount) {
+    *outEntryCount = 0;
     if (entryCount <= 0) return NULL;
 
-    GooseSubscriberEntry* entries = calloc((size_t) entryCount, sizeof(GooseSubscriberEntry));
-    if (!entries) return NULL;
+    CandidateBuilder candidates = { NULL, 0, 0 };
+    FlattenedArrayList flattenedArrays = { NULL, 0, 0 };
+    collectCandidates(dataSetValues, memberRefCache, entryCount, &candidates, &flattenedArrays);
 
-    for (int i = 0; i < entryCount; i++) {
-        if (dataSetValues) {
-            MmsValue* element = MmsValue_getElement((MmsValue*) dataSetValues, i);
-            entries[i].value = element ? MmsValue_clone(element) : NULL;
-        }
-        if (memberReferences && i < memberCount && memberReferences[i]) {
-            entries[i].reference = GooseSubscriberUtils_safeStringDup(memberReferences[i]);
+    GroupAnchor* anchors = candidates.count > 0 ? calloc((size_t) candidates.count, sizeof(GroupAnchor)) : NULL;
+    int anchorCount = 0;
+    if (anchors) {
+        for (int i = 0; i < candidates.count; i++) {
+            size_t prefixLen;
+            const char* daName;
+            if (!splitReference(candidates.items[i].reference, &prefixLen, &daName)) continue;
+            if (strcmp(daName, "q") != 0) continue;
+            anchors[anchorCount].reference = candidates.items[i].reference;
+            anchors[anchorCount].prefixLen = prefixLen;
+            anchorCount++;
         }
     }
 
-    return entries;
+    int* groupAnchorIndex = candidates.count > 0 ? malloc(sizeof(int) * (size_t) candidates.count) : NULL;
+    if (groupAnchorIndex) {
+        for (int i = 0; i < candidates.count; i++) {
+            groupAnchorIndex[i] = resolveGroupAnchor(candidates.items[i].reference, anchors, anchorCount);
+        }
+    }
+
+    bool* forward = candidates.count > 0 ? calloc((size_t) candidates.count, sizeof(bool)) : NULL;
+    if (forward) {
+        for (int i = 0; i < candidates.count; i++) {
+            EntryCandidate* c = &candidates.items[i];
+            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value);
+        }
+
+        if (groupAnchorIndex) {
+            for (int i = 0; i < candidates.count; i++) {
+                if (forward[i] || groupAnchorIndex[i] < 0) continue;
+                for (int j = 0; j < candidates.count; j++) {
+                    if (j == i || !forward[j]) continue;
+                    if (groupAnchorIndex[j] == groupAnchorIndex[i]) {
+                        forward[i] = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    /* forward == NULL (calloc failure) degrades to "nothing forwarded" for
+     * this message. groupAnchorIndex == NULL (or anchors == NULL) degrades
+     * to "no grouping" - every candidate falls back to its own solo
+     * diff-check. */
+
+    GooseEntryBuilder builder = { NULL, 0, 0 };
+    for (int i = 0; i < candidates.count; i++) {
+        if (!forward || !forward[i]) continue;
+
+        EntryCandidate* c = &candidates.items[i];
+        updateValueDiffCache(memberRefCache, c->slot, c->value);
+        appendGooseEntry(&builder, c->value, c->reference);
+    }
+
+    free(forward);
+    free(groupAnchorIndex);
+    free(anchors);
+    free(candidates.items);
+    freeFlattenedArrays(&flattenedArrays);
+
+    if (builder.count == 0) {
+        free(builder.entries);
+        return NULL;
+    }
+
+    *outEntryCount = builder.count;
+    return builder.entries;
 }
 
 GooseSubscriberRecord*
@@ -45,7 +376,7 @@ GooseSubscriberUseCases_buildRecord(
         bool hasVlan, uint16_t vlanId, uint8_t vlanPrio, int32_t appId,
         const uint8_t srcMac[6], const uint8_t dstMac[6],
         const MmsValue* dataSetValues,
-        const char* const* memberReferences, int memberCount,
+        GooseSubscriberMemberRefCache* memberRefCache,
         int entryCount) {
     GooseSubscriberRecord* record = calloc(1, sizeof(GooseSubscriberRecord));
     if (!record) return NULL;
@@ -70,8 +401,9 @@ GooseSubscriberUseCases_buildRecord(
     if (srcMac) memcpy(record->srcMac, srcMac, 6);
     if (dstMac) memcpy(record->dstMac, dstMac, 6);
 
-    record->entries = buildEntries(dataSetValues, memberReferences, memberCount, entryCount);
-    record->entryCount = record->entries ? entryCount : 0;
+    int builtEntryCount = 0;
+    record->entries = buildEntries(dataSetValues, memberRefCache, entryCount, &builtEntryCount);
+    record->entryCount = builtEntryCount;
 
     return record;
 }
@@ -108,4 +440,82 @@ GooseSubscriberUseCases_computeLivenessPollIntervalMs(uint32_t configuredMs, int
 
     uint32_t derived = (uint32_t) minTalMs / GOOSE_SUBSCRIBER_LIVENESS_POLL_TAL_DIVISOR;
     return derived < GOOSE_SUBSCRIBER_MIN_LIVENESS_POLL_MS ? GOOSE_SUBSCRIBER_MIN_LIVENESS_POLL_MS : derived;
+}
+
+bool
+GooseSubscriberUseCases_isDuplicateStNum(bool hasForwardedStNum, uint32_t lastForwardedStNum, uint32_t newStNum) {
+    return hasForwardedStNum && (lastForwardedStNum == newStNum);
+}
+
+static void
+freeCrossTargetDedupContent(GooseSubscriberCrossTargetDedupCache* cache) {
+    free(cache->goCbRef);
+    cache->goCbRef = NULL;
+
+    for (int i = 0; i < cache->entryCount; i++) {
+        free(cache->entries[i].reference);
+        if (cache->entries[i].value) MmsValue_delete(cache->entries[i].value);
+    }
+    free(cache->entries);
+    cache->entries = NULL;
+    cache->entryCount = 0;
+}
+
+void
+GooseSubscriberUseCases_destroyCrossTargetDedupCache(GooseSubscriberCrossTargetDedupCache* cache) {
+    if (!cache) return;
+    freeCrossTargetDedupContent(cache);
+}
+
+static bool
+crossTargetEntriesEqual(const GooseSubscriberDedupEntry* cached, int cachedCount,
+        const GooseSubscriberEntry* entries, int entryCount) {
+    if (cachedCount != entryCount) return false;
+
+    for (int i = 0; i < entryCount; i++) {
+        const char* cachedRef = cached[i].reference;
+        const char* newRef = entries[i].reference;
+        if ((cachedRef == NULL) != (newRef == NULL)) return false;
+        if (cachedRef && strcmp(cachedRef, newRef) != 0) return false;
+
+        MmsValue* cachedVal = cached[i].value;
+        MmsValue* newVal = entries[i].value;
+        if ((cachedVal == NULL) != (newVal == NULL)) return false;
+        if (cachedVal && !MmsValue_equals(cachedVal, newVal)) return false;
+    }
+    return true;
+}
+
+static void
+replaceCrossTargetDedupContent(GooseSubscriberCrossTargetDedupCache* cache,
+        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
+    freeCrossTargetDedupContent(cache);
+
+    cache->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
+    if (entryCount <= 0) return;
+
+    GooseSubscriberDedupEntry* copy = calloc((size_t) entryCount, sizeof(GooseSubscriberDedupEntry));
+    if (!copy) return;
+
+    for (int i = 0; i < entryCount; i++) {
+        copy[i].reference = entries[i].reference ? GooseSubscriberUtils_safeStringDup(entries[i].reference) : NULL;
+        copy[i].value = entries[i].value ? MmsValue_clone(entries[i].value) : NULL;
+    }
+    cache->entries = copy;
+    cache->entryCount = entryCount;
+}
+
+bool
+GooseSubscriberUseCases_shouldForwardAcrossTarget(GooseSubscriberCrossTargetDedupCache* cache,
+        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
+    if (!cache) return true;
+
+    bool isDuplicate = cache->goCbRef && goCbRef
+            && strcmp(cache->goCbRef, goCbRef) != 0
+            && crossTargetEntriesEqual(cache->entries, cache->entryCount, entries, entryCount);
+
+    if (!isDuplicate) {
+        replaceCrossTargetDedupContent(cache, goCbRef, entries, entryCount);
+    }
+    return !isDuplicate;
 }

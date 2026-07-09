@@ -78,6 +78,85 @@ test_safeStringDup_producesIndependentCopy(void) {
     free(copy);
 }
 
+/* ---- flattenStructure ---- */
+
+void
+test_flattenStructure_null_whenValueNull(void) {
+    int count = -1;
+    MmsValue** leaves = GooseSubscriberUtils_flattenStructure(NULL, &count);
+
+    TEST_ASSERT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, count);
+}
+
+void
+test_flattenStructure_scalarValue_returnsSingleElementArray(void) {
+    MmsValue* scalar = MmsValue_newBoolean(true);
+    int count = -1;
+
+    MmsValue** leaves = GooseSubscriberUtils_flattenStructure(scalar, &count);
+
+    TEST_ASSERT_EQUAL_INT(1, count);
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_TRUE(leaves[0] == scalar); /* borrowed, not cloned */
+
+    free(leaves);
+    MmsValue_delete(scalar);
+}
+
+void
+test_flattenStructure_flatStructure_returnsChildrenInOrder(void) {
+    /* {stVal, q, t} - the common flat CDC shape (SPS/DPC/INS/BCR). */
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* t = MmsValue_newIntegerFromInt32(42);
+
+    MmsValue* structVal = MmsValue_createEmptyStructure(3);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+    MmsValue_setElement(structVal, 2, t);
+
+    int count = -1;
+    MmsValue** leaves = GooseSubscriberUtils_flattenStructure(structVal, &count);
+
+    TEST_ASSERT_EQUAL_INT(3, count);
+    TEST_ASSERT_TRUE(leaves[0] == stVal);
+    TEST_ASSERT_TRUE(leaves[1] == q);
+    TEST_ASSERT_TRUE(leaves[2] == t);
+
+    free(leaves);
+    MmsValue_delete(structVal); /* cascades: deletes stVal/q/t too */
+}
+
+void
+test_flattenStructure_nestedStructure_recursesToTerminalLeaves(void) {
+    /* PhV -> cVal (struct: {mag, ang}) , q  - mirrors the real WYE/CMV
+     * nesting at a smaller scale: only "mag"/"ang"/"q" are genuine leaves,
+     * "cVal" itself must never appear in the flattened output. */
+    MmsValue* mag = MmsValue_newFloat(1.5f);
+    MmsValue* ang = MmsValue_newFloat(2.5f);
+    MmsValue* cVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(cVal, 0, mag);
+    MmsValue_setElement(cVal, 1, ang);
+
+    MmsValue* q = MmsValue_newBitString(13);
+
+    MmsValue* phV = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(phV, 0, cVal);
+    MmsValue_setElement(phV, 1, q);
+
+    int count = -1;
+    MmsValue** leaves = GooseSubscriberUtils_flattenStructure(phV, &count);
+
+    TEST_ASSERT_EQUAL_INT(3, count);
+    TEST_ASSERT_TRUE(leaves[0] == mag);
+    TEST_ASSERT_TRUE(leaves[1] == ang);
+    TEST_ASSERT_TRUE(leaves[2] == q);
+
+    free(leaves);
+    MmsValue_delete(phV); /* cascades: deletes cVal/mag/ang/q too */
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -88,6 +167,11 @@ main(void) {
 
     RUN_TEST(test_safeStringDup_null_whenInputNull);
     RUN_TEST(test_safeStringDup_producesIndependentCopy);
+
+    RUN_TEST(test_flattenStructure_null_whenValueNull);
+    RUN_TEST(test_flattenStructure_scalarValue_returnsSingleElementArray);
+    RUN_TEST(test_flattenStructure_flatStructure_returnsChildrenInOrder);
+    RUN_TEST(test_flattenStructure_nestedStructure_recursesToTerminalLeaves);
 
     return UNITY_END();
 }

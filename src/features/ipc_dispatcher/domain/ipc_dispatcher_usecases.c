@@ -26,6 +26,54 @@ IpcDispatcherUseCases_splitReference(const char* reference, size_t* outPrefixLen
     return true;
 }
 
+/*
+ * Finds entry `valueIndex`'s quality sibling by walking its OWN reference's
+ * ancestor prefixes from deepest (closest) to shallowest, one "$"-segment at
+ * a time, stopping at the first ancestor level that has a "q" sibling among
+ * `references`. This is what makes a value's own reference depth irrelevant:
+ * a flat attribute (e.g. "...Pos$stVal") finds its "q" one level up
+ * ("...Pos$q") on the very first try, exactly like before this fix; a deeply
+ * nested CONSTRUCTED-DA chain (e.g. a CMV's "...PhV$phsA$cVal$mag$f") walks
+ * past "...PhV$phsA$cVal$mag" and "...PhV$phsA$cVal" (neither has its own
+ * "q") before finding "...PhV$phsA$q" several segments up - quality belongs
+ * to the whole CDC instance ("phsA"), not to whichever BDA happens to be the
+ * terminal leaf of one nested DA within it. Returns -1 if no ancestor level
+ * has a "q" sibling at all.
+ */
+static int
+findQualityIndexForValue(const char* const* references, int count, int valueIndex, size_t valuePrefixLen) {
+    const char* ref = references[valueIndex];
+    size_t searchLen = valuePrefixLen;
+
+    while (true) {
+        for (int j = 0; j < count; j++) {
+            if (j == valueIndex) continue;
+
+            size_t otherPrefixLen;
+            const char* otherDaName;
+            if (!IpcDispatcherUseCases_splitReference(references[j], &otherPrefixLen, &otherDaName)) continue;
+            if (strcmp(otherDaName, "q") != 0) continue;
+            if (otherPrefixLen != searchLen) continue;
+            if (strncmp(references[j], ref, searchLen) != 0) continue;
+
+            return j;
+        }
+
+        /* Truncate to the next ancestor level: the last '$' strictly before
+         * position searchLen within ref. */
+        size_t lastDollarPos = 0;
+        bool found = false;
+        for (size_t k = 0; k < searchLen; k++) {
+            if (ref[k] == '$') {
+                lastDollarPos = k;
+                found = true;
+            }
+        }
+        if (!found) return -1; /* no more ancestors left to try */
+        searchLen = lastDollarPos;
+    }
+}
+
 int
 IpcDispatcherUseCases_pairQuality(const char* const* references, int count,
         int* outValueIndices, int* outQualityIndexForValue) {
@@ -42,22 +90,7 @@ IpcDispatcherUseCases_pairQuality(const char* const* references, int count,
          * never emitted itself, whether or not that sibling actually exists. */
         if (parsed && strcmp(daName, "q") == 0) continue;
 
-        int qualityIndex = -1;
-        if (parsed) {
-            for (int j = 0; j < count; j++) {
-                if (j == i) continue;
-
-                size_t otherPrefixLen;
-                const char* otherDaName;
-                if (!IpcDispatcherUseCases_splitReference(references[j], &otherPrefixLen, &otherDaName)) continue;
-                if (strcmp(otherDaName, "q") != 0) continue;
-                if (otherPrefixLen != prefixLen) continue;
-                if (strncmp(references[j], references[i], prefixLen) != 0) continue;
-
-                qualityIndex = j;
-                break;
-            }
-        }
+        int qualityIndex = parsed ? findQualityIndexForValue(references, count, i, prefixLen) : -1;
 
         outValueIndices[valueCount] = i;
         outQualityIndexForValue[valueCount] = qualityIndex;

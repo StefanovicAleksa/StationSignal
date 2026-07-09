@@ -26,13 +26,25 @@ IpcDispatcherUseCases_splitReference(const char* reference, size_t* outPrefixLen
 
 /*
  * Pairs `count` raw per-entry reference strings (references[i] may be NULL;
- * this INCLUDES "q" entries at their own original index) by shared prefix:
+ * this INCLUDES "q" entries at their own original index) by ancestor prefix:
  *   - An entry whose daName == "q" is never itself emitted as a value entry
- *     (whether or not it has a same-prefix sibling - a lone "q" is simply
+ *     (whether or not it has a matching sibling - a lone "q" is simply
  *     dropped, not fabricated into a value-less data point).
  *   - Every other entry (non-"q" daName, or an unparseable/NULL reference) is
- *     emitted as a value entry, in original index order, paired with the
- *     index of a same-prefix "q" sibling if one exists (-1 otherwise).
+ *     emitted as a value entry, in original index order, paired with a "q"
+ *     sibling found by walking UP its own ancestor prefixes (one "$"-segment
+ *     at a time) until an ancestor level with a "q" sibling is found, or none
+ *     remain (-1). A flat attribute (e.g. "...Pos$stVal") finds its "q" one
+ *     level up on the first try, same as a plain last-"$"-strip would; a
+ *     deeply nested CONSTRUCTED-DA chain (e.g. a CMV's
+ *     "...PhV$phsA$cVal$mag$f") walks past its own intermediate levels
+ *     (neither "cVal$mag" nor "cVal" has its own "q") to find "...PhV$phsA$q"
+ *     several segments up - quality belongs to the whole CDC instance, not to
+ *     whichever BDA happens to be the terminal leaf of one nested DA within
+ *     it. A single last-"$"-strip (this function's original implementation)
+ *     only ever found quality for flat attributes, silently leaving every
+ *     nested measured value (Dbpos aside, most measurands are CMV-shaped)
+ *     with quality: null - confirmed against real production traffic.
  *
  * Writes into caller-supplied arrays (room for `count` elements each):
  *   outValueIndices[k]         = original index of the k-th value entry
@@ -40,8 +52,9 @@ IpcDispatcherUseCases_splitReference(const char* reference, size_t* outPrefixLen
  *                                 or -1 if none
  * Returns the number of value entries written (0..count).
  *
- * O(count^2) (pairwise prefix comparison) - fine for realistic dataset sizes
- * (tens of entries, not thousands).
+ * O(count^2 * depth) (pairwise prefix comparison per ancestor level tried) -
+ * fine for realistic dataset sizes (tens of entries, not thousands) and
+ * shallow nesting (a handful of "$"-segments at most).
  */
 int
 IpcDispatcherUseCases_pairQuality(const char* const* references, int count,

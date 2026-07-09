@@ -49,13 +49,36 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
 
         Semaphore_post(handle->targetStateLock);
 
-        if (transitioned && handle->statusCallback) {
-            handle->statusCallback(handle->statusCallbackParam, entry->target->objectReference,
-                    status, GOOSE_PARSE_ERROR_NO_ERROR);
+        if (transitioned) {
+            /* Re-validated (or first-ever) - forget whatever stNum was last
+             * forwarded, so the next real frame's state is delivered at
+             * least once even if its stNum numerically collides with a
+             * pre-stale value (e.g. the publisher never actually restarted).
+             * Safe without targetStateLock - only this thread ever touches
+             * hasForwardedStNum/lastForwardedStNum. Also forget every
+             * per-position value-diff cache slot, so the next frame delivers
+             * a FULL snapshot rather than being diffed against stale
+             * pre-outage values - this is GOOSE's equivalent of an MMS
+             * reconnect redelivering its GI snapshot. */
+            entry->hasForwardedStNum = false;
+            GooseSubscriberUseCases_resetValueDiffCache(&entry->memberRefCache);
+
+            if (handle->statusCallback) {
+                handle->statusCallback(handle->statusCallbackParam, entry->target->objectReference,
+                        status, GOOSE_PARSE_ERROR_NO_ERROR);
+            }
         }
     }
 
     if (!handle->recordCallback) return;
+
+    uint32_t stNum = GooseSubscriber_getStNum(subscriber);
+    if (entry && GooseSubscriberUseCases_isDuplicateStNum(
+            entry->hasForwardedStNum, entry->lastForwardedStNum, stNum)) {
+        /* Heartbeat retransmission (MinTime/MaxTime keep-alive) - the
+         * dataset didn't change, nothing worth forwarding as an event. */
+        return;
+    }
 
     MmsValue* dataSetValues = GooseSubscriber_getDataSetValues(subscriber);
     int entryCount = dataSetValues ? MmsValue_getArraySize(dataSetValues) : 0;
@@ -67,14 +90,13 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
 
     bool hasVlan = GooseSubscriber_isVlanSet(subscriber);
 
-    const char* const* memberRefs = entry ? (const char* const*) entry->memberReferences : NULL;
-    int memberRefCount = entry ? entry->memberCount : 0;
+    GooseSubscriberMemberRefCache* memberRefCache = entry ? &entry->memberRefCache : NULL;
 
     GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
             GooseSubscriber_getGoCbRef(subscriber),
             GooseSubscriber_getGoId(subscriber),
             GooseSubscriber_getDataSet(subscriber),
-            GooseSubscriber_getStNum(subscriber),
+            stNum,
             GooseSubscriber_getSqNum(subscriber),
             GooseSubscriber_getConfRev(subscriber),
             GooseSubscriber_isTest(subscriber),
@@ -86,9 +108,34 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
             hasVlan ? GooseSubscriber_getVlanPrio(subscriber) : 0,
             GooseSubscriber_getAppId(subscriber),
             srcMac, dstMac,
-            dataSetValues, memberRefs, memberRefCount, entryCount);
+            dataSetValues, memberRefCache, entryCount);
 
     /* Allocation failure building the record: nothing safe to deliver - drop
-     * this message rather than risk the caller dereferencing a partial one. */
-    if (record) handle->recordCallback(handle->recordCallbackParam, record);
+     * this message rather than risk the caller dereferencing a partial one.
+     * A record built with zero surviving entries (every candidate filtered
+     * by the per-position value-diff cache - no observable change since the
+     * last frame actually forwarded) is also dropped, not delivered - but
+     * hasForwardedStNum/lastForwardedStNum still advance whenever a record
+     * was built at all, so an identical-stNum heartbeat retransmission stays
+     * caught by the cheap isDuplicateStNum gate above rather than re-running
+     * this whole filter pipeline on every retransmission. */
+    if (record) {
+        if (entry) {
+            entry->hasForwardedStNum = true;
+            entry->lastForwardedStNum = stNum;
+        }
+
+        /* record->entryCount > 0: survived this target's own per-position
+         * value-diff filter. shouldForwardAcrossTarget is the second,
+         * independent gate: even a frame that's genuinely new/changed AS
+         * FAR AS THIS TARGET IS CONCERNED can still be an exact duplicate of
+         * what a DIFFERENT GoCB just forwarded a moment earlier - see
+         * GooseSubscriberCrossTargetDedupCache's own doc comment. */
+        if (record->entryCount > 0 && GooseSubscriberUseCases_shouldForwardAcrossTarget(
+                &handle->crossTargetDedupCache, record->goCbRef, record->entries, record->entryCount)) {
+            handle->recordCallback(handle->recordCallbackParam, record);
+        } else {
+            GooseSubscriberUseCases_freeRecord(record);
+        }
+    }
 }

@@ -157,11 +157,123 @@ test_dataChangeOnServer_triggersGooseRecordWithNewValue(void) {
     SimServer_destroy(sim);
 }
 
+#define EXPECTED_GOCB_REF_DUP "Reporter1LD1/LLN0$GO$gcbDup"
+
+/*
+ * Isolated callback state for
+ * test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback
+ * below - deliberately NOT the shared globals the test above uses, since
+ * this test needs to distinguish two independently-VALID targets
+ * (gcbInd/gcbDup) and count records rather than just track the latest one.
+ */
+typedef struct {
+    volatile bool gcbIndValid;
+    volatile bool gcbDupValid;
+    volatile int gcbIndOrDupRecordCount;
+} CrossTargetDedupTestState;
+
+static void
+onStatusForCrossTargetDedupTest(void* userParam, const char* goCbRef, GooseSubscriberStatus status,
+        GooseParseError lastParseError) {
+    (void) lastParseError;
+    if (status != GOOSE_SUBSCRIBER_STATUS_VALID || !goCbRef) return;
+
+    CrossTargetDedupTestState* state = (CrossTargetDedupTestState*) userParam;
+    if (strcmp(goCbRef, EXPECTED_GOCB_REF) == 0) state->gcbIndValid = true;
+    else if (strcmp(goCbRef, EXPECTED_GOCB_REF_DUP) == 0) state->gcbDupValid = true;
+}
+
+static void
+onRecordForCrossTargetDedupTest(void* userParam, const GooseSubscriberRecord* record) {
+    CrossTargetDedupTestState* state = (CrossTargetDedupTestState*) userParam;
+
+    if (record->goCbRef && (strcmp(record->goCbRef, EXPECTED_GOCB_REF) == 0
+            || strcmp(record->goCbRef, EXPECTED_GOCB_REF_DUP) == 0)) {
+        /* Only count a genuine value-change delivery (the initial state is
+         * "false" and both publishers start retransmitting it immediately
+         * on SimServer_start, before this subscriber even attaches - the
+         * per-position value-diff filter already collapses that startup
+         * burst down to one snapshot per target, which is not what this
+         * test is proving). */
+        if (record->entryCount > 0 && record->entries[0].value
+                && MmsValue_getType(record->entries[0].value) == MMS_BOOLEAN
+                && MmsValue_getBoolean(record->entries[0].value)) {
+            state->gcbIndOrDupRecordCount++;
+        }
+    }
+
+    GooseSubscription_destroyRecord((GooseSubscriberRecord*) record);
+}
+
+static bool
+waitUntilAtLeast(volatile int* counter, int threshold) {
+    for (int i = 0; i < POLL_MAX_ATTEMPTS; i++) {
+        if (*counter >= threshold) return true;
+        Thread_sleep(POLL_INTERVAL_MS);
+    }
+    return false;
+}
+
+/*
+ * Proves GooseSubscriberUseCases_shouldForwardAcrossTarget end-to-end:
+ * gcbInd and gcbDup (fixtures/reporter1.cid) are two independently-subscribed
+ * GoCBs publishing the IDENTICAL ds1 dataset - reproducing a real network's
+ * redundant-publisher pattern. Flipping GGIO1.Ind1.stVal changes both
+ * publishers' state at nearly the same moment; only one of the two resulting
+ * identical-content records must ever reach the record callback.
+ */
+void
+test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_TCP_PORT);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_REPORT_ONLY, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    GooseSubscriberError createError;
+    GooseSubscriberHandle handle = GooseSubscription_create(iedModel, TEST_INTERFACE, NULL, &createError);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(GOOSE_SUBSCRIBER_OK, createError);
+
+    CrossTargetDedupTestState state = { 0 };
+    GooseSubscription_setRecordCallback(handle, onRecordForCrossTargetDedupTest, &state);
+    GooseSubscription_setStatusCallback(handle, onStatusForCrossTargetDedupTest, &state);
+
+    GooseSubscriberError startError = GooseSubscription_start(handle);
+    TEST_ASSERT_EQUAL_MESSAGE(GOOSE_SUBSCRIBER_OK, startError,
+            "GooseSubscription_start failed - this test needs CAP_NET_RAW (run with sudo)");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.gcbIndValid), "expected gcbInd to become VALID");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.gcbDupValid), "expected gcbDup to become VALID");
+
+    SimServer_setIndication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.gcbIndOrDupRecordCount, 1),
+            "expected at least one of gcbInd/gcbDup's identical new-value frames to reach the callback");
+
+    /* Generous settle window for a hypothetical duplicate (the bug this test
+     * guards against) to also arrive - loopback GOOSE delivery is on the
+     * order of a few ms, so this is a large safety margin, not a tight race. */
+    Thread_sleep(500);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, state.gcbIndOrDupRecordCount,
+            "gcbInd and gcbDup publish byte-identical content (same ds1 dataset) - only one must "
+            "reach the callback, the other must be suppressed as a cross-target duplicate");
+
+    GooseSubscription_destroy(handle);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_dataChangeOnServer_triggersGooseRecordWithNewValue);
+    RUN_TEST(test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback);
 
     return UNITY_END();
 }

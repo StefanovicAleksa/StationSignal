@@ -78,6 +78,45 @@ test_pairQuality_loneQ_noSibling_isDropped(void) {
 }
 
 void
+test_pairQuality_nestedCmvChain_findsQualitySeveralAncestorLevelsUp(void) {
+    /* Real device shape: a CMV's cVal->mag->f nests 3 "$"-segments below the
+     * CMV instance ("phsA") that q/t/range actually belong to - a plain
+     * last-"$"-strip would look for q at "...phsA$cVal$mag" and never find
+     * it. */
+    const char* refs[4] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsA$q",
+        "LD0/MMXU1$MX$PhV$phsA$t",
+        "LD0/MMXU1$MX$PhV$phsA$range",
+    };
+    int valueIdx[4], qualityIdx[4];
+
+    int n = IpcDispatcherUseCases_pairQuality(refs, 4, valueIdx, qualityIdx);
+
+    TEST_ASSERT_EQUAL_INT(3, n); /* cVal.mag.f, t, range - q itself never emitted */
+    for (int k = 0; k < n; k++) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(1, qualityIdx[k], "every value entry must pair with the DO/SDO-level q");
+    }
+}
+
+void
+test_pairQuality_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
+    /* Two independent CMV instances (phsA, phsB), each with their own q -
+     * phsA's nested value must never accidentally pair with phsB's q even
+     * though "LD0/MMXU1$MX$PhV" is a shared ancestor of both. */
+    const char* refs[2] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsB$q",
+    };
+    int valueIdx[1], qualityIdx[1];
+
+    int n = IpcDispatcherUseCases_pairQuality(refs, 2, valueIdx, qualityIdx);
+
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_INT(-1, qualityIdx[0]);
+}
+
+void
 test_pairQuality_unparseableOrNullReference_passesThroughAsValue(void) {
     const char* refs[2] = { NULL, "no-dollar-here" };
     int valueIdx[2], qualityIdx[2];
@@ -227,6 +266,8 @@ main(void) {
     RUN_TEST(test_pairQuality_pairsValueWithQSibling);
     RUN_TEST(test_pairQuality_valueOnly_noQInDataset);
     RUN_TEST(test_pairQuality_loneQ_noSibling_isDropped);
+    RUN_TEST(test_pairQuality_nestedCmvChain_findsQualitySeveralAncestorLevelsUp);
+    RUN_TEST(test_pairQuality_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
     RUN_TEST(test_pairQuality_unparseableOrNullReference_passesThroughAsValue);
     RUN_TEST(test_pairQuality_multipleIndependentGroups_doNotCrossMix);
     RUN_TEST(test_pairQuality_zeroCount_returnsZero);
