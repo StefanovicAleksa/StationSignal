@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "features/mms_report_client/data/mms_report_client_connection.h"
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
 #include "features/mms_report_client/data/mms_report_client_auth.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
+#include "features/mms_report_client/utils/mms_report_client_utils.h"
 
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
@@ -33,8 +35,160 @@ onStateChanged(void* parameter, IedConnection connection, IedConnectionState new
     Semaphore_post(handle->wakeSignal);
 }
 
+/* One entry per Logical Node whose RCB(s) needed a dynamically-created
+ * dataset within the current connect cycle - see getOrCreateDynamicDataset's
+ * own doc comment for why this de-dup exists. Built fresh in enableAllTargets
+ * for every (re)connect and discarded at the end of that same call; never
+ * carried across reconnects (the @-scoped datasets it names don't survive a
+ * reconnect either - see MmsReportClientConnection_create's own comment on
+ * the connection object's own reuse for the parallel reasoning). */
+typedef struct {
+    char* lnReference;  /* owned copy, matches ReportControlBlockTarget.lnReference */
+    char* datasetName;  /* owned copy, e.g. "@dyn_E13_6MD_PTOC1" */
+} DynamicDatasetCacheEntry;
+
 static void
-enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) {
+destroyDynamicDatasetCacheEntry(void* entry) {
+    if (!entry) return;
+    DynamicDatasetCacheEntry* e = (DynamicDatasetCacheEntry*) entry;
+    free(e->lnReference);
+    free(e->datasetName);
+    free(e);
+}
+
+static const char*
+lookupDynamicDatasetName(LinkedList cache, const char* lnReference) {
+    if (!cache || !lnReference) return NULL;
+
+    LinkedList element = LinkedList_getNext(cache);
+    while (element) {
+        DynamicDatasetCacheEntry* entry = (DynamicDatasetCacheEntry*) LinkedList_getData(element);
+        if (entry->lnReference && strcmp(entry->lnReference, lnReference) == 0) return entry->datasetName;
+        element = LinkedList_getNext(element);
+    }
+    return NULL;
+}
+
+/* Small duplicated lookup (mirrors mms_report_client_report_adapter.c's own
+ * lookupMemberRefCache) - both are tiny, data-layer-local, and this feature's
+ * own convention already duplicates snippets this size across files rather
+ * than sharing them (see e.g. the ACSE-auth-setup duplication between this
+ * feature and scl_bootstrap). */
+static MmsReportClientMemberRefCacheEntry*
+lookupMemberRefCacheByRcb(MmsReportClientHandle handle, const char* rcbReference) {
+    if (!handle->memberRefCache || !rcbReference) return NULL;
+
+    LinkedList element = LinkedList_getNext(handle->memberRefCache);
+    while (element) {
+        MmsReportClientMemberRefCacheEntry* entry =
+                (MmsReportClientMemberRefCacheEntry*) LinkedList_getData(element);
+        if (entry->rcbReference && strcmp(entry->rcbReference, rcbReference) == 0) return entry;
+        element = LinkedList_getNext(element);
+    }
+    return NULL;
+}
+
+/* "@"-prefixed => association-scoped (destroyed automatically when this
+ * connection closes - see IedConnection_createDataSet's own doc comment) -
+ * no explicit delete needed, no risk of leaking the device's dataset budget
+ * across reconnects/restarts. lnReference is sanitized ('/' -> '_') purely so
+ * the generated name reads sensibly in logs; createDataSet doesn't require
+ * any particular naming beyond the leading "@". */
+static char*
+buildDynamicDatasetName(const char* lnReference) {
+    size_t len = strlen("@dyn_") + strlen(lnReference) + 1;
+    char* name = malloc(len);
+    if (!name) return NULL;
+    snprintf(name, len, "@dyn_%s", lnReference);
+    for (char* p = name; *p; p++) {
+        if (*p == '/') *p = '_';
+    }
+    return name;
+}
+
+/*
+ * For an RCB whose SCL declared no datSet (datasetReference == NULL,
+ * datSet="Dyn" in SCL terms - see CLAUDE.md's own bullet on this): creates an
+ * association-scoped dataset covering every FC=ST/MX leaf attribute under the
+ * RCB's own LN (member list already resolved once, locally, into
+ * handle->memberRefCache by buildMemberRefCache - see that function's own
+ * comment on why the same list is reused here rather than re-walked).
+ *
+ * dynamicDatasetCache de-dupes by LN within one connect cycle: many real
+ * IEDs expose several reserved RCB instances per LN (e.g. urcbA..urcbJ) that
+ * would otherwise each trigger their own createDataSet call for what is
+ * conceptually the same dataset - wasteful, and unnecessarily consumes the
+ * device's (often small, e.g. 15) dataset-count budget.
+ *
+ * Returns the dataset name (borrowed - owned by dynamicDatasetCache, valid
+ * for the rest of the current connect cycle) on success, or NULL if no
+ * reportable attributes were found for this LN, or if dataset creation
+ * itself failed (cap exceeded, maxAttributes exceeded, etc.) - either way,
+ * the caller falls back to today's pre-existing behavior (skip DATSET, let
+ * setRCBValues fail, log, move on).
+ */
+static const char*
+getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target,
+        LinkedList dynamicDatasetCache) {
+    if (!dynamicDatasetCache || !target->lnReference) return NULL;
+
+    const char* existing = lookupDynamicDatasetName(dynamicDatasetCache, target->lnReference);
+    if (existing) return existing;
+
+    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (!cacheEntry || cacheEntry->memberCount <= 0) {
+        fprintf(stderr, "[mms_report_client] no reportable (FC=ST/MX) attributes found for LN '%s' - "
+                "'%s' will not get a dynamic dataset\n",
+                target->lnReference, target->objectReference);
+        return NULL;
+    }
+
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(
+            (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount);
+    if (!wireRefs || LinkedList_size(wireRefs) == 0) {
+        fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' - "
+                "'%s' will not get a dynamic dataset\n",
+                target->lnReference, target->objectReference);
+        if (wireRefs) LinkedList_destroyDeep(wireRefs, free);
+        return NULL;
+    }
+
+    char* datasetName = buildDynamicDatasetName(target->lnReference);
+    if (!datasetName) {
+        LinkedList_destroyDeep(wireRefs, free);
+        return NULL;
+    }
+
+    IedClientError err = IED_ERROR_OK;
+    IedConnection_createDataSet(handle->connection, &err, datasetName, wireRefs);
+    LinkedList_destroyDeep(wireRefs, free);
+
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
+                "'%s' will not report\n", target->lnReference, err, target->objectReference);
+        free(datasetName);
+        return NULL;
+    }
+
+    DynamicDatasetCacheEntry* cacheNode = malloc(sizeof(DynamicDatasetCacheEntry));
+    if (!cacheNode) {
+        /* Dataset now exists on the server but there's no way to remember
+         * the name for reuse this cycle - association-scoped, so it's
+         * cleaned up automatically when this connection eventually closes;
+         * just missing a reuse opportunity for the rest of this cycle, not a
+         * leak. */
+        free(datasetName);
+        return NULL;
+    }
+    cacheNode->lnReference = MmsReportClientUtils_safeStringDup(target->lnReference);
+    cacheNode->datasetName = datasetName;
+    LinkedList_add(dynamicDatasetCache, cacheNode);
+
+    return cacheNode->datasetName;
+}
+
+static void
+enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, LinkedList dynamicDatasetCache) {
     IedClientError err = IED_ERROR_OK;
 
     ClientReportControlBlock rcb =
@@ -60,9 +214,23 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * dataSetName at server build time) is fragile: libiec61850's own
      * reference client example (client_example_no_thread.c) always sets
      * RCB_ELEMENT_DATSET alongside RPT_ENA/GI too, using the same "$"-joined
-     * reference format ied_model already hands us in datasetReference. */
-    if (target->datasetReference) {
-        ClientReportControlBlock_setDataSetReference(rcb, target->datasetReference);
+     * reference format ied_model already hands us in datasetReference.
+     *
+     * If neither SCL nor a prior client has assigned this RCB a dataset, this
+     * is a "dynamic" RCB (IEC 61850 permits an RCB to exist with no dataset
+     * until one is assigned at runtime, datSet="Dyn" in SCL terms) -
+     * getOrCreateDynamicDataset synthesizes one covering every reportable
+     * (FC=ST/MX) attribute of the RCB's own LN, association-scoped so it
+     * needs no explicit cleanup. If that also fails (no reportable
+     * attributes, or the device rejects creation - cap exceeded, etc.),
+     * DATSET is left unset and setRCBValues below fails with
+     * IED_ERROR_OBJECT_VALUE_INVALID, same as before this feature existed. */
+    const char* effectiveDatasetReference = target->datasetReference;
+    if (!effectiveDatasetReference) {
+        effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, dynamicDatasetCache);
+    }
+    if (effectiveDatasetReference) {
+        ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
         mask |= RCB_ELEMENT_DATSET;
     }
 
@@ -89,6 +257,15 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     if (handle->rcbStatusCallback) {
         handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, true, IED_ERROR_OK);
     }
+
+    /* Every successful (re-)enable forgets whatever was cached before -
+     * first connect included (harmless there, the cache is already all-NULL)
+     * - so the GI snapshot this enable just requested is never diffed
+     * against stale pre-disconnect values and silently dropped. See
+     * MmsReportClientUseCases_resetValueDiffCache's own doc comment. */
+    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (cacheEntry) MmsReportClientUseCases_resetValueDiffCache(cacheEntry);
+
     ClientReportControlBlock_destroy(rcb);
 }
 
@@ -98,11 +275,17 @@ static void
 enableAllTargets(MmsReportClientHandle handle) {
     if (!handle->targets) return;
 
+    /* Fresh per connect cycle, never carried across reconnects - see
+     * DynamicDatasetCacheEntry's own doc comment. */
+    LinkedList dynamicDatasetCache = LinkedList_create();
+
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element) {
-        enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element));
+        enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), dynamicDatasetCache);
         element = LinkedList_getNext(element);
     }
+
+    if (dynamicDatasetCache) LinkedList_destroyDeep(dynamicDatasetCache, destroyDynamicDatasetCacheEntry);
 }
 
 /* Sleeps in small chunks so MmsReportClientConnection_stop()'s bounded wait

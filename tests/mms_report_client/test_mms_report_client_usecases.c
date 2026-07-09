@@ -19,7 +19,7 @@ test_buildReportRecord_copiesScalarFields(void) {
             false, NULL,
             true, 1700000000000ULL,
             true, 7,
-            NULL, NULL, NULL, NULL, 0, 0);
+            NULL, NULL, NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Breaker1CB1/LLN0.BR.brcbMain", record->rcbReference);
@@ -43,7 +43,7 @@ test_buildReportRecord_deepCopiesEntries_notAliased(void) {
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
     MmsValue_setElement(dataSetValues, 1, MmsValue_newIntegerFromInt32(99));
 
-    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_GI };
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_QUALITY_CHANGE };
     char ref0[] = "Breaker1CB1/XCBR1.Pos.stVal";
     char ref1[] = "Breaker1CB1/MMXU1.TotW.mag";
     const char* dataReferences[2] = { ref0, ref1 };
@@ -51,7 +51,7 @@ test_buildReportRecord_deepCopiesEntries_notAliased(void) {
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
-            dataSetValues, reasons, dataReferences, NULL, 0, 2);
+            dataSetValues, reasons, dataReferences, NULL, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(2, record->entryCount);
@@ -62,7 +62,7 @@ test_buildReportRecord_deepCopiesEntries_notAliased(void) {
     TEST_ASSERT_EQUAL_STRING(ref0, record->entries[0].reference);
     TEST_ASSERT_EQUAL_STRING(ref1, record->entries[1].reference);
     TEST_ASSERT_EQUAL_INT(IEC61850_REASON_DATA_CHANGE, record->entries[0].reason);
-    TEST_ASSERT_EQUAL_INT(IEC61850_REASON_GI, record->entries[1].reason);
+    TEST_ASSERT_EQUAL_INT(IEC61850_REASON_QUALITY_CHANGE, record->entries[1].reason);
 
     /* Mutate/free the inputs after the call - the record must be unaffected.
      * This is what proves the "must not borrow past the callback" contract,
@@ -86,12 +86,15 @@ test_buildReportRecord_prefersServerDataReference_overFallback(void) {
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
     const char* dataReferences[1] = { "Server/Supplied.reference" };
-    const char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+    char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+    MmsReportClientMemberRefCacheEntry memberRefCache = { 0 };
+    memberRefCache.memberReferences = fallbackReferences;
+    memberRefCache.memberCount = 1;
 
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
-            dataSetValues, NULL, dataReferences, fallbackReferences, 1, 1);
+            dataSetValues, NULL, dataReferences, &memberRefCache, 1);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Server/Supplied.reference", record->entries[0].reference);
@@ -106,12 +109,15 @@ test_buildReportRecord_usesFallbackReference_whenServerDataReferenceMissing(void
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
     char fallbackBuf[] = "Fallback/Resolved.reference";
-    const char* fallbackReferences[1] = { fallbackBuf };
+    char* fallbackReferences[1] = { fallbackBuf };
+    MmsReportClientMemberRefCacheEntry memberRefCache = { 0 };
+    memberRefCache.memberReferences = fallbackReferences;
+    memberRefCache.memberCount = 1;
 
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
-            dataSetValues, NULL, NULL, fallbackReferences, 1, 1);
+            dataSetValues, NULL, NULL, &memberRefCache, 1);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Fallback/Resolved.reference", record->entries[0].reference);
@@ -132,12 +138,15 @@ test_buildReportRecord_fallbackOutOfRange_leavesReferenceNull(void) {
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
     MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
 
-    const char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+    char* fallbackReferences[1] = { "Fallback/Resolved.reference" };
+    MmsReportClientMemberRefCacheEntry memberRefCache = { 0 };
+    memberRefCache.memberReferences = fallbackReferences;
+    memberRefCache.memberCount = 1; /* only covers index 0 - dataset has 2 entries */
 
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
-            dataSetValues, NULL, NULL, fallbackReferences, 1, 2);
+            dataSetValues, NULL, NULL, &memberRefCache, 2);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_STRING("Fallback/Resolved.reference", record->entries[0].reference);
@@ -154,7 +163,7 @@ test_buildReportRecord_copiesEntryId_whenPresent(void) {
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             true, entryId, false, 0, false, 0,
-            NULL, NULL, NULL, NULL, 0, 0);
+            NULL, NULL, NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_TRUE(record->hasEntryId);
@@ -168,6 +177,909 @@ test_buildReportRecord_copiesEntryId_whenPresent(void) {
 void
 test_freeReportRecord_doesNotCrash_onNull(void) {
     MmsReportClientUseCases_freeReportRecord(NULL);
+}
+
+/* ---- buildReportRecord: hybrid event filter (value-diff cache) ----
+ *
+ * Without a memberRefCache (NULL, as most tests above pass), there is no
+ * value-diff cache slot to gate on, so every entry is an unconditional
+ * passthrough regardless of reason - these tests instead build a real
+ * MmsReportClientMemberRefCacheEntry with its leafSlotOffsets/
+ * lastForwardedValues populated, the same shape mms_report_client_api.c's
+ * buildMemberRefCache constructs at MmsReportClient_start. */
+
+void
+test_buildReportRecord_giReason_firstEverValue_isForwarded_andSeedsCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_GI };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { NULL }; /* never forwarded yet */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "the very first report for a position must survive even with a purely periodic (GI) "
+            "reason - it's the only chance to deliver that position's initial value");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0],
+            "the cache slot must be seeded after the first forward");
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(cache.lastForwardedValues[0]));
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_integrityReason_unchangedValue_isDroppedAfterSeed(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_INTEGRITY };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* already forwarded once, same value */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a periodic-only re-send of an unchanged value must be dropped once the cache is seeded");
+    TEST_ASSERT_NULL(record->entries);
+
+    MmsValue_delete(lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_integrityReason_changedValue_isForwarded(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_INTEGRITY };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) }; /* last forwarded value differs */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a periodic-only entry whose value genuinely differs from the cache must still survive");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_TRUE_MESSAGE(MmsValue_getBoolean(cache.lastForwardedValues[0]),
+            "the cache must be updated to the new value after forwarding");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_dataChangeReason_sameValueAsCache_isStillForwarded(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    /* server says DATA_CHANGE, but the value happens to equal the cache */
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a genuine DATA_CHANGE reason must always be trusted and forwarded, "
+            "even if the value happens to equal the cache");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice(void) {
+    /* Reproduces a real device that never populates ReasonForInclusion at all
+     * (every entry reads back as IEC61850_REASON_UNKNOWN) - the value-diff
+     * cache is the only thing that can filter its periodic re-sends. */
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { NULL };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_UNKNOWN };
+
+    /* Call 1: first-ever value survives. */
+    MmsValue* dataSetValues1 = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues1, 0, MmsValue_newBoolean(true));
+    MmsReportRecord* record1 = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues1, reasons, NULL, &cache, 1);
+    TEST_ASSERT_EQUAL_INT(1, record1->entryCount);
+    MmsValue_delete(dataSetValues1);
+    MmsReportClientUseCases_freeReportRecord(record1);
+
+    /* Call 2: identical value re-sent - must be dropped. */
+    MmsValue* dataSetValues2 = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues2, 0, MmsValue_newBoolean(true));
+    MmsReportRecord* record2 = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues2, reasons, NULL, &cache, 1);
+    TEST_ASSERT_EQUAL_INT(0, record2->entryCount);
+    MmsValue_delete(dataSetValues2);
+    MmsReportClientUseCases_freeReportRecord(record2);
+
+    /* Call 3: genuinely different value - must survive. */
+    MmsValue* dataSetValues3 = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues3, 0, MmsValue_newBoolean(false));
+    MmsReportRecord* record3 = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues3, reasons, NULL, &cache, 1);
+    TEST_ASSERT_EQUAL_INT(1, record3->entryCount);
+    MmsValue_delete(dataSetValues3);
+    MmsReportClientUseCases_freeReportRecord(record3);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+}
+
+/* ---- buildReportRecord: Gap 4 structure decomposition ---- */
+
+void
+test_buildReportRecord_decomposesStructuredEntry_intoFlatLeaves(void) {
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(2, record->entryCount);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$stVal", record->entries[0].reference);
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(record->entries[0].value));
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+    TEST_ASSERT_EQUAL_INT(IEC61850_REASON_DATA_CHANGE, record->entries[0].reason);
+    TEST_ASSERT_EQUAL_INT(IEC61850_REASON_DATA_CHANGE, record->entries[1].reason);
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_decomposition_countMismatch_fallsBackToRawEntry(void) {
+    /* Claims 3 leaves, but the actual structure only has 2 elements - the
+     * wire-order assumption broke for this position, must not mis-pair. */
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    char* memberRefs[1] = { "Breaker1CB1/XCBR1.Pos" };
+    char* leafRefs0[3] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q", "Breaker1CB1/XCBR1.Pos$t" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 3 }; /* mismatch: structVal only has 2 elements */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberReferences = memberRefs;
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a leaf-count mismatch must fall back to one raw (non-decomposed) entry, not mis-paired leaves");
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos", record->entries[0].reference);
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped(void) {
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[2] = { NULL, NULL };
+
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    ReasonForInclusion giReasons[1] = { IEC61850_REASON_GI };
+    ReasonForInclusion integrityReasons[1] = { IEC61850_REASON_INTEGRITY };
+
+    /* Call 1 (GI, first ever): both leaves survive and seed the cache. */
+    MmsValue* structVal1 = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal1, 0, MmsValue_newBoolean(true));
+    MmsValue_setElement(structVal1, 1, MmsValue_newBitString(13));
+    MmsValue* dataSetValues1 = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues1, 0, structVal1);
+
+    MmsReportRecord* record1 = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues1, giReasons, NULL, &cache, 1);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record1->entryCount,
+            "the first-ever GI report must deliver both decomposed leaves");
+    MmsValue_delete(dataSetValues1);
+    MmsReportClientUseCases_freeReportRecord(record1);
+
+    /* Call 2 (INTEGRITY, identical values): both leaves are duplicates, dropped. */
+    MmsValue* structVal2 = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal2, 0, MmsValue_newBoolean(true));
+    MmsValue_setElement(structVal2, 1, MmsValue_newBitString(13));
+    MmsValue* dataSetValues2 = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues2, 0, structVal2);
+
+    MmsReportRecord* record2 = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues2, integrityReasons, NULL, &cache, 1);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record2->entryCount,
+            "a subsequent periodic re-send of the same decomposed values must be filtered entirely");
+    MmsValue_delete(dataSetValues2);
+    MmsReportClientUseCases_freeReportRecord(record2);
+
+    MmsValue_delete(lastForwardedValues[0]);
+    MmsValue_delete(lastForwardedValues[1]);
+}
+
+/* ---- buildReportRecord: group-aware forwarding (value <-> quality pairing fix) ---- */
+
+void
+test_buildReportRecord_valueForwarded_dragsUnchangedQualitySibling(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "quality's own diff-check says unchanged, but it must still be dragged along "
+            "because its value sibling (same DO) was forwarded due to a real change");
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$stVal", record->entries[0].reference);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_qualityForwarded_dragsUnchangedValueSibling(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(false)); /* stVal: matches cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(true));  /* q: differs from cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_UNKNOWN, IEC61850_REASON_QUALITY_CHANGE };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "a genuine quality-only change must not be dropped as a lone entry - its unchanged "
+            "value sibling must be dragged along too, matching what ipc_dispatcher needs to pair them");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_bothSiblingsUnchanged_neitherForwarded(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(false));
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false));
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_UNKNOWN, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(0, record->entryCount);
+    TEST_ASSERT_NULL(record->entries);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_ungroupableEntry_fallsBackToSoloDiffCheck(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true)); /* differs from cache */
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    /* memberReferences left NULL - this entry's reference can never resolve,
+     * so it must be its own ungroupable singleton, behaving exactly like the
+     * pre-existing (pre-grouping) solo diff-check. */
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_NULL(record->entries[0].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void) {
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    /* Shared reason - both leaves of one decomposed DO-level position always
+     * share the raw position's one reason, so only the value-diff check can
+     * decide either leaf's fate individually here. */
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_INTEGRITY };
+
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(structVal, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "the unchanged q leaf must be dragged along by its changed stVal sibling, even "
+            "though both leaves came from the same decomposed DO-level position (Gap 4)");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp(void) {
+    /* Real device shape: cVal.mag.f (2 raw dataset positions - "cVal$mag$f"
+     * and "q" - authored as separate DA-level FCDA entries, not decomposed
+     * from one DO-level entry) nests 3 "$"-segments below the CMV instance
+     * ("phsA") that q actually belongs to. Before the ancestor-walk fix, the
+     * grouping logic only ever stripped the last "$" segment and never
+     * recognized these two as sharing a scope at all. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newFloat(50.0f)); /* cVal.mag.f: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newFloat(49.0f), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsA$q",
+    };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.RP.rcbMain", false, "rcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "q must be dragged along by its changed cVal.mag.f sibling despite being several "
+            "\"$\"-segments shallower than the nested measured value's own reference");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
+    /* Two independent CMV instances (phsA, phsB) - phsA's value must never
+     * accidentally group with phsB's q just because "PhV" is a shared
+     * ancestor of both. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newFloat(50.0f)); /* phsA's cVal.mag.f: differs */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* phsB's q: matches cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newFloat(49.0f), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = {
+        "LD0/MMXU1$MX$PhV$phsA$cVal$mag$f",
+        "LD0/MMXU1$MX$PhV$phsB$q",
+    };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.RP.rcbMain", false, "rcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "phsB's unrelated, unchanged q must NOT be dragged along by phsA's changed value");
+    TEST_ASSERT_EQUAL_STRING("LD0/MMXU1$MX$PhV$phsA$cVal$mag$f", record->entries[0].reference);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+/* ---- resetValueDiffCache ---- */
+
+void
+test_resetValueDiffCache_nullsOutEveryPopulatedSlot(void) {
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(true), MmsValue_newBoolean(false) };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportClientUseCases_resetValueDiffCache(&cache);
+
+    TEST_ASSERT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_NULL(cache.lastForwardedValues[1]);
+}
+
+void
+test_resetValueDiffCache_leavesAlreadyNullSlotsUntouched(void) {
+    MmsValue* lastForwardedValues[2] = { NULL, NULL };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportClientUseCases_resetValueDiffCache(&cache);
+
+    TEST_ASSERT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_NULL(cache.lastForwardedValues[1]);
+}
+
+void
+test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull(void) {
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.totalLeafSlots = 0;
+    cache.lastForwardedValues = NULL;
+
+    MmsReportClientUseCases_resetValueDiffCache(&cache); /* must not crash */
+}
+
+void
+test_resetValueDiffCache_isNoOp_whenEntryIsNull(void) {
+    MmsReportClientUseCases_resetValueDiffCache(NULL); /* must not crash */
+}
+
+void
+test_buildReportRecord_afterResetValueDiffCache_unchangedValueForwardedAgain(void) {
+    /* Simulates a reconnect: the same value was already forwarded once
+     * before (seeded below), then the connection drops and reconnects -
+     * enableOneTarget resets the cache, and the reconnect's GI-triggered
+     * report carries the exact same, unchanged value. It must still be
+     * forwarded (the whole point of resetting on reconnect), proving the
+     * fix for the "reconnect's GI snapshot silently dropped" regression. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_GI };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* forwarded before the "disconnect" */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportClientUseCases_resetValueDiffCache(&cache);
+    TEST_ASSERT_NULL_MESSAGE(cache.lastForwardedValues[0], "reset must clear the pre-reconnect cache");
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a value identical to what was forwarded before a reconnect must still be delivered "
+            "once the cache has been reset");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+/* ---- shouldForwardAcrossRcb (cross-RCB duplicate-content suppression) ---- */
+
+static MmsReportEntry*
+makeDedupEntries(const char* ref0, bool val0, const char* ref1, bool val1) {
+    MmsReportEntry* entries = calloc(2, sizeof(MmsReportEntry));
+    entries[0].reference = strdup(ref0);
+    entries[0].value = MmsValue_newBoolean(val0);
+    entries[1].reference = strdup(ref1);
+    entries[1].value = MmsValue_newBoolean(val1);
+    return entries;
+}
+
+static void
+freeDedupEntries(MmsReportEntry* entries, int count) {
+    for (int i = 0; i < count; i++) {
+        free(entries[i].reference);
+        if (entries[i].value) MmsValue_delete(entries[i].value);
+    }
+    free(entries);
+}
+
+void
+test_shouldForwardAcrossRcb_firstEverContent_isForwarded_andSeedsCache(void) {
+    MmsReportClientCrossRcbDedupCache cache = { 0 };
+    MmsReportEntry* entries = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+
+    bool result = MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entries, 2);
+
+    TEST_ASSERT_TRUE_MESSAGE(result, "nothing cached yet - must always forward");
+    TEST_ASSERT_EQUAL_STRING("LD/GGIO1.RP.urcbA01", cache.rcbReference);
+    TEST_ASSERT_EQUAL_INT(2, cache.entryCount);
+
+    freeDedupEntries(entries, 2);
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossRcb_sameRcbIdenticalContent_isStillForwarded(void) {
+    /* A repeat from the SAME RCB is this stage's non-concern - the per-RCB
+     * hybrid filter already decided to forward it (e.g. a trusted
+     * DATA_CHANGE reason even though the value happened to match), so this
+     * stage must not second-guess that decision. */
+    MmsReportClientCrossRcbDedupCache cache = { 0 };
+    MmsReportEntry* entries1 = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entries1, 2));
+
+    MmsReportEntry* entries2 = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    bool result = MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entries2, 2);
+
+    TEST_ASSERT_TRUE(result);
+
+    freeDedupEntries(entries1, 2);
+    freeDedupEntries(entries2, 2);
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossRcb_differentRcbIdenticalContent_isSuppressed(void) {
+    MmsReportClientCrossRcbDedupCache cache = { 0 };
+    MmsReportEntry* entries1 = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entries1, 2));
+
+    MmsReportEntry* entries2 = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    bool result = MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbB01", entries2, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result,
+            "a different RCB reporting byte-identical content must be suppressed as a duplicate");
+
+    freeDedupEntries(entries1, 2);
+    freeDedupEntries(entries2, 2);
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossRcb_differentRcbDifferentContent_isForwarded(void) {
+    MmsReportClientCrossRcbDedupCache cache = { 0 };
+    MmsReportEntry* entries1 = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entries1, 2));
+
+    MmsReportEntry* entries2 = makeDedupEntries("LD/GGIO1$ST$SPCSO2$stVal", true, "LD/GGIO1$ST$SPCSO2$t", 1000);
+    bool result = MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbB01", entries2, 2);
+
+    TEST_ASSERT_TRUE_MESSAGE(result, "genuinely different content from a different RCB must be forwarded");
+    TEST_ASSERT_EQUAL_STRING("LD/GGIO1.RP.urcbB01", cache.rcbReference);
+
+    freeDedupEntries(entries1, 2);
+    freeDedupEntries(entries2, 2);
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossRcb_suppressionDoesNotDisturbEstablishedBaseline(void) {
+    /* Three redundant RCBs (A, B, C) all reporting the same content: only A
+     * forwards; B and C are both suppressed against A's original content -
+     * suppression must not overwrite the cache, or a later repeat could
+     * wrongly compare against a suppressed entry's own (never-cached) RCB. */
+    MmsReportClientCrossRcbDedupCache cache = { 0 };
+    MmsReportEntry* entriesA = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbA01", entriesA, 2));
+
+    MmsReportEntry* entriesB = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbB01", entriesB, 2));
+
+    MmsReportEntry* entriesC = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    bool result = MmsReportClientUseCases_shouldForwardAcrossRcb(&cache, "LD/GGIO1.RP.urcbC01", entriesC, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result, "C must still be recognized as a duplicate of A's original content, "
+            "even though B's suppressed report never touched the cache");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("LD/GGIO1.RP.urcbA01", cache.rcbReference,
+            "the cache must still reflect A, the only one actually forwarded");
+
+    freeDedupEntries(entriesA, 2);
+    freeDedupEntries(entriesB, 2);
+    freeDedupEntries(entriesC, 2);
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&cache);
+}
+
+void
+test_shouldForwardAcrossRcb_isNoOp_whenCacheIsNull(void) {
+    MmsReportEntry* entries = makeDedupEntries("LD/GGIO1$ST$SPCSO1$stVal", true, "LD/GGIO1$ST$SPCSO1$t", 1000);
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_shouldForwardAcrossRcb(NULL, "LD/GGIO1.RP.urcbA01", entries, 2));
+    freeDedupEntries(entries, 2);
+}
+
+void
+test_destroyCrossRcbDedupCache_doesNotCrash_onNull(void) {
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(NULL);
+}
+
+/* ---- hasRealChangeReason ---- */
+
+void
+test_hasRealChangeReason_trueForEachRealBitAlone(void) {
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_DATA_CHANGE));
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_QUALITY_CHANGE));
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_DATA_UPDATE));
+}
+
+void
+test_hasRealChangeReason_falseForIntegrityOrGiAlone(void) {
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_INTEGRITY));
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_GI));
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(
+            IEC61850_REASON_INTEGRITY | IEC61850_REASON_GI));
+}
+
+void
+test_hasRealChangeReason_trueWhenCombinedWithPeriodicBit(void) {
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(
+            IEC61850_REASON_DATA_CHANGE | IEC61850_REASON_INTEGRITY));
+    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(
+            IEC61850_REASON_QUALITY_CHANGE | IEC61850_REASON_GI));
+}
+
+void
+test_hasRealChangeReason_falseForUnknownAndNotIncluded(void) {
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_UNKNOWN));
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_NOT_INCLUDED));
+}
+
+/* ---- buildWireMemberReferences (dynamic-dataset wire-format conversion) ---- */
+
+void
+test_buildWireMemberReferences_convertsDollarJoinedToDotBracketForm(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$MX$TotW$mag" };
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(refs, 2);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(wireRefs));
+    LinkedList element = LinkedList_getNext(wireRefs);
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0.Mod.stVal[ST]", (const char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0.TotW.mag[MX]", (const char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(wireRefs, free);
+}
+
+void
+test_buildWireMemberReferences_joinsNestedSegmentsWithDots(void) {
+    const char* refs[] = { "IED1LD1/LLN0$MX$PhV$cVal$mag" };
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(refs, 1);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(wireRefs));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0.PhV.cVal.mag[MX]",
+            (const char*) LinkedList_getData(LinkedList_getNext(wireRefs)));
+
+    LinkedList_destroyDeep(wireRefs, free);
+}
+
+void
+test_buildWireMemberReferences_skipsMalformedReference_tooFewSegments(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST", "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(refs, 2);
+
+    /* Only the well-formed second entry survives - the malformed first one
+     * (nothing after the FC segment) is silently skipped, not partially
+     * converted. */
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(wireRefs));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0.Mod.stVal[ST]",
+            (const char*) LinkedList_getData(LinkedList_getNext(wireRefs)));
+
+    LinkedList_destroyDeep(wireRefs, free);
+}
+
+void
+test_buildWireMemberReferences_skipsNullEntry(void) {
+    const char* refs[] = { NULL, "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(refs, 2);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(wireRefs));
+
+    LinkedList_destroyDeep(wireRefs, free);
+}
+
+void
+test_buildWireMemberReferences_empty_whenCountIsZeroOrNegative(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+
+    LinkedList wireRefsZero = MmsReportClientUseCases_buildWireMemberReferences(refs, 0);
+    TEST_ASSERT_NOT_NULL(wireRefsZero);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(wireRefsZero));
+    LinkedList_destroyDeep(wireRefsZero, free);
+
+    LinkedList wireRefsNeg = MmsReportClientUseCases_buildWireMemberReferences(refs, -1);
+    TEST_ASSERT_NOT_NULL(wireRefsNeg);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(wireRefsNeg));
+    LinkedList_destroyDeep(wireRefsNeg, free);
+}
+
+void
+test_buildWireMemberReferences_empty_whenArrayIsNull(void) {
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(NULL, 3);
+
+    TEST_ASSERT_NOT_NULL(wireRefs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(wireRefs));
+
+    LinkedList_destroyDeep(wireRefs, free);
 }
 
 /* ---- computeNextBackoffDelay ---- */
@@ -213,6 +1125,48 @@ main(void) {
     RUN_TEST(test_buildReportRecord_fallbackOutOfRange_leavesReferenceNull);
     RUN_TEST(test_buildReportRecord_copiesEntryId_whenPresent);
     RUN_TEST(test_freeReportRecord_doesNotCrash_onNull);
+    RUN_TEST(test_buildReportRecord_giReason_firstEverValue_isForwarded_andSeedsCache);
+    RUN_TEST(test_buildReportRecord_integrityReason_unchangedValue_isDroppedAfterSeed);
+    RUN_TEST(test_buildReportRecord_integrityReason_changedValue_isForwarded);
+    RUN_TEST(test_buildReportRecord_dataChangeReason_sameValueAsCache_isStillForwarded);
+    RUN_TEST(test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice);
+    RUN_TEST(test_buildReportRecord_decomposesStructuredEntry_intoFlatLeaves);
+    RUN_TEST(test_buildReportRecord_decomposition_countMismatch_fallsBackToRawEntry);
+    RUN_TEST(test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped);
+
+    RUN_TEST(test_buildReportRecord_valueForwarded_dragsUnchangedQualitySibling);
+    RUN_TEST(test_buildReportRecord_qualityForwarded_dragsUnchangedValueSibling);
+    RUN_TEST(test_buildReportRecord_bothSiblingsUnchanged_neitherForwarded);
+    RUN_TEST(test_buildReportRecord_ungroupableEntry_fallsBackToSoloDiffCheck);
+    RUN_TEST(test_buildReportRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf);
+    RUN_TEST(test_buildReportRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
+    RUN_TEST(test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
+
+    RUN_TEST(test_resetValueDiffCache_nullsOutEveryPopulatedSlot);
+    RUN_TEST(test_resetValueDiffCache_leavesAlreadyNullSlotsUntouched);
+    RUN_TEST(test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull);
+    RUN_TEST(test_resetValueDiffCache_isNoOp_whenEntryIsNull);
+    RUN_TEST(test_buildReportRecord_afterResetValueDiffCache_unchangedValueForwardedAgain);
+
+    RUN_TEST(test_shouldForwardAcrossRcb_firstEverContent_isForwarded_andSeedsCache);
+    RUN_TEST(test_shouldForwardAcrossRcb_sameRcbIdenticalContent_isStillForwarded);
+    RUN_TEST(test_shouldForwardAcrossRcb_differentRcbIdenticalContent_isSuppressed);
+    RUN_TEST(test_shouldForwardAcrossRcb_differentRcbDifferentContent_isForwarded);
+    RUN_TEST(test_shouldForwardAcrossRcb_suppressionDoesNotDisturbEstablishedBaseline);
+    RUN_TEST(test_shouldForwardAcrossRcb_isNoOp_whenCacheIsNull);
+    RUN_TEST(test_destroyCrossRcbDedupCache_doesNotCrash_onNull);
+
+    RUN_TEST(test_hasRealChangeReason_trueForEachRealBitAlone);
+    RUN_TEST(test_hasRealChangeReason_falseForIntegrityOrGiAlone);
+    RUN_TEST(test_hasRealChangeReason_trueWhenCombinedWithPeriodicBit);
+    RUN_TEST(test_hasRealChangeReason_falseForUnknownAndNotIncluded);
+
+    RUN_TEST(test_buildWireMemberReferences_convertsDollarJoinedToDotBracketForm);
+    RUN_TEST(test_buildWireMemberReferences_joinsNestedSegmentsWithDots);
+    RUN_TEST(test_buildWireMemberReferences_skipsMalformedReference_tooFewSegments);
+    RUN_TEST(test_buildWireMemberReferences_skipsNullEntry);
+    RUN_TEST(test_buildWireMemberReferences_empty_whenCountIsZeroOrNegative);
+    RUN_TEST(test_buildWireMemberReferences_empty_whenArrayIsNull);
 
     RUN_TEST(test_computeNextBackoffDelay_returnsInitial_whenCurrentIsZero);
     RUN_TEST(test_computeNextBackoffDelay_doublesUntilCap);

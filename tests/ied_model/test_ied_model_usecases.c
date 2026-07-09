@@ -168,6 +168,7 @@ test_getReportSubscriptionTargets_returnsCorrectReference(void) {
     TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0.BR.brcb01", target->objectReference);
     TEST_ASSERT_TRUE(target->buffered);
     TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$events", target->datasetReference);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0", target->lnReference);
 
     LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
 }
@@ -192,6 +193,7 @@ test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment(void) {
     TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0.RP.urcb01", target->objectReference);
     TEST_ASSERT_FALSE(target->buffered);
     TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ds1", target->datasetReference);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0", target->lnReference);
 
     LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
     IedModel_destroy(bareModel);
@@ -281,6 +283,235 @@ test_getDataSetMemberReferences_empty_whenDatasetReferenceIsNull(void) {
 void
 test_getDataSetMemberReferences_empty_whenDatasetReferenceDoesNotResolve(void) {
     LinkedList refs = IedModelUseCases_getDataSetMemberReferences(handle, "TestIEDLD1/LLN0$doesNotExist");
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+/* ---- Data set member LEAF references (DO-level FCDA decomposition) ---- */
+
+void
+test_getDataSetMemberLeafReferences_empty_whenMemberIsAlreadyLeafLevel(void) {
+    /* "events" dataset's only entry already has a daName ($stVal) - nothing to decompose. */
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(handle, "TestIEDLD1/LLN0$events", 0);
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getDataSetMemberLeafReferences_decomposesFlatDo(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* ind = DataObject_create("Ind", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) ind, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) ind, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    /* No daName - a DO-level FCDA, matching the real ABB REC650 SCD's
+     * <FCDA doName="..." fc="ST" /> shape (no daName attribute). */
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Ind", -1, NULL);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
+    LinkedList element = LinkedList_getNext(leaves);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$stVal", (const char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$q", (const char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(leaves, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getDataSetMemberLeafReferences_recursesIntoConstructedAttribute(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    /* Mirrors the real ABB REC650 WYE->CMV->Vector nesting at a smaller
+     * scale: PhV (DO) -> cVal (CONSTRUCTED DA, fc=MX) -> mag (BDA, fc=MX) -
+     * "mag" is only reachable by recursing INTO cVal, unlike
+     * collectDataAttributesByFc's read-target walk which would terminal-ize
+     * at cVal itself. */
+    DataObject* phV = DataObject_create("PhV", (ModelNode*) ln0, 0);
+    DataAttribute* cVal = DataAttribute_create("cVal", (ModelNode*) phV, IEC61850_CONSTRUCTED, IEC61850_FC_MX, 0, 0, 0);
+    DataAttribute_create("mag", (ModelNode*) cVal, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) phV, IEC61850_QUALITY, IEC61850_FC_MX, 0, 0, 0);
+
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$MX$PhV", -1, NULL);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
+    LinkedList element = LinkedList_getNext(leaves);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$MX$PhV$cVal$mag", (const char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$MX$PhV$q", (const char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(leaves, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getDataSetMemberLeafReferences_filtersByFc_excludesOtherFcSiblings(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    /* A DPC-shaped DO: stVal/q at ST, Oper at CO - the ST-scoped FCDA below
+     * must decompose to stVal/q only, never Oper. */
+    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_INT32U, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) pos, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("Oper", (ModelNode*) pos, IEC61850_BOOLEAN, IEC61850_FC_CO, 0, 0, 0);
+
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
+    LinkedList element = LinkedList_getNext(leaves);
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        TEST_ASSERT_NULL_MESSAGE(strstr(ref, "Oper"), "CO-scoped Oper must never appear in an ST-scoped decomposition");
+        element = LinkedList_getNext(element);
+    }
+
+    LinkedList_destroyDeep(leaves, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getDataSetMemberLeafReferences_empty_whenDatasetReferenceIsNull(void) {
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(handle, NULL, 0);
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getDataSetMemberLeafReferences_empty_whenIndexOutOfRange(void) {
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(handle, "TestIEDLD1/LLN0$events", 5);
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getDataSetMemberLeafReferences_empty_whenIndexNegative(void) {
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(handle, "TestIEDLD1/LLN0$events", -1);
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+/* ---- Reportable attribute references for a dynamic-dataset LN ---- */
+
+void
+test_getReportableAttributeReferencesForLogicalNode_returnsStAndMxLeavesUnderThatLnOnly(void) {
+    /* Fixture LLN0: Mod{stVal(ST), ctlModel(CF)}, TotW{mag(MX)}, CSWI{Oper(CO)} -
+     * only stVal/mag qualify, in "LD/LN$FC$DO$DA" form (createDataSet's own
+     * wire-format conversion happens one layer up, in mms_report_client). */
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, "TestIEDLD1/LLN0");
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(refs));
+
+    bool foundStVal = false, foundMag = false;
+    LinkedList element = LinkedList_getNext(refs);
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        if (strcmp(ref, "TestIEDLD1/LLN0$ST$Mod$stVal") == 0) foundStVal = true;
+        if (strcmp(ref, "TestIEDLD1/LLN0$MX$TotW$mag") == 0) foundMag = true;
+        TEST_ASSERT_NULL_MESSAGE(strstr(ref, "ctlModel"), "CF-scoped ctlModel must never appear");
+        TEST_ASSERT_NULL_MESSAGE(strstr(ref, "Oper"), "CO-scoped Oper must never appear");
+        element = LinkedList_getNext(element);
+    }
+    TEST_ASSERT_TRUE(foundStVal);
+    TEST_ASSERT_TRUE(foundMag);
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getReportableAttributeReferencesForLogicalNode_recursesIntoConstructedAttribute(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* phV = DataObject_create("PhV", (ModelNode*) ln0, 0);
+    DataAttribute* cVal = DataAttribute_create("cVal", (ModelNode*) phV, IEC61850_CONSTRUCTED, IEC61850_FC_MX, 0, 0, 0);
+    DataAttribute_create("mag", (ModelNode*) cVal, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(&bareHandle, "BareLD1/LLN0");
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(refs));
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$MX$PhV$cVal$mag", firstElement(refs));
+
+    LinkedList_destroyDeep(refs, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getReportableAttributeReferencesForLogicalNode_empty_whenLnReferenceIsNull(void) {
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, NULL);
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getReportableAttributeReferencesForLogicalNode_empty_whenLdDoesNotResolve(void) {
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, "NoSuchLD/LLN0");
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getReportableAttributeReferencesForLogicalNode_empty_whenLnDoesNotResolve(void) {
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, "TestIEDLD1/NoSuchLN");
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
+void
+test_getReportableAttributeReferencesForLogicalNode_empty_whenNoSlashInReference(void) {
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, "MalformedNoSlash");
 
     TEST_ASSERT_NOT_NULL(refs);
     TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
@@ -384,6 +615,21 @@ main(void) {
     RUN_TEST(test_getDataSetMemberReferences_preservesOrder_forMultiEntryDataset);
     RUN_TEST(test_getDataSetMemberReferences_empty_whenDatasetReferenceIsNull);
     RUN_TEST(test_getDataSetMemberReferences_empty_whenDatasetReferenceDoesNotResolve);
+
+    RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenMemberIsAlreadyLeafLevel);
+    RUN_TEST(test_getDataSetMemberLeafReferences_decomposesFlatDo);
+    RUN_TEST(test_getDataSetMemberLeafReferences_recursesIntoConstructedAttribute);
+    RUN_TEST(test_getDataSetMemberLeafReferences_filtersByFc_excludesOtherFcSiblings);
+    RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenDatasetReferenceIsNull);
+    RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexOutOfRange);
+    RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexNegative);
+
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_returnsStAndMxLeavesUnderThatLnOnly);
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_recursesIntoConstructedAttribute);
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenLnReferenceIsNull);
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenLdDoesNotResolve);
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenLnDoesNotResolve);
+    RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenNoSlashInReference);
 
     RUN_TEST(test_getReadTargets_includesOnlyStAndMxAttributes);
     RUN_TEST(test_getReadTargets_empty_whenModelHasNoStOrMxAttributes);

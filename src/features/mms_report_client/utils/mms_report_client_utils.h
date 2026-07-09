@@ -31,4 +31,24 @@ MmsReportClientUtils_cloneReasonArray(const ReasonForInclusion* src, int count);
 char*
 MmsReportClientUtils_safeStringDup(const char* s);
 
+/*
+ * Recursively flattens a (possibly nested) MMS_STRUCTURE MmsValue into an
+ * ordered array of its terminal (non-structure) leaf elements - a DO-level
+ * dataset entry (FCDA with no daName) arrives as one such structure (e.g.
+ * {stVal, q, t}, or several levels deep for CDCs like WYE->CMV->Vector).
+ * Visitation is depth-first in element order, matching the same convention
+ * IedModel_getDataSetMemberLeafReferences uses over the DOType/DAType model
+ * tree - correspondence between the two is purely positional, an assumption
+ * documented on that function, not verified by type here.
+ *
+ * If `value` is not itself MMS_STRUCTURE, returns a single-element array
+ * containing `value` unchanged - nothing to flatten. Returned pointers are
+ * BORROWED from `value`, never cloned - caller must MmsValue_clone before
+ * value's owning ClientReport becomes invalid. Caller owns only the
+ * returned array (free it), never its elements. Returns NULL (with
+ * *outLeafCount left at 0) if `value` is NULL or on allocation failure.
+ */
+MmsValue**
+MmsReportClientUtils_flattenStructure(const MmsValue* value, int* outLeafCount);
+
 #endif /* MMS_REPORT_CLIENT_UTILS_H_ */

@@ -84,11 +84,53 @@ MmsReportClient_setRcbStatusCallback(MmsReportClientHandle client,
 }
 
 /*
+ * Walks a LinkedList of heap-allocated char* strings into a freshly allocated
+ * char** array, transferring ownership of each string into the array and
+ * discarding just the list shell (LinkedList_destroyStatic, not _destroyDeep)
+ * - same pattern goose_subscriber_api.c already uses for its own targets
+ * list. Returns NULL and leaves *outCount at 0 if the list is NULL/empty or
+ * allocation fails (the list, if any, is fully destroyed either way - never
+ * leaked). NULL-safe on `list` itself.
+ */
+static char**
+linkedListToStringArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    char** array = calloc((size_t) count, sizeof(char*));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        array[i++] = (char*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyStatic(list);
+
+    *outCount = count;
+    return array;
+}
+
+/*
  * One-time, local resolution of each target's dataset member references
  * (never over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery"
  * rule), used as a fallback for MmsReportEntry.reference when the server's
- * RCB doesn't have DataRef in its OptFlds. Built once at start; never rebuilt
- * on reconnect (same lifetime as client->targets).
+ * RCB doesn't have DataRef in its OptFlds. Also builds the Gap 4 (structure
+ * decomposition) and value-diff (hybrid event filter) per-RCB caches at the
+ * same time - see MmsReportClientMemberRefCacheEntry's own doc comment. Built
+ * once at start; never rebuilt on reconnect (same lifetime as client->targets)
+ * - though each entry's lastForwardedValues slots ARE explicitly reset on
+ * every successful (re-)enable (mms_report_client_connection.c's enableOneTarget,
+ * via MmsReportClientUseCases_resetValueDiffCache), so a reconnect's GI
+ * snapshot is never wrongly diffed against stale pre-disconnect values.
  */
 static LinkedList
 buildMemberRefCache(MmsReportClientHandle client) {
@@ -98,40 +140,85 @@ buildMemberRefCache(MmsReportClientHandle client) {
     LinkedList element = LinkedList_getNext(client->targets);
     while (element) {
         ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
-        if (target->datasetReference) {
-            LinkedList refs = IedModel_getDataSetMemberReferences(client->iedModel, target->datasetReference);
-            int count = refs ? LinkedList_size(refs) : 0;
-            if (count > 0) {
-                char** array = calloc((size_t) count, sizeof(char*));
-                if (array) {
-                    int i = 0;
-                    LinkedList refElement = LinkedList_getNext(refs);
-                    while (refElement) {
-                        array[i++] = (char*) LinkedList_getData(refElement);
-                        refElement = LinkedList_getNext(refElement);
-                    }
-                    /* ownership of each string transferred into array[];
-                     * LinkedList_destroyStatic (NOT _destroy/_destroyDeep)
-                     * discards only the list shell - same pattern
-                     * goose_subscriber_api.c already uses for its own targets list. */
-                    LinkedList_destroyStatic(refs);
 
-                    MmsReportClientMemberRefCacheEntry* cacheEntry =
-                            malloc(sizeof(MmsReportClientMemberRefCacheEntry));
-                    if (cacheEntry) {
-                        cacheEntry->rcbReference = MmsReportClientUtils_safeStringDup(target->objectReference);
-                        cacheEntry->memberReferences = array;
-                        cacheEntry->memberCount = count;
-                        LinkedList_add(cache, cacheEntry);
-                    } else {
-                        for (int j = 0; j < count; j++) free(array[j]);
-                        free(array);
-                    }
-                } else {
-                    LinkedList_destroyDeep(refs, free);
+        int count = 0;
+        char** array;
+        if (target->datasetReference) {
+            array = linkedListToStringArray(
+                    IedModel_getDataSetMemberReferences(client->iedModel, target->datasetReference), &count);
+        } else {
+            /* Dynamic RCB (SCL declared no datSet, datSet="Dyn") - fall back
+             * to every FC=ST/MX leaf under the RCB's own LN (see
+             * IedModel_getReportableAttributeReferencesForLogicalNode's own
+             * doc comment - "all the variables" for that LN). The
+             * IedModel_getDataSetMemberLeafReferences call below naturally
+             * no-ops for these entries (target->datasetReference is NULL, so
+             * it returns an empty list for every member index) - correct,
+             * since every member here is already a terminal leaf DA by
+             * construction, nothing to decompose. This is the exact same
+             * member list mms_report_client_connection.c's enableOneTarget
+             * uses to actually create the dataset on connect - computed once
+             * here, purely locally, so both sides stay in sync. */
+            array = linkedListToStringArray(
+                    IedModel_getReportableAttributeReferencesForLogicalNode(client->iedModel, target->lnReference),
+                    &count);
+        }
+
+        if (count > 0 && array) {
+            char*** leafRefsArray = calloc((size_t) count, sizeof(char**));
+            int* leafCounts = calloc((size_t) count, sizeof(int));
+            int* leafOffsets = calloc((size_t) count, sizeof(int));
+            int totalLeafSlots = 0;
+
+            if (leafRefsArray && leafCounts && leafOffsets) {
+                for (int m = 0; m < count; m++) {
+                    int leafCount = 0;
+                    char** leafArray = linkedListToStringArray(
+                            IedModel_getDataSetMemberLeafReferences(client->iedModel,
+                                    target->datasetReference, m),
+                            &leafCount);
+
+                    leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
+                    leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+                    /* Value-diff cache slot(s) for member m: leafCount
+                     * consecutive slots if decomposed, else exactly 1. */
+                    leafOffsets[m] = totalLeafSlots;
+                    totalLeafSlots += (leafCount > 0) ? leafCount : 1;
                 }
-            } else if (refs) {
-                LinkedList_destroyDeep(refs, free);
+            }
+
+            /* Zero-initialized so every slot starts NULL (never forwarded
+             * yet) - see MmsReportClientMemberRefCacheEntry's own doc comment. */
+            MmsValue** lastForwardedValues = (leafRefsArray && leafCounts && leafOffsets)
+                    ? calloc((size_t) totalLeafSlots, sizeof(MmsValue*)) : NULL;
+
+            MmsReportClientMemberRefCacheEntry* cacheEntry = malloc(sizeof(MmsReportClientMemberRefCacheEntry));
+            if (cacheEntry && leafRefsArray && leafCounts && leafOffsets && lastForwardedValues) {
+                cacheEntry->rcbReference = MmsReportClientUtils_safeStringDup(target->objectReference);
+                cacheEntry->memberReferences = array;
+                cacheEntry->memberCount = count;
+                cacheEntry->memberLeafReferences = leafRefsArray;
+                cacheEntry->memberLeafCounts = leafCounts;
+                cacheEntry->leafSlotOffsets = leafOffsets;
+                cacheEntry->totalLeafSlots = totalLeafSlots;
+                cacheEntry->lastForwardedValues = lastForwardedValues;
+                LinkedList_add(cache, cacheEntry);
+            } else {
+                free(cacheEntry);
+                for (int j = 0; j < count; j++) free(array[j]);
+                free(array);
+                if (leafRefsArray) {
+                    for (int m = 0; m < count; m++) {
+                        if (!leafRefsArray[m]) continue;
+                        for (int k = 0; k < leafCounts[m]; k++) free(leafRefsArray[m][k]);
+                        free(leafRefsArray[m]);
+                    }
+                    free(leafRefsArray);
+                }
+                free(leafCounts);
+                free(leafOffsets);
+                free(lastForwardedValues);
             }
         }
         element = LinkedList_getNext(element);
@@ -176,6 +263,7 @@ MmsReportClient_destroy(MmsReportClientHandle client) {
     if (client->memberRefCache) {
         LinkedList_destroyDeep(client->memberRefCache, MmsReportClientUseCases_destroyMemberRefCacheEntry);
     }
+    MmsReportClientUseCases_destroyCrossRcbDedupCache(&client->crossRcbDedupCache);
     free(client->host);
     free(client->ownedAuthPassword);
     free(client);

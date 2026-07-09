@@ -44,6 +44,38 @@ LinkedList IedModel_getReportSubscriptionTargets(IedModelHandle handle);
  * LinkedList_destroyDeep(list, free). */
 LinkedList IedModel_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference);
 
+/*
+ * For dataset member `memberIndex` of `datasetReference`: if that member's
+ * FCDA omitted daName (the whole Data Object was included, not one leaf Data
+ * Attribute), returns the ordered list of heap-allocated leaf-reference
+ * char* strings for every terminal Data Attribute reachable under that DO at
+ * its own FC (recursing through nested SDOs and CONSTRUCTED attributes) -
+ * purely local, walks the already-parsed model, never touches the network.
+ * Returns an empty (never NULL) list when the member is already leaf-level
+ * or on any resolution failure - both mean "nothing to decompose, use the
+ * plain reference from getDataSetMemberReferences as-is". See
+ * IedModelUseCases_getDataSetMemberLeafReferences's own doc comment for the
+ * wire-order assumption this relies on. Caller owns the list and its
+ * elements: LinkedList_destroyDeep(list, free). */
+LinkedList IedModel_getDataSetMemberLeafReferences(IedModelHandle handle, const char* datasetReference,
+        int memberIndex);
+
+/*
+ * For one LN (given its own "LD/LN" object reference, e.g.
+ * ReportControlBlockTarget.lnReference): returns every leaf Data Attribute at
+ * FC=ST (status) or FC=MX (measurand) reachable under it, in the same
+ * "LD/LN$FC$DO$DA" format IedModel_getDataSetMemberReferences already uses -
+ * purely local, never touches the network (see CLAUDE.md's "no over-the-wire
+ * tree discovery" rule). Used by mms_report_client to synthesize a dynamic
+ * dataset's member list for an RCB whose SCL never declared one
+ * (datSet="Dyn") - "all the variables" for that LN, by this codebase's
+ * existing FC=ST/MX "reportable" convention (see IedModel_getReadTargets).
+ * Available at IED_MODEL_ACCESS_REPORT_ONLY and above (i.e. always) - same
+ * gating as getReportSubscriptionTargets/getDataSetMemberReferences. Returns
+ * an empty (never NULL) list if lnReference is NULL or doesn't resolve.
+ * Caller owns the list and its elements: LinkedList_destroyDeep(list, free). */
+LinkedList IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference);
+
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModel_destroyReportControlBlockTarget(void* target);
 

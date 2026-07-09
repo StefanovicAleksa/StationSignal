@@ -59,6 +59,16 @@ IedModel_getDataSetMemberReferences(IedModelHandle handle, const char* datasetRe
     return IedModelUseCases_getDataSetMemberReferences(handle, datasetReference);
 }
 
+LinkedList
+IedModel_getDataSetMemberLeafReferences(IedModelHandle handle, const char* datasetReference, int memberIndex) {
+    return IedModelUseCases_getDataSetMemberLeafReferences(handle, datasetReference, memberIndex);
+}
+
+LinkedList
+IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference) {
+    return IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, lnReference);
+}
+
 void
 IedModel_destroyReportControlBlockTarget(void* target) {
     IedModelUseCases_destroyReportControlBlockTarget(target);

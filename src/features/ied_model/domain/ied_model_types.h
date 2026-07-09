@@ -49,6 +49,14 @@ typedef struct {
     bool buffered;
     char* datasetReference; /* e.g. "Breaker1CB1/LLN0$ds1" - owned copy, or NULL
                                 if the RCB's dataSetName was empty. */
+    char* lnReference;      /* e.g. "Breaker1CB1/LLN0" - owned copy, the RCB's
+                                own parent LN's object reference. Always
+                                present (every RCB has a parent LN). Used by
+                                mms_report_client to derive a dynamic dataset's
+                                member list (via
+                                IedModel_getReportableAttributeReferencesForLogicalNode)
+                                when datasetReference is NULL - see that
+                                function's own doc comment. */
 } ReportControlBlockTarget;
 
 /*
