@@ -189,6 +189,11 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
 
 static void
 enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, LinkedList dynamicDatasetCache) {
+    /* Defense-in-depth against enableAllTargets' own loop-top check below -
+     * covers the narrow gap between that check and this call actually
+     * landing, if a stop lands on the connection concurrently mid-loop. */
+    if (handle->stopRequested) return;
+
     IedClientError err = IED_ERROR_OK;
 
     ClientReportControlBlock rcb =
@@ -270,7 +275,21 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
 }
 
 /* One bad RCB must not abort the rest - enableOneTarget catches its own
- * errors and enableAllTargets always visits every cached target. */
+ * errors and enableAllTargets always visits every cached target, UNLESS a
+ * concurrent stop request lands mid-loop (checked each iteration below).
+ *
+ * This matters on a device with many RCBs (confirmed against a real ~40-RCB
+ * device): if the caller destroys this handle while this loop is still
+ * mid-flight on a background supervisor thread (e.g. orchestration's
+ * fail-hard rollback tearing down an already-started report client because a
+ * later stage, GOOSE subscriber start, failed), MmsReportClientConnection_stop
+ * sets stopRequested and closes the connection with no coordination against
+ * this loop. Without this check, every remaining target after the one
+ * in-flight at that moment fails immediately with IED_ERROR_CONNECTION_LOST -
+ * a long, noisy, entirely wasted cascade. The one target already genuinely
+ * in-flight when the close lands still fails (inherent, unavoidable without
+ * deeper library-level synchronization) - this only stops the cascade past
+ * that point. */
 static void
 enableAllTargets(MmsReportClientHandle handle) {
     if (!handle->targets) return;
@@ -280,7 +299,7 @@ enableAllTargets(MmsReportClientHandle handle) {
     LinkedList dynamicDatasetCache = LinkedList_create();
 
     LinkedList element = LinkedList_getNext(handle->targets);
-    while (element) {
+    while (element && !handle->stopRequested) {
         enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), dynamicDatasetCache);
         element = LinkedList_getNext(element);
     }

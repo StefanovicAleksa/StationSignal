@@ -207,9 +207,13 @@ main(int argc, char** argv) {
          * why (e.g. OMICRON IED Scout's simulated server not implementing
          * MMS file services). host/mmsPort still drive the real live
          * mms_report_client/goose_subscriber connections. */
+        printf("[CORE] Mode: local SCL file ('%s') - no network-based SCL discovery of any kind "
+                "(scl_bootstrap or online discovery) will be attempted.\n", sclFilePath);
         runError = Orchestration_runFromLocalFile(handle, sclFilePath, host, mmsPort, iedName, interfaceId,
                 IED_MODEL_ACCESS_REPORT_ONLY, &detail);
     } else {
+        printf("[CORE] Mode: network bootstrap (scl_bootstrap) - falling back to live online discovery "
+                "only if scl_bootstrap finds an associable server with no SCL file at all.\n");
         LinkedList hostList = LinkedList_create();
         LinkedList_add(hostList, (void*) host);
 

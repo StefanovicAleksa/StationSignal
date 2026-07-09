@@ -152,6 +152,27 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `sudo`), so that branch was never actually exercised until orchestration started deterministically
   reaching it in an environment without `CAP_NET_RAW`. Fixed by destroying the connection before
   the semaphore (reverse of the old order) - see that function's own comment for the full story.
+- **Second bugfix in the same rollback family, surfaced by real-hardware testing against a ~40-RCB
+  device**: `enableAllTargets`/`enableOneTarget` (same file as above) used to loop through every
+  cached RCB target with no check for a concurrent stop request. When orchestration's fail-hard
+  rollback calls `MmsReportClient_destroy` on an already-started client (e.g. because GOOSE
+  subscriber start failed on a bad/absent network interface) while the supervisor thread is still
+  mid-loop enabling later RCBs on a separate thread, `MmsReportClientConnection_stop`'s
+  `IedConnection_close` races that in-flight loop with no coordination - the RCB being processed
+  at that exact moment fails (a timeout, since its connection is being pulled out from under it -
+  inherent and accepted, not fixable without deeper library-level synchronization), and *every*
+  remaining target then also gets attempted and fails immediately with `IED_ERROR_CONNECTION_LOST`
+  - a long, noisy, entirely wasted cascade (confirmed directly: one interface failure turned into
+  ~40 doomed MMS round-trips and ~40 spurious error lines). Previously unreachable in practice
+  for the same reason as the bugfix above - every fixture/E2E test has 2-4 RCBs on loopback,
+  finishing the whole enable loop in well under a millisecond, nowhere near enough of a window for
+  a concurrent rollback to land mid-loop. Fixed by checking `handle->stopRequested` once per
+  `enableAllTargets` loop iteration and again at the top of `enableOneTarget` (defense-in-depth for
+  the narrow gap between the loop's own check and the call actually landing) - turns the cascade
+  into one expected failure plus a prompt, quiet stop. Also relevant if this same rollback fires
+  when `Orchestration_runFromLocalFile`/`_runFromOnlineDiscovery`'s own GOOSE stage fails after
+  `mms_report_client` has already started - identical race, same fix, since all three entry points
+  share this one `runFromIedModelHandle` tail (see `orchestration/`'s own bullet below).
 - `mms_report_client` now supports ACSE password authentication (`MmsReportClientConfig.acseAuthPassword`,
   new `data/mms_report_client_auth.c`) — previously only `scl_bootstrap`'s SCL-discovery
   connection could authenticate, so a real IED requiring auth on every association would let
