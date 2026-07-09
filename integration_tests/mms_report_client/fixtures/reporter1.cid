@@ -34,9 +34,32 @@
               <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
               <RptEnabled max="1" />
             </ReportControl>
+            <!-- Redundant instance of brcbMain over the identical ds1 dataset -
+                 reproduces a real device's reserved/duplicate RCB pattern, for
+                 mms_report_client's cross-RCB duplicate-content suppression
+                 E2E test. -->
+            <ReportControl name="brcbDup" rptID="brcbDup" datSet="ds1" confRev="1" buffered="true"
+                intgPd="60000" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
             <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />
           </LN0>
-          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="" />
+          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="">
+            <!-- Deliberately no datSet - reproduces a real device
+                 (E13_6MD/IEC 61850v2 JA4 station.scd) where every
+                 ReportControl omits datSet entirely (datSet="Dyn" in SCL
+                 Services terms) and RCBs are parented under the LN they
+                 report on, not just LLN0. Proves mms_report_client's dynamic
+                 dataset creation end-to-end. -->
+            <ReportControl name="urcbDyn" rptID="urcbDyn" confRev="1" buffered="false"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+          </LN>
         </LDevice>
       </Server>
     </AccessPoint>
