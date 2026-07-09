@@ -6,15 +6,37 @@
 #include "linked_list.h"
 #include "orchestration/service/orchestration_api.h"
 #include "orchestration/utils/orchestration_utils.h"
+#include "features/ied_discovery/service/ied_discovery_api.h"
+#include "main_discovery_prompt.h"
 
 /*
  * Wiring only, no business logic (see CLAUDE.md's "Architecture" rule) - the
  * real sequencing lives in src/orchestration/service/orchestration_api.c.
  * No config-file system exists yet, so host/port/IED name/interface come
- * from argv with hardcoded defaults matching integration_tests/ied_simulator's
- * "Reporter1" fixture: [host] [mmsPort] [iedName] [interface] [ipcPort]
- * [acseAuthPassword] - the last two are optional (ipcPort defaults to 8765,
- * acseAuthPassword defaults to NULL/unauthenticated).
+ * from argv: [host] [mmsPort] [iedName] [interface] [ipcPort]
+ * [acseAuthPassword] [sclFilePath] - mmsPort/interface/ipcPort/
+ * acseAuthPassword fall back to 102/"eth0"/8765/NULL(unauthenticated) if
+ * omitted.
+ *
+ * host and iedName have NO hardcoded fallback (they used to default to
+ * integration_tests/ied_simulator's "Reporter1" fixture at 127.0.0.1 - that
+ * only ever matched the bundled test simulator and directly contradicted
+ * the point of the ied_discovery flow below):
+ *   - host omitted/empty: runs the interactive ied_discovery scan/manual-add/
+ *     pick flow (see main_discovery_prompt.h) to find one instead of
+ *     requiring the operator to already know it.
+ *   - iedName omitted/empty: passed straight through as NULL/"" to
+ *     Orchestration_run/_runFromLocalFile, which auto-detects it from the
+ *     SCL's own <IED> element(s) (works only if the SCL declares exactly one).
+ *
+ * sclFilePath (argv[7], optional): if supplied, the daemon skips
+ * scl_bootstrap entirely and loads this local file instead
+ * (Orchestration_runFromLocalFile) - for IEDs/simulators (e.g. OMICRON IED
+ * Scout's "Simulate IED" mode) whose MMS server doesn't implement file
+ * services, so scl_bootstrap can never fetch an SCL from them even though
+ * they're otherwise a real, connectable MMS/GOOSE device. host/mmsPort still
+ * drive the real live connection - ied_discovery's scan/manual-add still
+ * works exactly the same beforehand to find/confirm that host.
  *
  * Note this file never includes features/ipc_dispatcher/service/
  * ipc_dispatcher_api.h directly - orchestration owns that feature's entire
@@ -51,11 +73,46 @@ onGooseStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status
             lastParseError);
 }
 
+static const char*
+sclCandidateStatusToString(SclBootstrapCandidateStatus status) {
+    switch (status) {
+        case SCL_BOOTSTRAP_CANDIDATE_NO_MMS_SERVER: return "no MMS server (TCP never connected)";
+        case SCL_BOOTSTRAP_CANDIDATE_MMS_CONNECT_FAILED: return "MMS association/browse/download failed";
+        case SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND:
+            return "associated fine, but no SCL file (.icd/.cid/.scd/.ssd/.sed) found in its file directory";
+        case SCL_BOOTSTRAP_CANDIDATE_ACCESS_DENIED: return "access denied (auth required/rejected)";
+        case SCL_BOOTSTRAP_CANDIDATE_DOWNLOAD_FAILED: return "SCL file found but download failed";
+        case SCL_BOOTSTRAP_CANDIDATE_FILE_RETRIEVED: return "file retrieved (unexpected here)";
+        default: return "unknown";
+    }
+}
+
+/* Prints the stage-specific diagnostic field(s) OrchestrationErrorDetail carries -
+ * the generic OrchestrationUtils_errorToString(runError) alone doesn't say
+ * *why* a stage failed, only *which* stage did. */
+static void
+printRunFailureDetail(const OrchestrationErrorDetail* detail) {
+    switch (detail->stage) {
+        case ORCHESTRATION_STAGE_BOOTSTRAP:
+            fprintf(stderr, "  bootstrap detail: %s\n", sclCandidateStatusToString(detail->lastCandidateStatus));
+            break;
+        case ORCHESTRATION_STAGE_IED_NAME_RESOLUTION:
+            fprintf(stderr, "  IED name auto-detection found %d <IED> element(s) in the SCL "
+                    "(need exactly 1 - pass an explicit iedName instead)\n", detail->discoveredIedCount);
+            break;
+        case ORCHESTRATION_STAGE_MODEL_LOAD:
+            fprintf(stderr, "  model load error: %d\n", (int) detail->modelLoadError);
+            break;
+        default:
+            break;
+    }
+}
+
 int
 main(int argc, char** argv) {
-    const char* host = (argc > 1) ? argv[1] : "127.0.0.1";
+    const char* hostArg = (argc > 1 && argv[1][0]) ? argv[1] : NULL;
     int mmsPort = (argc > 2) ? atoi(argv[2]) : 102;
-    const char* iedName = (argc > 3) ? argv[3] : "Reporter1";
+    const char* iedName = (argc > 3 && argv[3][0]) ? argv[3] : NULL;
     const char* interfaceId = (argc > 4) ? argv[4] : "eth0";
     /* Optional - only needed if the target IED requires ACSE authentication.
      * NULL (the default, argv omitted) means every association attempt is
@@ -63,7 +120,10 @@ main(int argc, char** argv) {
      * for the whole process lifetime, so it's safe to borrow directly into
      * both config structs below (their own doc comments describe this same
      * borrowed-then-internally-copied convention). */
-    const char* acseAuthPassword = (argc > 6) ? argv[6] : NULL;
+    const char* acseAuthPassword = (argc > 6 && argv[6][0]) ? argv[6] : NULL;
+    /* Optional - if given, skip scl_bootstrap and load this file directly
+     * instead (see this file's own top comment). */
+    const char* sclFilePath = (argc > 7 && argv[7][0]) ? argv[7] : NULL;
 
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
@@ -94,26 +154,69 @@ main(int argc, char** argv) {
     Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
     Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
 
-    LinkedList hostList = LinkedList_create();
-    LinkedList_add(hostList, (void*) host);
+    /* host omitted/empty: interactive scan/manual-add/pick via ied_discovery
+     * instead of a hardcoded fallback (see this file's own top comment). */
+    char* discoveredHost = NULL;
+    const char* host = hostArg;
+    if (!host) {
+        IedDiscoveryConfig discoveryConfig;
+        IedDiscoveryConfig_defaults(&discoveryConfig);
+        discoveryConfig.acseAuthPassword = acseAuthPassword; /* same argv[6], same reuse
+                                                                  pattern as bootstrapConfig/
+                                                                  reportClientConfig above */
+
+        IedDiscoveryError discoveryError;
+        IedDiscoveryHandle discoveryHandle = IedDiscovery_create(&discoveryConfig, &discoveryError);
+        if (!discoveryHandle) {
+            fprintf(stderr, "[CORE] IedDiscovery_create failed (error %d)\n", (int) discoveryError);
+            Orchestration_destroy(handle);
+            return EXIT_FAILURE;
+        }
+
+        discoveredHost = MainDiscoveryPrompt_run(discoveryHandle, interfaceId, mmsPort);
+        IedDiscovery_destroy(discoveryHandle);
+
+        if (!discoveredHost) {
+            fprintf(stderr, "[CORE] No host picked, exiting.\n");
+            Orchestration_destroy(handle);
+            return EXIT_FAILURE;
+        }
+        host = discoveredHost;
+    }
 
     OrchestrationErrorDetail detail;
-    OrchestrationError runError = Orchestration_run(handle, hostList, mmsPort, iedName, interfaceId,
-            IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+    OrchestrationError runError;
 
-    LinkedList_destroyStatic(hostList); /* host is stack/argv-owned, not heap-owned by the list */
+    if (sclFilePath) {
+        /* Skip scl_bootstrap entirely - see this file's own top comment on
+         * why (e.g. OMICRON IED Scout's simulated server not implementing
+         * MMS file services). host/mmsPort still drive the real live
+         * mms_report_client/goose_subscriber connections. */
+        runError = Orchestration_runFromLocalFile(handle, sclFilePath, host, mmsPort, iedName, interfaceId,
+                IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+    } else {
+        LinkedList hostList = LinkedList_create();
+        LinkedList_add(hostList, (void*) host);
+
+        runError = Orchestration_run(handle, hostList, mmsPort, iedName, interfaceId,
+                IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+
+        LinkedList_destroyStatic(hostList); /* host is stack/argv/discoveredHost-owned, not heap-owned by the list */
+    }
 
     if (runError != ORCHESTRATION_OK) {
         fprintf(stderr, "[CORE] Orchestration_run failed at stage %d: %s\n", detail.stage,
                 OrchestrationUtils_errorToString(runError));
+        printRunFailureDetail(&detail);
         Orchestration_destroy(handle);
+        free(discoveredHost);
         return EXIT_FAILURE;
     }
 
     printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s', ACSE auth %s). "
             "ipc_dispatcher listening on 127.0.0.1:%u. Ctrl+C to stop.\n",
-            host, mmsPort, iedName, interfaceId, acseAuthPassword ? "enabled" : "disabled",
-            (unsigned) config.ipcDispatcherConfig.port);
+            host, mmsPort, iedName ? iedName : "<auto-detected>", interfaceId,
+            acseAuthPassword ? "enabled" : "disabled", (unsigned) config.ipcDispatcherConfig.port);
 
     while (!g_stopRequested) {
         pause();
@@ -121,5 +224,6 @@ main(int argc, char** argv) {
 
     printf("[CORE] Shutdown requested, stopping...\n");
     Orchestration_destroy(handle);
+    free(discoveredHost);
     return EXIT_SUCCESS;
 }

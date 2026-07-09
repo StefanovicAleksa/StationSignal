@@ -19,6 +19,7 @@ GOOSE_SUBSCRIBER := $(SRC)/features/goose_subscriber
 SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
 ORCHESTRATION := $(SRC)/orchestration
 IPC_DISPATCHER := $(SRC)/features/ipc_dispatcher
+IED_DISCOVERY := $(SRC)/features/ied_discovery
 
 CC      := gcc
 CFLAGS  := -g -Wall -I$(SRC) -idirafter $(THIRD_PARTY_INCLUDE)
@@ -30,7 +31,8 @@ TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
          test_scl_bootstrap_usecases test_scl_bootstrap_utils \
          test_orchestration_staging test_orchestration_usecases test_orchestration_utils test_orchestration_api \
          test_ipc_dispatcher_usecases test_ipc_dispatcher_value_codec test_ipc_dispatcher_ring_buffer \
-         test_ipc_dispatcher_json_writer test_ipc_dispatcher_api
+         test_ipc_dispatcher_json_writer test_ipc_dispatcher_api \
+         test_ied_discovery_cidr test_ied_discovery_netif test_ied_discovery_api
 
 .PHONY: all clean run
 
@@ -242,6 +244,43 @@ test_ipc_dispatcher_api: ipc_dispatcher/test_ipc_dispatcher_api.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lpthread
+
+# cidr.c is pure IPv4/CIDR arithmetic - no third-party includes at all, but
+# needs LinkedList (declared in a vendored header, implemented in
+# libiec61850.a), same situation as test_scl_bootstrap_usecases.
+test_ied_discovery_cidr: ied_discovery/test_ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+
+# netif.c is plain POSIX getifaddrs()/freeifaddrs() - no libiec61850 symbols
+# touched at all, no extra link flags beyond unity itself.
+test_ied_discovery_netif: ied_discovery/test_ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# api.c pulls in ied_discovery's full stack plus scl_bootstrap's full source
+# set (the TCP-probe delegate created in IedDiscovery_create calls into
+# scl_bootstrap_api.c, which as one translation unit references
+# SclBootstrapMmsSession_run etc. regardless of runtime reachability - same
+# situation as test_orchestration_api's own build rule). Argument-validation-
+# only plus the one deterministic real-getifaddrs assertion (loopback's
+# maxHosts ceiling) - never a real subnet scan or MMS association, matching
+# every other feature's own api-test convention.
+test_ied_discovery_api: ied_discovery/test_ied_discovery_api.c \
+		$(IED_DISCOVERY)/service/ied_discovery_api.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_mms_probe.c \
+		$(IED_DISCOVERY)/data/ied_discovery_auth.c \
+		$(IED_DISCOVERY)/utils/ied_discovery_utils.c \
+		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_auth.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_file_download.c \
+		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
+		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
 
 run: $(TESTS)
 	@status=0; \
