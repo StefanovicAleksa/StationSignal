@@ -21,6 +21,7 @@ OrchestrationUtils_errorToString(OrchestrationError err) {
         case ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED: return "ipc_dispatcher websocket bind/start failed";
         case ORCHESTRATION_ERR_BOOTSTRAP_FAILED: return "SCL bootstrap failed";
         case ORCHESTRATION_ERR_STAGING_FAILED: return "temp-file staging failed";
+        case ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED: return "IED name auto-detection failed (zero or multiple <IED> elements)";
         case ORCHESTRATION_ERR_MODEL_LOAD_FAILED: return "IED model load failed";
         case ORCHESTRATION_ERR_REPORT_CLIENT_FAILED: return "MMS report client start failed";
         case ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED: return "GOOSE subscriber start failed";
