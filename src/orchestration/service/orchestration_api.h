@@ -140,6 +140,55 @@ Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePa
         OrchestrationErrorDetail* outDetail);
 
 /*
+ * A THIRD way to obtain the model - for real, connectable IEC 61850 devices
+ * whose MMS server doesn't implement file services at all (so scl_bootstrap
+ * can never succeed against them, unlike Orchestration_runFromLocalFile's
+ * scenario, which still needs an operator to have a local SCL file some
+ * other way - e.g. OMICRON IED Scout's "Simulate IED" mode, confirmed to
+ * return SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND from an otherwise fully
+ * working, associable device). Instead of parsing an SCL file at all, walks
+ * the live device's own MMS ACSI directory/model-discovery services
+ * (ied_model_online_loader) to reconstruct an equivalent model directly -
+ * see that feature's own service header for the full mechanism, and
+ * CLAUDE.md's "No over-the-wire tree discovery" Hard Rule for why this is a
+ * narrow, explicit exception rather than a general capability.
+ *
+ * This is a deliberately EXPLICIT, caller-invoked fallback, never a silent
+ * branch inside Orchestration_run itself: online discovery is materially
+ * slower and more request-heavy than one SCL file transfer + local parse
+ * (many sequential MMS round-trips, scaling with model size), and changing
+ * Orchestration_run's own behavior based on how bootstrap happened to fail
+ * would violate this layer's existing fail-hard, no-silent-branching
+ * contract. The intended caller-side policy (e.g. main.c or a future wiring
+ * adapter) is: call Orchestration_run first; only on
+ * ORCHESTRATION_ERR_BOOTSTRAP_FAILED with
+ * outDetail.lastCandidateStatus == SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND,
+ * retry via this function against the same host.
+ *
+ * host/mmsPort/interfaceId are required, same as Orchestration_runFromLocalFile
+ * - there is no bootstrap step to derive them from a scanned candidate here
+ * either. iedName only labels the constructed model (there is no SCL <IED>
+ * list to auto-detect from over a live connection, so - unlike the other two
+ * entry points - an empty iedName is NOT a resolution stage of its own; it's
+ * passed straight through, defaulting inside ied_model_online_loader).
+ * acseAuthPassword mirrors ied_discovery/scl_bootstrap's own optional
+ * ACSE-password config, applied unconditionally to the one connection this
+ * makes (no retry-on-rejection - this call always targets one already-known
+ * host, the same posture mms_report_client already takes for the same
+ * reason).
+ *
+ * Blocking. Stage sequence: IPC_DISPATCHER_START -> ONLINE_DISCOVERY (replaces
+ * BOOTSTRAP/STAGING/MODEL_LOAD entirely) -> REPORT_CLIENT_START ->
+ * GOOSE_SUBSCRIBER_START. Same fail-hard rollback contract, same
+ * re-runnable-after-failure guarantee, same re-entrancy check as the other
+ * two entry points.
+ */
+OrchestrationError
+Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* host, int mmsPort,
+        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* acseAuthPassword, OrchestrationErrorDetail* outDetail);
+
+/*
  * Stops goose_subscriber, then mms_report_client, then ipc_dispatcher (in
  * that order - guarantees no more producer-thread calls can land on
  * ipc_dispatcher once it's torn down), then releases ied_model. Blocking

@@ -15,6 +15,24 @@ IedModelHandle
 IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError);
 
 /*
+ * Wraps an already-constructed, caller-owned dynamic IedModel (built via
+ * iec61850_dynamic_model.h's own construction calls - IedModel_create,
+ * LogicalDevice_create, LogicalNode_create, DataObject_create,
+ * DataAttribute_create, DataSet_create/DataSetEntry_create,
+ * ReportControlBlock_create, GSEControlBlock_create - e.g. by
+ * ied_model_online_loader, which builds one from a live device's MMS ACSI
+ * directory services instead of parsing an SCL file) in an IedModelHandle -
+ * every accessor below then behaves identically regardless of whether the
+ * model came from SCL parsing or live discovery, since they only ever walk
+ * handle->model, never care how it was built. Ownership of `model` transfers
+ * to the returned handle - IedModel_release destroys it exactly like a
+ * loadFromFile'd one. Returns NULL (and never touches `model`) if model is
+ * NULL or allocation fails.
+ */
+IedModelHandle
+IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode);
+
+/*
  * Lists every <IED name="..."> declared at the top level of the SCL file at
  * `path`, without building a full model (no DataTypeTemplates resolution) -
  * lighter than IedModel_loadFromFile, and useful when the caller doesn't

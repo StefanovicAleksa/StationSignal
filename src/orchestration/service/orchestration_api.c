@@ -76,79 +76,22 @@ Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
 }
 
 /*
- * Shared continuation for both Orchestration_run (network-fetched SCL) and
- * Orchestration_runFromLocalFile (caller-supplied SCL): IED-name
- * auto-detection, ied_model load, mms_report_client start, goose_subscriber
- * start - identical regardless of where sclPath's bytes came from. Assumes
- * ipc_dispatcher is already started (both callers' own stage 0) and rolls it
- * back on any failure here.
- *
- * sclPathIsOwnedTempFile: true for the scl_bootstrap path (sclPath is a
- * heap-allocated mkstemp path this function must unlink+free once
- * IedModel_loadFromFile has parsed it into memory - it has zero purpose
- * afterward, see the original stage 3 comment this preserves); false for the
- * local-file path (sclPath is the caller's own file, never touched beyond
- * reading it).
+ * Shared tail for Orchestration_run, Orchestration_runFromLocalFile, and
+ * Orchestration_runFromOnlineDiscovery: mms_report_client start,
+ * goose_subscriber start, fail-hard rollback - identical regardless of
+ * whether iedModel came from SCL parsing or live discovery, since both
+ * long-running workers only ever consume it through ied_model's own public
+ * accessors. Assumes ipc_dispatcher is already started (every caller's own
+ * stage 0). Takes ownership of iedModel - on ANY failure here, iedModel is
+ * released and ipc_dispatcher is rolled back before returning.
  */
 static OrchestrationError
-runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOwnedTempFile,
-        const char* host, int port, const char* iedName, const char* interfaceId,
-        AccessMode accessMode, OrchestrationErrorDetail* outDetail) {
-    /* --- IED-name auto-detection - only entered when iedName is empty. No
-     * interactive retry for the ambiguous (0 or >1 <IED>) case; see this
-     * feature's own Architecture bullet in CLAUDE.md. */
-    const char* resolvedIedName = iedName;
-    char* autoDetectedIedName = NULL;
-
-    if (!iedName || !iedName[0]) {
-        IedModelLoadError listErr;
-        LinkedList iedNames = IedModel_listIedNames(sclPath, &listErr);
-        int discoveredCount = iedNames ? LinkedList_size(iedNames) : 0;
-
-        if (!iedNames || discoveredCount != 1) {
-            if (iedNames) LinkedList_destroyDeep(iedNames, free);
-            if (sclPathIsOwnedTempFile) {
-                OrchestrationStaging_cleanup(sclPath);
-                free((char*) sclPath);
-            }
-            IpcDispatcher_stop(handle->ipcDispatcher);
-            if (outDetail) {
-                outDetail->stage = ORCHESTRATION_STAGE_IED_NAME_RESOLUTION;
-                outDetail->discoveredIedCount = discoveredCount;
-                outDetail->iedNameListError = iedNames ? IED_MODEL_OK : listErr;
-            }
-            return ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED;
-        }
-
-        autoDetectedIedName = strdup((char*) LinkedList_getData(LinkedList_getNext(iedNames)));
-        LinkedList_destroyDeep(iedNames, free);
-        resolvedIedName = autoDetectedIedName;
-    }
-
-    /* ied_model - parses fully into memory in one call, so an owned temp
-     * file has zero purpose afterward; clean it up immediately regardless
-     * of outcome rather than deferring. A caller-supplied local file is left
-     * untouched either way - it's not ours to delete. */
-    IedModelLoadError modelErr;
-    IedModelHandle iedModel = IedModel_loadFromFile(sclPath, resolvedIedName, accessMode, &modelErr);
-    if (sclPathIsOwnedTempFile) {
-        OrchestrationStaging_cleanup(sclPath);
-        free((char*) sclPath);
-    }
-    free(autoDetectedIedName);
-
-    if (!iedModel) {
-        IpcDispatcher_stop(handle->ipcDispatcher);
-        if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_MODEL_LOAD;
-            outDetail->modelLoadError = modelErr;
-        }
-        return ORCHESTRATION_ERR_MODEL_LOAD_FAILED;
-    }
-
+runFromIedModelHandle(OrchestrationHandle handle, IedModelHandle iedModel, const char* host, int port,
+        const char* interfaceId, OrchestrationErrorDetail* outDetail) {
     /* --- mms_report_client, against the caller-supplied host/port (the
-     * winning scl_bootstrap candidate's own host/port, or the caller's own
-     * argument for the local-file path) - MmsReportClient_create copies
+     * winning scl_bootstrap candidate's own host/port, the caller's own
+     * argument for the local-file path, or the same host/port the online
+     * discovery connection itself just used) - MmsReportClient_create copies
      * host internally. Report callback is always, unconditionally wired to
      * ipc_dispatcher - see orchestration_api.h's note on why there is no
      * caller-facing setter for this slot. */
@@ -231,6 +174,80 @@ runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOw
     handle->running = true;
 
     return ORCHESTRATION_OK;
+}
+
+/*
+ * Shared continuation for both Orchestration_run (network-fetched SCL) and
+ * Orchestration_runFromLocalFile (caller-supplied SCL): IED-name
+ * auto-detection, ied_model load, then runFromIedModelHandle's shared tail -
+ * identical regardless of where sclPath's bytes came from. Assumes
+ * ipc_dispatcher is already started (both callers' own stage 0) and rolls it
+ * back on any failure here.
+ *
+ * sclPathIsOwnedTempFile: true for the scl_bootstrap path (sclPath is a
+ * heap-allocated mkstemp path this function must unlink+free once
+ * IedModel_loadFromFile has parsed it into memory - it has zero purpose
+ * afterward, see the original stage 3 comment this preserves); false for the
+ * local-file path (sclPath is the caller's own file, never touched beyond
+ * reading it).
+ */
+static OrchestrationError
+runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOwnedTempFile,
+        const char* host, int port, const char* iedName, const char* interfaceId,
+        AccessMode accessMode, OrchestrationErrorDetail* outDetail) {
+    /* --- IED-name auto-detection - only entered when iedName is empty. No
+     * interactive retry for the ambiguous (0 or >1 <IED>) case; see this
+     * feature's own Architecture bullet in CLAUDE.md. */
+    const char* resolvedIedName = iedName;
+    char* autoDetectedIedName = NULL;
+
+    if (!iedName || !iedName[0]) {
+        IedModelLoadError listErr;
+        LinkedList iedNames = IedModel_listIedNames(sclPath, &listErr);
+        int discoveredCount = iedNames ? LinkedList_size(iedNames) : 0;
+
+        if (!iedNames || discoveredCount != 1) {
+            if (iedNames) LinkedList_destroyDeep(iedNames, free);
+            if (sclPathIsOwnedTempFile) {
+                OrchestrationStaging_cleanup(sclPath);
+                free((char*) sclPath);
+            }
+            IpcDispatcher_stop(handle->ipcDispatcher);
+            if (outDetail) {
+                outDetail->stage = ORCHESTRATION_STAGE_IED_NAME_RESOLUTION;
+                outDetail->discoveredIedCount = discoveredCount;
+                outDetail->iedNameListError = iedNames ? IED_MODEL_OK : listErr;
+            }
+            return ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED;
+        }
+
+        autoDetectedIedName = strdup((char*) LinkedList_getData(LinkedList_getNext(iedNames)));
+        LinkedList_destroyDeep(iedNames, free);
+        resolvedIedName = autoDetectedIedName;
+    }
+
+    /* ied_model - parses fully into memory in one call, so an owned temp
+     * file has zero purpose afterward; clean it up immediately regardless
+     * of outcome rather than deferring. A caller-supplied local file is left
+     * untouched either way - it's not ours to delete. */
+    IedModelLoadError modelErr;
+    IedModelHandle iedModel = IedModel_loadFromFile(sclPath, resolvedIedName, accessMode, &modelErr);
+    if (sclPathIsOwnedTempFile) {
+        OrchestrationStaging_cleanup(sclPath);
+        free((char*) sclPath);
+    }
+    free(autoDetectedIedName);
+
+    if (!iedModel) {
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_MODEL_LOAD;
+            outDetail->modelLoadError = modelErr;
+        }
+        return ORCHESTRATION_ERR_MODEL_LOAD_FAILED;
+    }
+
+    return runFromIedModelHandle(handle, iedModel, host, port, interfaceId, outDetail);
 }
 
 OrchestrationError
@@ -349,6 +366,51 @@ Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePa
      * sclPathIsOwnedTempFile doc comment. */
     return runFromSclFile(handle, sclFilePath, false, host, mmsPort, iedName, interfaceId, accessMode,
             outDetail);
+}
+
+OrchestrationError
+Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* host, int mmsPort,
+        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* acseAuthPassword, OrchestrationErrorDetail* outDetail) {
+    if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
+
+    if (!handle || handle->running || !host || !host[0] || mmsPort <= 0 || !interfaceId || !interfaceId[0]) {
+        return ORCHESTRATION_ERR_INVALID_ARGUMENT;
+    }
+
+    /* --- stage 0: ipc_dispatcher, same as every other entry point's own
+     * stage 0 - started first, deliberately, so a bind failure fails fast. */
+    IpcDispatcherError ipcStartErr = IpcDispatcher_start(handle->ipcDispatcher);
+    if (ipcStartErr != IPC_DISPATCHER_OK) {
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_IPC_DISPATCHER_START;
+            outDetail->ipcDispatcherError = ipcStartErr;
+        }
+        return ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED;
+    }
+
+    /* --- stage: online discovery - replaces BOOTSTRAP/STAGING/MODEL_LOAD
+     * entirely. IedModelOnlineLoader_build owns its own one-shot
+     * IedConnection end-to-end (connect, discover, disconnect); this layer
+     * never touches IedConnection directly, matching this feature's own
+     * documented "zero direct third-party includes" invariant. iedName here
+     * only labels the constructed model - there is no SCL <IED> list to
+     * auto-detect from over a live connection, so (unlike Orchestration_run/
+     * _runFromLocalFile) an empty iedName is not a resolution stage of its
+     * own, it's simply passed through as-is. */
+    IedModelOnlineLoaderError loaderErr;
+    IedModelHandle iedModel = IedModelOnlineLoader_build(host, mmsPort, iedName, accessMode,
+            acseAuthPassword, NULL, &loaderErr);
+    if (!iedModel) {
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_ONLINE_DISCOVERY;
+            outDetail->onlineDiscoveryError = loaderErr;
+        }
+        return ORCHESTRATION_ERR_ONLINE_DISCOVERY_FAILED;
+    }
+
+    return runFromIedModelHandle(handle, iedModel, host, mmsPort, interfaceId, outDetail);
 }
 
 void

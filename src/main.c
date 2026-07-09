@@ -38,6 +38,18 @@
  * drive the real live connection - ied_discovery's scan/manual-add still
  * works exactly the same beforehand to find/confirm that host.
  *
+ * If sclFilePath is NOT given and Orchestration_run's own scl_bootstrap stage
+ * comes back with SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND (associated fine,
+ * no SCL file anywhere in its file directory - the same device class
+ * sclFilePath exists for, just without an operator having a local copy to
+ * hand in), this file automatically retries once via
+ * Orchestration_runFromOnlineDiscovery, which builds the model directly from
+ * the device's own live MMS data model instead of any SCL file at all - see
+ * ied_model_online_loader's own Architecture bullet in CLAUDE.md. This is the
+ * one deliberate exception to CLAUDE.md's "no over-the-wire tree discovery"
+ * Hard Rule; it never runs unless file-based SCL acquisition has already,
+ * genuinely failed this exact way.
+ *
  * Note this file never includes features/ipc_dispatcher/service/
  * ipc_dispatcher_api.h directly - orchestration owns that feature's entire
  * lifecycle end-to-end (bind/start/stop/destroy, plus wiring its callbacks
@@ -102,6 +114,9 @@ printRunFailureDetail(const OrchestrationErrorDetail* detail) {
             break;
         case ORCHESTRATION_STAGE_MODEL_LOAD:
             fprintf(stderr, "  model load error: %d\n", (int) detail->modelLoadError);
+            break;
+        case ORCHESTRATION_STAGE_ONLINE_DISCOVERY:
+            fprintf(stderr, "  online discovery error: %d\n", (int) detail->onlineDiscoveryError);
             break;
         default:
             break;
@@ -202,6 +217,20 @@ main(int argc, char** argv) {
                 IED_MODEL_ACCESS_REPORT_ONLY, &detail);
 
         LinkedList_destroyStatic(hostList); /* host is stack/argv/discoveredHost-owned, not heap-owned by the list */
+
+        /* Fallback: this exact, narrow condition (associated fine, genuinely
+         * no SCL file over MMS file services) is what ied_model_online_loader
+         * exists for - see this file's own top comment and
+         * Orchestration_runFromOnlineDiscovery's doc comment for why this
+         * stays an explicit retry here rather than a silent branch inside
+         * Orchestration_run itself. */
+        if (runError == ORCHESTRATION_ERR_BOOTSTRAP_FAILED
+                && detail.lastCandidateStatus == SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND) {
+            fprintf(stderr, "[CORE] No SCL file found over MMS file services - falling back to live "
+                    "online discovery (building the model directly from %s's own MMS data model)\n", host);
+            runError = Orchestration_runFromOnlineDiscovery(handle, host, mmsPort, iedName, interfaceId,
+                    IED_MODEL_ACCESS_REPORT_ONLY, acseAuthPassword, &detail);
+        }
     }
 
     if (runError != ORCHESTRATION_OK) {

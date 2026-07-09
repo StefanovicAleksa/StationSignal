@@ -14,6 +14,7 @@ SRC         := $(ROOT)/src
 THIRD_PARTY_INCLUDE := $(ROOT)/third_party/include
 THIRD_PARTY_LIB      := $(ROOT)/third_party/lib
 IED_MODEL   := $(SRC)/features/ied_model
+IED_MODEL_ONLINE_LOADER := $(SRC)/features/ied_model_online_loader
 MMS_REPORT_CLIENT := $(SRC)/features/mms_report_client
 GOOSE_SUBSCRIBER := $(SRC)/features/goose_subscriber
 SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
@@ -172,6 +173,10 @@ test_orchestration_api: orchestration/test_orchestration_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
+		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_connection.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_auth.c \
+		$(IED_MODEL_ONLINE_LOADER)/domain/ied_model_online_loader_usecases.c \
 		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \

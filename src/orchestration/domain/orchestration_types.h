@@ -6,6 +6,7 @@
 #include "linked_list.h"
 #include "features/scl_bootstrap/service/scl_bootstrap_api.h"
 #include "features/ied_model/service/ied_model_api.h"
+#include "features/ied_model_online_loader/service/ied_model_online_loader_api.h"
 #include "features/mms_report_client/service/mms_report_client_api.h"
 #include "features/goose_subscriber/service/goose_subscriber_api.h"
 #include "features/ipc_dispatcher/service/ipc_dispatcher_api.h"
@@ -35,7 +36,10 @@ typedef enum {
                                                       Architecture bullet in CLAUDE.md) */
     ORCHESTRATION_ERR_MODEL_LOAD_FAILED,
     ORCHESTRATION_ERR_REPORT_CLIENT_FAILED,
-    ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED
+    ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED,
+    ORCHESTRATION_ERR_ONLINE_DISCOVERY_FAILED /* Orchestration_runFromOnlineDiscovery only - the
+                                                  live device never gave up a usable model at all
+                                                  (connect failure or zero logical devices) */
 } OrchestrationError;
 
 typedef enum {
@@ -47,6 +51,9 @@ typedef enum {
     ORCHESTRATION_STAGE_STAGING,
     ORCHESTRATION_STAGE_IED_NAME_RESOLUTION, /* only entered when iedName is empty (auto-detect) */
     ORCHESTRATION_STAGE_MODEL_LOAD,
+    ORCHESTRATION_STAGE_ONLINE_DISCOVERY, /* Orchestration_runFromOnlineDiscovery only - replaces
+                                              BOOTSTRAP/STAGING/MODEL_LOAD for that entry point,
+                                              since there's no SCL file to fetch/stage/parse at all */
     ORCHESTRATION_STAGE_REPORT_CLIENT_START,
     ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START
 } OrchestrationStage;
@@ -76,6 +83,7 @@ typedef struct {
                                                            IED_MODEL_OK if it succeeded but returned
                                                            0 or >1 names (see discoveredIedCount) */
     IedModelLoadError modelLoadError;                  /* stage==MODEL_LOAD */
+    IedModelOnlineLoaderError onlineDiscoveryError;    /* stage==ONLINE_DISCOVERY */
     MmsReportClientError reportClientError;            /* stage==REPORT_CLIENT_START */
     GooseSubscriberError gooseSubscriberError;         /* stage==GOOSE_SUBSCRIBER_START */
 } OrchestrationErrorDetail;

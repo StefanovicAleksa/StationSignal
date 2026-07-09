@@ -41,6 +41,20 @@ IedModel_listIedNames(const char* path, IedModelLoadError* outError) {
     return IedModelSclLoader_listIedNames(path, outError);
 }
 
+IedModelHandle
+IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode) {
+    if (!model) return NULL;
+
+    IedModelHandle handle = malloc(sizeof(struct sIedModelHandle));
+    if (!handle) return NULL;
+
+    handle->model = model;
+    handle->accessMode = mode;
+    handle->iedName = copyString(iedName ? iedName : "");
+
+    return handle;
+}
+
 void
 IedModel_release(IedModelHandle handle) {
     if (!handle) return;

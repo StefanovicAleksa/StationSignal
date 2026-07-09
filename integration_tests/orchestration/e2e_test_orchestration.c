@@ -49,6 +49,8 @@
 
 #define TEST_PORT 10401 /* distinct from every other E2E test's port (10203/10204/10301/10399) */
 #define TEST_WS_PORT 18790
+#define ONLINE_DISCOVERY_TEST_PORT 10402
+#define ONLINE_DISCOVERY_TEST_WS_PORT 18791
 #define TEST_INTERFACE "lo"
 #define IED_NAME "Reporter1"
 #define EXPECTED_RCB_REF "Reporter1LD1/LLN0.BR.brcbMain"
@@ -291,11 +293,128 @@ test_fullSequence_bootstrapModelReportAndGoose_endToEnd(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves the online-discovery fallback end to end: Orchestration_run genuinely
+ * fails at the bootstrap stage against a server with no SCL file at all (its
+ * MMS file services point at a real, empty fixtures/no_scl_files/ directory -
+ * mirroring scl_bootstrap's/ied_model_online_loader's own identical fixture,
+ * proving this is the exact real-world SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND
+ * precondition, not some other failure mode), then Orchestration_runFromOnlineDiscovery
+ * against the SAME host/port succeeds and delivers real report/GOOSE JSON over
+ * the same real ipc_dispatcher websocket the SCL-parsing path already proves.
+ *
+ * Expected RCB differs from the SCL-parsing test above: sim_server.c's
+ * brcbMain/brcbDup/rcbMulti01 are all parented under LLN0, which itself has
+ * zero FC=ST/MX data attributes of its own in this simulator (only GGIO1
+ * does) - and, on the live server, EVERY RCB here has dataSetName=NULL until
+ * a client explicitly assigns one (see this file's own header comment and
+ * ied_model_online_loader's own bullet in CLAUDE.md). Online discovery
+ * therefore reports datasetReference=NULL for all of them, and
+ * mms_report_client's existing dynamic-dataset fallback
+ * (getOrCreateDynamicDataset) can only synthesize a working dataset for an
+ * RCB whose own parent LN actually has reportable attributes - true only for
+ * urcbDyn (parented under GGIO1). brcbMain/brcbDup/rcbMulti01 (parented
+ * under LLN0) fail to enable in this scenario, same as they always have for
+ * any Dyn RCB with no reportable attributes on its own LN - not a defect in
+ * online discovery itself. GOOSE is unaffected (gcbInd's "ds1" dataset is a
+ * real, statically-configured, always-live GoCB attribute, discovered as-is).
+ *
+ * REQUIRES CAP_NET_RAW, same as the test above - run with sudo.
+ */
+void
+test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd(void) {
+    SimServer sim = SimServer_create();
+    SimServer_setFilestoreBasepath(sim, "fixtures/no_scl_files/");
+    SimServer_start(sim, ONLINE_DISCOVERY_TEST_PORT);
+    Thread_sleep(200);
+
+    OrchestrationConfig config;
+    OrchestrationConfig_defaults(&config);
+    config.ipcDispatcherConfig.port = ONLINE_DISCOVERY_TEST_WS_PORT;
+
+    OrchestrationError createError;
+    OrchestrationHandle handle = Orchestration_create(&config, &createError);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(ORCHESTRATION_OK, createError);
+
+    Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
+    Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
+
+    LinkedList hosts = makeHostList("127.0.0.1");
+
+    OrchestrationErrorDetail detail;
+    OrchestrationError runError = Orchestration_run(handle, hosts, ONLINE_DISCOVERY_TEST_PORT, IED_NAME,
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+    LinkedList_destroyStatic(hosts);
+
+    TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_ERR_BOOTSTRAP_FAILED, runError,
+            "expected Orchestration_run to genuinely fail bootstrap - if it didn't, this test's own "
+            "fixture no longer reproduces the no-SCL-file precondition");
+    TEST_ASSERT_EQUAL_MESSAGE(SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND, detail.lastCandidateStatus,
+            "expected the exact real-world precondition ied_model_online_loader exists for");
+
+    OrchestrationError fallbackError = Orchestration_runFromOnlineDiscovery(handle, "127.0.0.1",
+            ONLINE_DISCOVERY_TEST_PORT, IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, NULL, &detail);
+    TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, fallbackError,
+            "Orchestration_runFromOnlineDiscovery failed - if stage==GOOSE_SUBSCRIBER_START, this test "
+            "needs CAP_NET_RAW (run with sudo)");
+
+    int ws = connectAndUpgrade(ONLINE_DISCOVERY_TEST_WS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to orchestration's own ipc_dispatcher failed");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
+            "expected urcbDyn (the only RCB whose parent LN has reportable attributes in this "
+            "simulator) to enable via the dynamic-dataset fallback within the timeout");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&gooseValid),
+            "expected the frame adapter to observe a VALID GOOSE feed within the timeout");
+
+    SimServer_setIndication(sim, true);
+
+    bool sawReport = false;
+    bool sawGoose = false;
+    char lastGoCbRef[256] = "";
+
+    for (int i = 0; i < 10 && !(sawReport && sawGoose); i++) {
+        if (!waitReadable(ws, 3000)) break;
+        char* json = readOneTextFrame(ws);
+        if (!json) break;
+
+        cJSON* parsed = cJSON_Parse(json);
+        free(json);
+        if (!parsed) continue;
+
+        cJSON* type = cJSON_GetObjectItem(parsed, "type");
+        cJSON* source = cJSON_GetObjectItem(parsed, "source");
+        if (type && source && strcmp(type->valuestring, "MMS_REPORT") == 0) {
+            sawReport = true;
+        } else if (type && source && strcmp(type->valuestring, "GOOSE") == 0) {
+            cJSON* goCbRef = cJSON_GetObjectItem(source, "goCbRef");
+            if (goCbRef && goCbRef->valuestring) {
+                strncpy(lastGoCbRef, goCbRef->valuestring, sizeof(lastGoCbRef) - 1);
+                sawGoose = true;
+            }
+        }
+
+        cJSON_Delete(parsed);
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(sawReport, "expected a real MMS_REPORT JSON message (from urcbDyn's "
+            "dynamically-created dataset) after flipping GGIO1.Ind1.stVal");
+    TEST_ASSERT_TRUE_MESSAGE(sawGoose, "expected a GOOSE JSON message after flipping GGIO1.Ind1.stVal");
+    TEST_ASSERT_EQUAL_STRING(EXPECTED_GOCB_REF, lastGoCbRef);
+
+    close(ws);
+    Orchestration_destroy(handle);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_fullSequence_bootstrapModelReportAndGoose_endToEnd);
+    RUN_TEST(test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd);
 
     return UNITY_END();
 }
