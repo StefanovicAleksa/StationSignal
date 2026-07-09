@@ -52,21 +52,78 @@ SimServer_create(void) {
             RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
             0, 60000);
 
+    /* A second RCB over the exact same ds1 dataset/TrgOps/OptFields as
+     * brcbMain - reproduces a real device pattern (redundant/reserved RCB
+     * instances configured per-client on the same LN/dataset, e.g.
+     * "urcbA01"/"urcbB01") where two independent RCBs report the identical
+     * underlying event at nearly the same moment. Proves mms_report_client's
+     * cross-RCB duplicate-content suppression end-to-end. Only
+     * mms_report_client's own fixture SCL (reporter1.cid) declares a
+     * matching <ReportControl>, so no other E2E test that links this same
+     * sim_server.c ever attempts to enable it - same convention as urcbDyn
+     * above. */
+    ReportControlBlock_create("brcbDup", ln0, "brcbDup", true, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            0, 60000);
+
+    /* Parented under ggio1 itself (not ln0) with dataSetName=NULL, mirroring
+     * a real device (E13_6MD/IEC 61850v2 JA4 station.scd) where every
+     * ReportControl omits datSet and is parented under the LN it reports on -
+     * proves mms_report_client's dynamic dataset creation
+     * (IedConnection_createDataSet) against a real MMS association. Only
+     * mms_report_client's own fixture SCL (reporter1.cid) declares a matching
+     * <ReportControl> with no datSet for this RCB, so no other E2E test that
+     * links this same sim_server.c ever attempts to enable it. */
+    ReportControlBlock_create("urcbDyn", ggio1, "urcbDyn", false, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            0, 0);
+
     /* GSEControlBlock over the same ds1 dataset - lets goose_subscriber's E2E
      * test observe the same GGIO1.Ind1.stVal flip that mms_report_client's
      * E2E test observes via reporting. minTime=10/maxTime=5000 mirror
-     * breaker1.cid's <GSE><MinTime>/<MaxTime> convention. Addressing (VLAN
-     * 10, priority 4, wire APPID 1000 decimal, multicast dst MAC
-     * 01-0c-cd-01-00-01) is mirrored into fixtures/reporter1.cid's
-     * <Communication> section - MUST stay numerically identical to what's
-     * declared there, since goose_subscriber configures its APPID/dst-MAC
-     * filter from the SCL fixture, not from this file. (The 3rd
-     * GSEControlBlock_create argument below, "1000", is a separate thing -
-     * GSEControl's textual "appID" SCL attribute, purely descriptive per the
-     * standard, unrelated to the numeric wire APPID carried in PhyComAddress.) */
+     * breaker1.cid's <GSE><MinTime>/<MaxTime> convention. Addressing
+     * (priority 4, wire APPID 0x1000, multicast dst MAC 01-0c-cd-01-00-01)
+     * is mirrored into fixtures/reporter1.cid's <Communication> section -
+     * MUST stay numerically identical to what's declared there, since
+     * goose_subscriber configures its APPID/dst-MAC filter from the SCL
+     * fixture, not from this file.
+     *
+     * The wire APPID here is 0x1000, NOT decimal 1000 - ied_model_scl_loader.c
+     * deliberately parses SCL's <P type="APPID"> as hex (IEC 61850-8-1
+     * encodes it that way), so the fixture's "<P type=\"APPID\">1000</P>"
+     * resolves to 0x1000 (4096 decimal) on the parsing side. This file used
+     * to pass the plain decimal literal 1000 (0x3E8) here instead, a real
+     * numeric mismatch that made goose_subscriber's GooseSubscriber_setAppId
+     * filter silently reject every real frame (no parse error - the frame is
+     * dropped before libiec61850 even attempts to report it as invalid),
+     * which surfaced as every GOOSE-liveness E2E test (goose_subscriber,
+     * orchestration, orchestration_local_file) hanging until its VALID-wait
+     * timeout. Fixed by using 0x1000 here to match.
+     *
+     * VLAN-ID has the same hex/decimal parsing on the SCL side, but is
+     * harmless: GooseSubscriberConnection_create only ever applies
+     * setDstMac/setAppId as subscriber-side filters (see
+     * data/goose_subscriber_connection.c) - vlanId/vlanPriority are parsed
+     * and stored on GooseSubscriptionTarget but never used to filter
+     * incoming frames, so no corresponding fixture/wire-value drift there
+     * actually affects delivery. */
     GSEControlBlock* gcbInd = GSEControlBlock_create("gcbInd", ln0, "1000", "ds1", 1, false, 10, 5000);
     uint8_t gooseDstMac[6] = { 0x01, 0x0c, 0xcd, 0x01, 0x00, 0x01 };
-    GSEControlBlock_addPhyComAddress(gcbInd, PhyComAddress_create(4, 10, 1000, gooseDstMac));
+    GSEControlBlock_addPhyComAddress(gcbInd, PhyComAddress_create(4, 10, 0x1000, gooseDstMac));
+
+    /* A second GoCB over the exact same ds1 dataset as gcbInd, with its own
+     * distinct APPID (0x1001)/dst MAC (...-00-02) - reproduces the same
+     * redundant-publisher pattern as mms_report_client's brcbDup, for
+     * goose_subscriber's cross-target duplicate-content suppression E2E
+     * test. Only goose_subscriber's own fixture SCL declares a matching
+     * <GSE>/<GSEControl>, so no other E2E test that links this same
+     * sim_server.c ever attempts to subscribe to it - same convention as
+     * brcbDup/urcbDyn above. */
+    GSEControlBlock* gcbDup = GSEControlBlock_create("gcbDup", ln0, "1001", "ds1", 1, false, 10, 5000);
+    uint8_t gooseDupDstMac[6] = { 0x01, 0x0c, 0xcd, 0x01, 0x00, 0x02 };
+    GSEControlBlock_addPhyComAddress(gcbDup, PhyComAddress_create(4, 10, 0x1001, gooseDupDstMac));
 
     SimServer self = calloc(1, sizeof(struct sSimServer));
     self->model = model;
