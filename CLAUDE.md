@@ -99,6 +99,81 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   (same physical IED, same credential, two independent `IedConnection`s). See
   `mms_report_client/`'s own Architecture bullet below for how this differs from
   `scl_bootstrap`'s retry-on-rejection approach.
+- **Both reporting workers are now filtered to be strictly event-driven, closing a gap where
+  periodic/non-event wire traffic could otherwise reach `ipc_dispatcher` looking like a real
+  event.** `mms_report_client` never writes `TrgOps`/`IntgPd` when enabling an RCB (unchanged,
+  deliberate — see that feature's own bullet below), so a real IED whose SCL configures
+  `period="true"` (integrity triggering — common in real vendor exports, confirmed against this
+  repo's own fixtures) will genuinely push periodic integrity reports forever; the one-shot
+  `GI` snapshot on enable is also not a "something changed" event. `mms_report_client` filters
+  with a **hybrid** rule (`domain/mms_report_client_usecases.c`'s `buildEntries`, via
+  `shouldForwardAndUpdateCache`), not reason-for-inclusion alone: an entry whose
+  `ClientReport_getReasonForInclusion` bitmask carries a real-change bit
+  (`DATA_CHANGE`/`QUALITY_CHANGE`/`DATA_UPDATE`, checked by `MmsReportClientUseCases_hasRealChangeReason`)
+  is always forwarded, trusting the server unconditionally. An entry with no such bit
+  (`INTEGRITY`/`GI`-only, or reason omitted entirely by servers that never populate
+  reason-for-inclusion — confirmed in practice against a real Siemens SIPROTEC device, whose
+  RCBs re-send their full dataset every few seconds with no usable reason code) is instead
+  gated by a per-position value-diff cache (`MmsReportClientMemberRefCacheEntry.lastForwardedValues`,
+  built once per RCB alongside the Gap 4 cache): forwarded only if its value differs from the
+  last one actually forwarded for that exact wire position, or if nothing has been forwarded yet.
+  That "nothing forwarded yet" case is what lets the one-shot startup `GI` snapshot through
+  once — the only chance some stable, never-changing points have to ever deliver their value to
+  the frontend at all — while still suppressing every subsequent unflagged periodic resend of an
+  unchanged value. A reason-only filter (dropping every `INTEGRITY`/`GI`-only entry outright,
+  tried and reverted during development) fails both directions: it starves stable points of any
+  initial value, and it does nothing for devices that omit reason-for-inclusion, since an
+  unflagged periodic resend then has no basis to be dropped at all. If every entry in a report is
+  filtered, `mms_report_client_report_adapter.c`'s `onReport` frees the record without ever
+  invoking the caller's report callback (no empty/pointless push downstream).
+  **The per-position hybrid filter above, by itself, broke `ipc_dispatcher`'s quality pairing**
+  (found against real production traffic): quality (`q`) almost never changes value
+  report-to-report and rarely carries a real-change reason on a report triggered by its sibling
+  value changing, so after the first `GI` snapshot `q`'s own diff-check drops it on every
+  subsequent report while its value sibling (e.g. `stVal`) keeps forwarding — and since
+  `ipc_dispatcher`'s `IpcDispatcherUseCases_pairQuality` only pairs entries present in that same
+  record, quality showed as `null` forever after the first report. Symmetrically, a genuine
+  quality-only change (no value change) left a lone `q` with no forwarded value sibling, which
+  `pairQuality` also drops outright — a real quality-degradation event vanished silently too.
+  Fixed by making `buildEntries` group-aware: it now runs in three phases (candidate
+  collection → per-candidate hybrid-filter decision → a group-extension pass) instead of a
+  single decide-and-emit pass. A candidate that didn't individually qualify still forwards if
+  ANY other candidate resolving to the same group anchor does. One unified "any group member
+  qualifies → forward the whole group" rule handles both directions (value drags quality along;
+  quality drags its value sibling(s) along) with no special-casing of which DA is "the value" vs
+  "the quality" — confirmed by the user's explicit choice to keep this full symmetry rather than
+  narrow it, even knowing it means a sibling DA that doesn't change in lockstep with its group
+  (e.g. `t`/`stSeld` on a real device that doesn't bump them on every `stVal` change) gets resent
+  unchanged whenever any other group member does. A candidate whose reference doesn't resolve to
+  any anchor at all is its own ungroupable singleton, falling back to the exact pre-existing solo
+  diff-check.
+  **Group anchor resolution is an ancestor walk, not a single-`$`-strip** (found against real
+  measured-value traffic: a CMV's nested `cVal$mag$f` chain never paired with its own quality,
+  which lives 3 `$`-segments shallower at the CMV instance's own level, e.g. `...phsA$q` vs
+  `...phsA$cVal$mag$f` — a single last-`$` strip lands on `...phsA$cVal$mag`, never matching).
+  Every `q`-named candidate's own prefix (up to its last `$`) becomes an "anchor"; every candidate
+  (including `q` itself) resolves to the LONGEST anchor it's genuinely nested under (starts with
+  `anchor$`) — a flat attribute (`Pos$stVal`) resolves directly to its DO's own `q`, exactly as
+  before; a deeply nested CONSTRUCTED-DA chain resolves to the same DO/SDO-level anchor several
+  segments up, not whatever its own last segment happens to be. Candidates resolving to the same
+  anchor are one group. `ipc_dispatcher`'s `IpcDispatcherUseCases_pairQuality` has the identical
+  ancestor-walk fix (`findQualityIndexForValue`) for the same reason, on the pairing side —
+  both sides need it: this feature's grouping decides whether quality is even present in a given
+  record, `ipc_dispatcher`'s pairing decides whether a present quality gets attached to the right
+  value in the JSON. Proven via new unit tests in both features' usecases test files, covering
+  the nested-CMV case, an anti-overreach case (two independent CMV instances under a shared
+  higher ancestor must never cross-pair), both drag directions, the both-unchanged case, the
+  ungroupable-singleton fallback, and the same grouping working across Gap 4 decomposition (two
+  leaves of one DO-level FCDA, not just two independently-authored FCDA entries).
+  Symmetrically, `goose_subscriber` used to forward a `GooseSubscriberRecord` on every accepted
+  GOOSE frame, including ordinary `MinTime`/`MaxTime` heartbeat retransmissions (same `stNum`,
+  incremented `sqNum`) that carry no actual data change — `GooseSubscriberUseCases_isDuplicateStNum`
+  plus a new per-target `hasForwardedStNum`/`lastForwardedStNum` pair (`GooseSubscriberTargetEntry`,
+  written only by the frame adapter thread, deliberately not under `targetStateLock` since the
+  liveness thread never touches them) now skips forwarding when a frame's `stNum` matches the
+  last one actually forwarded for that target; a STALE/INVALID_STATE→VALID transition resets this
+  so the next real frame is always delivered at least once. Neither change touches
+  `ipc_dispatcher`, which stays reason/stNum-unaware — filtering happens entirely upstream.
 - `ied_model`'s `IedModel_getGooseSubscriptionTargets` returns `GooseSubscriptionTarget*`
   (object reference plus optional VLAN/APPID/dst-MAC parsed from SCL's `<GSE><Address>`),
   not a bare `char*` — this was a breaking change made when `goose_subscriber` needed the
@@ -203,6 +278,7 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `integration_tests/scl_bootstrap/`.
 - `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use; `GooseSubscriptionTarget` carries the equivalent `datasetReference` for `goose_subscriber`. `IedModel_getDataSetMemberReferences(handle, datasetReference)` returns the ordered, heap-allocated member-reference strings backing one dataset (index i matches the i-th report/GOOSE entry) — purely local, walks the already-parsed SCL `DataSet`, never over-the-wire (see Hard Rules) — this is what both consumers use to label entries by position. **Hardened against real-world SCL variation** (found integrating against a real Siemens SIPROTEC device and its exported station SCD): `VLAN-ID`/`APPID` are parsed as hex, not decimal-defaulting `strtoul` base-0 (real values like `"000A"` were silently corrupted to `0` under octal autodetection); `<GSE>`'s `MinTime`/`MaxTime` are now read instead of always defaulting; `<SDI>`-wrapped (structured/array) `<DOI>`/`<DAI>` overrides are now recursed into instead of silently dropped; enumerated `<DAI>` `Val` labels are resolved against the DA's real `<EnumType>` ordinal instead of `atoi`'d (a non-numeric label like `"status-only"` used to silently become ordinal `0`, itself a valid-looking wrong value, not a skip); `LDevice/@ldName` (SCL functional naming) is read and threaded into FCDA/LDevice resolution as a third fallback convention. A vendor pattern where control blocks are embedded as escaped text inside `<Private type="...ControlBlockStorage...">` (seen in a raw, unconfigured Siemens device-type template) is detected and warned about rather than silently producing an empty model — actually parsing that escaped payload is out of scope (vendor-specific, speculative). Deliberately **not** hardened, considered and deferred pending real evidence: duplicate `LDevice/@inst` across multiple `<AccessPoint>`s, `DAI/@ix` array indices, `<Val sGroup="N">` setting-group overrides, dotted `doName`/`daName` FCDA shorthand, non-dash-separated MAC address formats. `GSEControl`'s `datSet` was reconsidered for symmetry with `ReportControl`'s now-optional one and deliberately kept required — every real `GSEControl` sample encountered populates it.
 - `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`[+`GI`], **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). `MmsReportEntry.reference` prefers the server's own `ClientReport_getDataReference` (only present if the RCB's `OptFlds` has `DataRef` set) and falls back to a per-RCB cache of `IedModel_getDataSetMemberReferences` results (built once at `MmsReportClient_start`, never rebuilt on reconnect) when the server omits it. Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). **Supports ACSE password authentication** via `MmsReportClientConfig.acseAuthPassword` (`data/mms_report_client_auth.c`'s `MmsReportClientAuth_configurePasswordAuth`, same third-party calls as `scl_bootstrap`'s own `data/scl_bootstrap_auth.c` — duplicated rather than shared, since features never reach into each other's `data/`/`domain/` layers, only `service/*_api.h`). `NULL` (default) means every association is unauthenticated, unchanged from before this was added. Unlike `scl_bootstrap` (which tries unauthenticated first, then retries once with a password only on rejection, since it's scanning candidates blind), `mms_report_client` applies the configured password unconditionally from the very first connect attempt — it always targets one already-known IED, so there's no ambiguity to resolve with a retry. Applied once, at `MmsReportClientConnection_create` time, to the one `IedConnection` object that's reused across every reconnect (unlike `scl_bootstrap`'s fresh-connection-per-attempt design), so it covers every future reconnect automatically. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`, including both a correct-password-connects and a wrong-password-never-connects case against a real `SimServer_requireAuthentication`-protected instance.
+  **Dynamically creates a dataset for RCBs whose SCL declares no `datSet` at all** (`datSet="Dyn"` in SCL `<ReportSettings>` terms — confirmed against a real device, `E13_6MD`/`IEC 61850v2 JA4 station.scd`: every one of its ~174 `ReportControl` elements omits `datSet`, and RCBs there are parented under the specific LN they report on, not just `LLN0`, contradicting the earlier assumption that an RCB's parent LN is always `LLN0`). Previously this feature deliberately never created datasets itself (`setRCBValues` just failed with `IED_ERROR_OBJECT_VALUE_INVALID`, logged, RCB skipped) — that stance blocked reporting entirely on this whole class of device. Now, `data/mms_report_client_connection.c`'s `getOrCreateDynamicDataset` (called from `enableOneTarget` only when `target->datasetReference` is NULL) synthesizes an association-scoped dataset (`IedConnection_createDataSet` with an `@`-prefixed name — destroyed automatically when the connection closes, so no explicit cleanup/leak risk across reconnects) covering **every FC=ST/MX leaf attribute under the RCB's own LN** — "all the variables" for that LN, by this codebase's existing FC=ST/MX "reportable" convention (see `IedModel_getReadTargets`). The member list comes from a new `ied_model` accessor, `IedModel_getReportableAttributeReferencesForLogicalNode(handle, lnReference)` (`ReportControlBlockTarget` gained an `lnReference` field for this), purely local like every other `ied_model` accessor — never over-the-wire. `mms_report_client_api.c`'s `buildMemberRefCache` uses this same accessor (not just the connection layer) to seed the RCB's reference-labeling/value-diff cache up front, so dynamic RCBs get the exact same reference-labeling/hybrid-event-filter treatment as SCL-declared ones, no special-casing downstream. A new domain usecase, `MmsReportClientUseCases_buildWireMemberReferences`, converts this codebase's standard `"$"`-joined reference form to `IedConnection_createDataSet`'s required dot/bracket wire form. A per-connect-cycle cache (LN reference → generated dataset name, built fresh in `enableAllTargets`, discarded at the end) de-dupes dataset creation across an LN's redundant reserved RCB instances (e.g. `urcbA..urcbJ` all sharing one LN) — without it, a device like `E13_6MD` would attempt to create the same dataset ~10× over just for one LN's reserved slots. **Known, deliberately unsolved limitations**: no chunking against a device's `maxAttributes` cap (an LN with more reportable leaves than the cap fails `createDataSet` for that LN, falls back to the pre-existing failure mode); no handling of a device's total dataset-count cap being smaller than its unique-LN count (per-LN scope, not per-LDevice) — both are honest, unresolved trade-offs from a design discussion that intentionally deferred multiple stakeholder-specific scope questions rather than guessing. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/` (a fixture RCB parented under a non-`LLN0` LN, no `datSet` at all, mirroring `E13_6MD`'s real shape).
 - `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
   `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
   GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's
@@ -276,16 +352,35 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   ipc_dispatcher). Quality (`q`) pairing — flagged as unbuilt in "IPC / Reporting Out" below for
   a long time — is
   now solved here: `domain/ipc_dispatcher_usecases.c`'s `IpcDispatcherUseCases_pairQuality`
-  splits each dataset-position reference on its **last** `$` (reference format confirmed via
-  `IedModelUseCases_getDataSetMemberReferences`: `"<LDName>/<LN>$<FC>$<DO>$<DA>"`) and groups
-  entries sharing a common prefix, merging a `q`-suffixed sibling into its value entry's one JSON
-  data point (a lone `q` with no value sibling is dropped, not fabricated into a value-less
-  point). Quality validity is decoded via `Quality_fromMmsValue`/`Quality_getValidity`
+  (reference format confirmed via `IedModelUseCases_getDataSetMemberReferences`:
+  `"<LDName>/<LN>$<FC>$<DO>$<DA>"`) finds each value's `q` sibling by walking **up its own
+  ancestor prefixes** (one `$`-segment at a time via `findQualityIndexForValue`), not just
+  stripping the last `$` — a flat attribute (`Pos$stVal`) finds its `q` one level up on the first
+  try, same as a plain last-`$` strip; a deeply nested CONSTRUCTED-DA chain (a CMV's
+  `PhV$phsA$cVal$mag$f`) walks past its own intermediate levels to find `PhV$phsA$q` several
+  segments up instead — quality belongs to the whole CDC instance, not to whichever BDA happens
+  to be the terminal leaf of one nested DA within it. The original single-`$`-strip
+  implementation only ever found quality for flat attributes, silently leaving every nested
+  measured value (most real MX/CMV datapoints) with `quality: null` — confirmed against real
+  production traffic and fixed. Merges a matched `q` sibling into its value entry's one JSON data
+  point (a lone `q` with no value sibling is dropped, not fabricated into a value-less point). Quality validity is decoded via `Quality_fromMmsValue`/`Quality_getValidity`
   (`iec61850_common.h`) into a named 4-value enum; the remaining detail/test/substituted/derived
   bits are copied verbatim into one raw `uint16_t` passthrough field rather than individually
   named in v1. `MmsValue` scalars are converted to JSON-friendly types by `MmsValue_getType()`
-  (`utils/ipc_dispatcher_value_codec.c`) — boolean/integer/unsigned/float/string map directly;
-  anything else (structures, arrays, octet strings, etc. — not reachable from today's
+  (`utils/ipc_dispatcher_value_codec.c`) — boolean/integer/unsigned/float/string/UTC-time map
+  directly; **`MMS_BIT_STRING` maps to a raw unsigned integer** (`MmsValue_getBitStringAsInteger`)
+  — covers CODEDENUM-typed value DAs (`Dbpos`/`Tcmd`, per `IedModelUtils_mapBType`, e.g. a
+  breaker's `Pos.stVal`) that wire-encode as a bitstring and previously fell through to the
+  unsupported placeholder (found against real production traffic). Deliberately a raw integer,
+  not a named enum string (e.g. Dbpos's own `0`=intermediate-state/`1`=off/`2`=on/`3`=bad-state
+  per IEC 61850-7-3) — this function has no way to know which specific CODEDENUM a given
+  bitstring represents (Dbpos and Tcmd share the same wire type but different meanings), and
+  guessing a decoded label without per-type verification would violate this repo's own "don't
+  guess IEC 61850 semantics" rule; the raw bit pattern is always correct regardless. Quality's
+  own bitstring never reaches this path at all — `IpcDispatcherUseCases_pairQuality` excludes
+  every `q`-named entry from ever being treated as a value, routing it to `_decodeQuality`
+  instead (see above), so this addition can't double-decode or conflict with quality handling.
+  Anything else (structures, arrays, octet strings, etc. — not reachable from today's
   leaf-DA-only FCDA datasets) falls back to an owned `"<unsupported:...>"` placeholder string,
   never silently dropped. **Threading is the crux of this feature**: `mms_report_client`'s
   reconnect-supervisor thread and `goose_subscriber`'s `GooseReceiver` reception thread each
