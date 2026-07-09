@@ -8,15 +8,20 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 ## Commands
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
-  compiling it together with every `.c` file under `src/orchestration/` and all five
-  `src/features/<feature>/` directories (`service`/`data`/`domain`/`utils`), e.g.:
-  `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/orchestration/*/*.c
-  src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib -liec61850 -lhal -lmxml
-  -lwebsockets -lcjson -lpthread && sudo /tmp/goose_rep_daemon [host] [mmsPort] [iedName]
-  [interface] [ipcPort] [acseAuthPassword]` — the last two args are optional (`ipcPort`
-  defaults to 8765, `acseAuthPassword` defaults to unauthenticated); this is a manual stopgap,
-  not a substitute for a real build system; don't invent or guess a permanent build command,
-  ask before assuming one.
+  compiling it together with `src/main_discovery_prompt.c`, every `.c` file under
+  `src/orchestration/`, and all six `src/features/<feature>/` directories (`service`/`data`/
+  `domain`/`utils`), e.g.:
+  `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/main_discovery_prompt.c
+  src/orchestration/*/*.c src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib
+  -liec61850 -lhal -lmxml -lwebsockets -lcjson -lpthread && sudo /tmp/goose_rep_daemon [host]
+  [mmsPort] [iedName] [interface] [ipcPort] [acseAuthPassword]` — this is a manual stopgap, not
+  a substitute for a real build system; don't invent or guess a permanent build command, ask
+  before assuming one. Only `mmsPort`/`interface`/`ipcPort`/`acseAuthPassword` have fallback
+  defaults (102/`eth0`/8765/unauthenticated) if omitted:
+  - `host` omitted/empty: no hardcoded fallback — runs `ied_discovery`'s interactive terminal
+    flow instead (scans the local subnet on `interface` for real IEC 61850 MMS devices, lets
+    you also type in extra candidate IPs to verify and add, then pick one). See
+    `ied_discovery/`'s own Architecture bullet below.
 - Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
 - Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
 - Run unit tests: `cd tests && make run` — strictly unit, no file I/O beyond two
@@ -55,6 +60,16 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `_onGooseRecord`, and asserts real JSON arrives over the real socket. No `sudo` needed
   (loopback TCP only, same as `mms_report_client`) and no `ied_simulator` needed — unlike the
   other E2E tests, this feature has no external IED to talk to, only its own transport.
+- Run the `ied_discovery` E2E test: `cd integration_tests/ied_discovery && make run` — runs a
+  real `ied_simulator` "Reporter1" IED in-process, drives `IedDiscovery_verifyHost` against it
+  over loopback (real TCP probe + real MMS/ACSE association, no browse/fetch), and proves the
+  ACSE-auth-retry symmetry the same way `scl_bootstrap`'s own E2E test does. No `sudo` needed.
+  Deliberately does **not** exercise `IedDiscovery_scanSubnet`/`getifaddrs` — a real LAN subnet
+  scan is machine-topology-dependent, not something this test can assert on; the one
+  deterministic `getifaddrs` case (the `maxHosts` ceiling against loopback's own real netmask)
+  lives in `tests/ied_discovery/test_ied_discovery_api.c` instead. Manually verify a real subnet
+  scan by just running the daemon with no `host` argv on a machine with a real neighbor IED —
+  same "manual smoke test, not automatable" class as the GOOSE loopback smoke test below.
 - Raw-socket loopback smoke test (build manually, no Makefile — throwaway linkage/behavior
   probe): `gcc -g -Wall -Isrc -idirafter third_party/include tools/smoke_tests/goose_loopback_smoke_test.c
   -o /tmp/goose_loopback_smoke_test -Lthird_party/lib -liec61850 -lhal -lpthread && sudo
@@ -68,15 +83,26 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   port) -> `Orchestration_create` -> registers the three remaining `printf`-based
   connection-state/RCB-status/liveness-diagnostic passthroughs (report/GOOSE DATA records have
   no caller-facing setter at all anymore - see `ipc_dispatcher`'s own bullet below for why) ->
-  `Orchestration_run` (host/port/IED name/interface from argv, hardcoded defaults matching
-  `integration_tests/ied_simulator`'s "Reporter1" fixture) -> blocks on `SIGINT`/`SIGTERM` ->
+  (if `host` argv was omitted/empty: `ied_discovery`'s interactive scan/manual-add/pick flow via
+  `src/main_discovery_prompt.c`, see that feature's own bullet below) -> `Orchestration_run`
+  (port/interface from argv; host either argv-supplied or the just-picked one; IED name from
+  argv) -> blocks on `SIGINT`/`SIGTERM` ->
   `Orchestration_destroy`. Notably, `main.c` never includes
   `features/ipc_dispatcher/service/ipc_dispatcher_api.h` at all - orchestration owns that
   feature's entire lifecycle end-to-end (see below), the same way it already owns ied_model/
-  mms_report_client/goose_subscriber's. All five `src/features/` (`scl_bootstrap/`,
-  `ied_model/`, `mms_report_client/`, `goose_subscriber/`, `ipc_dispatcher/`) plus
-  `src/orchestration/` are now implemented (see Architecture below) — every feature named in the
-  Expected-features list exists.
+  mms_report_client/goose_subscriber's. All six `src/features/` (`scl_bootstrap/`,
+  `ied_model/`, `mms_report_client/`, `goose_subscriber/`, `ipc_dispatcher/`, `ied_discovery/`)
+  plus `src/orchestration/` are now implemented (see Architecture below) — every feature named in
+  the Expected-features list exists, `ied_discovery` being a later, deliberate, user-requested
+  addition beyond the original five (see its own bullet for why it's not "inventing an unrelated
+  feature").
+- **`main.c`'s `host`/`iedName` argv no longer default to `"127.0.0.1"`/`"Reporter1"`** — those
+  only ever matched the bundled `integration_tests/ied_simulator` fixture and directly
+  contradicted the point of `ied_discovery` (an operator who doesn't already know the IP
+  shouldn't need to already know the IED name either). Omitting `host` now triggers the
+  interactive discovery flow instead of silently defaulting to the test simulator's address; no
+  automated test depended on the old defaults (every `tests/`/`integration_tests/` case calls
+  `orchestration`'s API directly, never the compiled `main.c` binary).
 - **Bugfix surfaced by wiring `ipc_dispatcher` into orchestration's own rollback paths**:
   `MmsReportClientConnection_destroy` (`src/features/mms_report_client/data/mms_report_client_connection.c`)
   used to destroy `handle->wakeSignal` (the semaphore) *before* `IedConnection_destroy` - but
@@ -233,6 +259,12 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   end-to-end (see `ied_model`) — don't duplicate that coverage, extend the E2E test
   instead. Two self-contained temp-file cases exist (`tests/ied_model/test_ied_model_api.c`,
   `tests/orchestration/test_orchestration_staging.c`) — the only file I/O permitted here.
+  `tests/ied_discovery/` covers pure CIDR math (`test_ied_discovery_cidr.c`, no real network),
+  real `getifaddrs()` integration against loopback only (`test_ied_discovery_netif.c`, plus one
+  deterministic `maxHosts`-ceiling assertion in `test_ied_discovery_api.c` — loopback's real
+  netmask has far more hosts than the default ceiling, so this proves the safety valve without
+  ever sending a network probe), and argument-validation wiring — never a real subnet scan or
+  MMS association, that's `integration_tests/ied_discovery/`'s job.
 - `integration_tests/<feature>/` — E2E tests of a real feature's public API against a
   real, self-authored fixture file (e.g. `integration_tests/ied_model/fixtures/breaker1.cid`
   + `e2e_test_ied_model.c`), also Unity-based (`-lunity` against the vendored
@@ -257,10 +289,13 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
     features can skip the subfolders and just use the three files directly.
 - `src/main.c` wires dependencies only — no business logic.
 - Expected features: `scl_bootstrap/`, `ied_model/`, `goose_subscriber/`, `mms_report_client/`,
-  `ipc_dispatcher/` — all five now implemented; don't invent unrelated features. `src/orchestration/`
-  is a separate, top-level sibling of `src/features/` (not itself in this feature list) that
-  sequences all five together — see its own bullet below. `ipc_dispatcher`'s lifecycle is owned
-  entirely by orchestration (not by `src/main.c` directly) — `main.c` only ever configures it via
+  `ipc_dispatcher/` — all five now implemented; don't invent unrelated features beyond these
+  without being asked. `ied_discovery/` is a sixth feature added later, explicitly at user
+  request (LAN auto-discovery of candidate IEDs) — not a case of inventing scope unprompted, see
+  its own bullet below. `src/orchestration/` is a separate, top-level sibling of `src/features/`
+  (not itself in this feature list) that sequences the reporting pipeline together — see its own
+  bullet below. `ipc_dispatcher`'s lifecycle is owned entirely by orchestration (not by
+  `src/main.c` directly) — `main.c` only ever configures it via
   `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config.
 - `scl_bootstrap/` (implemented) — one-shot, synchronous bootstrap/probe utility: given a
   caller-supplied list of candidate host addresses, TCP-probes each for MMS on a given port,
@@ -275,7 +310,12 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   other two features' long-running background workers. Optionally gated behind ACSE password
   auth (one retry) via `SclBootstrapConfig.acseAuthPassword`. Proven end-to-end (including the
   auth-retry and negative-path cases) against a real `ied_simulator` IED in
-  `integration_tests/scl_bootstrap/`.
+  `integration_tests/scl_bootstrap/`. Also exposes `SclBootstrap_tcpProbeOnly` (thin wrapper
+  around the same `SclBootstrapTcpProbe_scan` machinery `scanAndFetch`'s own phase 1 already
+  uses) as a public entry point purely so `ied_discovery` can reuse its bounded-concurrency
+  async TCP-probe state machine without pulling in the full MMS-association + SCL browse/fetch
+  — that async state machine is substantial enough to be worth reusing rather than duplicating,
+  unlike the small ACSE-auth-setup snippet `mms_report_client`/`ied_discovery` each duplicate.
 - `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use; `GooseSubscriptionTarget` carries the equivalent `datasetReference` for `goose_subscriber`. `IedModel_getDataSetMemberReferences(handle, datasetReference)` returns the ordered, heap-allocated member-reference strings backing one dataset (index i matches the i-th report/GOOSE entry) — purely local, walks the already-parsed SCL `DataSet`, never over-the-wire (see Hard Rules) — this is what both consumers use to label entries by position. **Hardened against real-world SCL variation** (found integrating against a real Siemens SIPROTEC device and its exported station SCD): `VLAN-ID`/`APPID` are parsed as hex, not decimal-defaulting `strtoul` base-0 (real values like `"000A"` were silently corrupted to `0` under octal autodetection); `<GSE>`'s `MinTime`/`MaxTime` are now read instead of always defaulting; `<SDI>`-wrapped (structured/array) `<DOI>`/`<DAI>` overrides are now recursed into instead of silently dropped; enumerated `<DAI>` `Val` labels are resolved against the DA's real `<EnumType>` ordinal instead of `atoi`'d (a non-numeric label like `"status-only"` used to silently become ordinal `0`, itself a valid-looking wrong value, not a skip); `LDevice/@ldName` (SCL functional naming) is read and threaded into FCDA/LDevice resolution as a third fallback convention. A vendor pattern where control blocks are embedded as escaped text inside `<Private type="...ControlBlockStorage...">` (seen in a raw, unconfigured Siemens device-type template) is detected and warned about rather than silently producing an empty model — actually parsing that escaped payload is out of scope (vendor-specific, speculative). Deliberately **not** hardened, considered and deferred pending real evidence: duplicate `LDevice/@inst` across multiple `<AccessPoint>`s, `DAI/@ix` array indices, `<Val sGroup="N">` setting-group overrides, dotted `doName`/`daName` FCDA shorthand, non-dash-separated MAC address formats. `GSEControl`'s `datSet` was reconsidered for symmetry with `ReportControl`'s now-optional one and deliberately kept required — every real `GSEControl` sample encountered populates it.
 - `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`[+`GI`], **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). `MmsReportEntry.reference` prefers the server's own `ClientReport_getDataReference` (only present if the RCB's `OptFlds` has `DataRef` set) and falls back to a per-RCB cache of `IedModel_getDataSetMemberReferences` results (built once at `MmsReportClient_start`, never rebuilt on reconnect) when the server omits it. Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). **Supports ACSE password authentication** via `MmsReportClientConfig.acseAuthPassword` (`data/mms_report_client_auth.c`'s `MmsReportClientAuth_configurePasswordAuth`, same third-party calls as `scl_bootstrap`'s own `data/scl_bootstrap_auth.c` — duplicated rather than shared, since features never reach into each other's `data/`/`domain/` layers, only `service/*_api.h`). `NULL` (default) means every association is unauthenticated, unchanged from before this was added. Unlike `scl_bootstrap` (which tries unauthenticated first, then retries once with a password only on rejection, since it's scanning candidates blind), `mms_report_client` applies the configured password unconditionally from the very first connect attempt — it always targets one already-known IED, so there's no ambiguity to resolve with a retry. Applied once, at `MmsReportClientConnection_create` time, to the one `IedConnection` object that's reused across every reconnect (unlike `scl_bootstrap`'s fresh-connection-per-attempt design), so it covers every future reconnect automatically. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`, including both a correct-password-connects and a wrong-password-never-connects case against a real `SimServer_requireAuthentication`-protected instance.
   **Dynamically creates a dataset for RCBs whose SCL declares no `datSet` at all** (`datSet="Dyn"` in SCL `<ReportSettings>` terms — confirmed against a real device, `E13_6MD`/`IEC 61850v2 JA4 station.scd`: every one of its ~174 `ReportControl` elements omits `datSet`, and RCBs there are parented under the specific LN they report on, not just `LLN0`, contradicting the earlier assumption that an RCB's parent LN is always `LLN0`). Previously this feature deliberately never created datasets itself (`setRCBValues` just failed with `IED_ERROR_OBJECT_VALUE_INVALID`, logged, RCB skipped) — that stance blocked reporting entirely on this whole class of device. Now, `data/mms_report_client_connection.c`'s `getOrCreateDynamicDataset` (called from `enableOneTarget` only when `target->datasetReference` is NULL) synthesizes an association-scoped dataset (`IedConnection_createDataSet` with an `@`-prefixed name — destroyed automatically when the connection closes, so no explicit cleanup/leak risk across reconnects) covering **every FC=ST/MX leaf attribute under the RCB's own LN** — "all the variables" for that LN, by this codebase's existing FC=ST/MX "reportable" convention (see `IedModel_getReadTargets`). The member list comes from a new `ied_model` accessor, `IedModel_getReportableAttributeReferencesForLogicalNode(handle, lnReference)` (`ReportControlBlockTarget` gained an `lnReference` field for this), purely local like every other `ied_model` accessor — never over-the-wire. `mms_report_client_api.c`'s `buildMemberRefCache` uses this same accessor (not just the connection layer) to seed the RCB's reference-labeling/value-diff cache up front, so dynamic RCBs get the exact same reference-labeling/hybrid-event-filter treatment as SCL-declared ones, no special-casing downstream. A new domain usecase, `MmsReportClientUseCases_buildWireMemberReferences`, converts this codebase's standard `"$"`-joined reference form to `IedConnection_createDataSet`'s required dot/bracket wire form. A per-connect-cycle cache (LN reference → generated dataset name, built fresh in `enableAllTargets`, discarded at the end) de-dupes dataset creation across an LN's redundant reserved RCB instances (e.g. `urcbA..urcbJ` all sharing one LN) — without it, a device like `E13_6MD` would attempt to create the same dataset ~10× over just for one LN's reserved slots. **Known, deliberately unsolved limitations**: no chunking against a device's `maxAttributes` cap (an LN with more reportable leaves than the cap fails `createDataSet` for that LN, falls back to the pre-existing failure mode); no handling of a device's total dataset-count cap being smaller than its unique-LN count (per-LN scope, not per-LDevice) — both are honest, unresolved trade-offs from a design discussion that intentionally deferred multiple stakeholder-specific scope questions rather than guessing. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/` (a fixture RCB parented under a non-`LLN0` LN, no `datSet` at all, mirroring `E13_6MD`'s real shape).
@@ -410,6 +450,40 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `integration_tests/ipc_dispatcher/` — no `sudo`, no `ied_simulator` needed (loopback TCP only,
   and records are hand-built rather than sourced from a real IED, since this feature's job
   starts after `mms_report_client`/`goose_subscriber` have already normalized one).
+- `ied_discovery/` (implemented) — a later, deliberate, user-requested addition (see
+  Expected-features note above): finds candidate IEC 61850 MMS devices on the local network
+  instead of requiring the operator to already know a target IP. Unlike every feature above,
+  it is **not** part of `orchestration`'s own sequence — `src/main.c` calls it directly, before
+  `Orchestration_run` even starts, only when the `host` argv is omitted/empty (see Current
+  State above), and hands the one host it picks into the same, completely unmodified
+  `Orchestration_run` call an explicitly-typed host would take. Two-stage verification per
+  candidate: (1) a cheap bounded-concurrency TCP probe on the MMS port, reusing
+  `scl_bootstrap`'s own async-probe machinery via its newly-exposed `SclBootstrap_tcpProbeOnly`
+  (see that feature's own bullet); (2) for TCP survivors only, a real MMS/ACSE association
+  (`IedConnection_connect`, immediately closed — no file browsing, no SCL fetch, that's deferred
+  to `scl_bootstrap`'s own later, real run against whichever host is picked). Only a host that
+  passes *both* stages counts as a confirmed device — this is deliberately host discovery on an
+  already-named local interface (`getifaddrs()` + CIDR math, entirely net-new in this repo), not
+  the Hard Rules' "no over-the-wire tree discovery" (that rule is about not walking a connected
+  device's data-model tree over MMS before SCL is loaded; this never touches SCL/the data model
+  at all). Public boundary: `src/features/ied_discovery/service/ied_discovery_api.h` — pure
+  request/response, zero I/O prompting: `IedDiscovery_scanSubnet` (enumerate + verify every host
+  on a named interface's subnet, minus its own address, capped by `IedDiscoveryConfig.maxHosts`
+  as a safety valve against an accidentally huge range) and `IedDiscovery_verifyHost` (verify one
+  caller-supplied host identically — used for manually-typed candidates, no special-cased
+  trust). Optionally gated behind ACSE password auth (one retry, mirroring `scl_bootstrap`'s own
+  policy) via its own independent `IedDiscoveryConfig.acseAuthPassword` — features never share
+  config structs across the public boundary. The interactive terminal loop (scan, print a
+  numbered list, let the operator type a number to pick or an IP to add-and-verify a manual
+  candidate) is deliberately kept **out** of this feature entirely, in a separate thin adapter,
+  `src/main_discovery_prompt.c` — the user who requested this explicitly said the interaction
+  medium will likely be replaced later (e.g. driven by the API layer this daemon reports to), so
+  it must be swappable without touching `ied_discovery` itself. Proven end-to-end (`verifyHost`
+  against a real `ied_simulator` IED, including the ACSE-auth-retry symmetry) in
+  `integration_tests/ied_discovery/` — no `sudo` needed. A real subnet scan itself
+  (`scanSubnet`/`getifaddrs`) is machine-topology-dependent and not automatable; see that E2E
+  test's own Commands bullet for the one deterministic `getifaddrs` case that is covered, and
+  for how to manually verify a real scan.
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,
