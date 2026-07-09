@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="reporter1-rcb-instance-mismatch-fixture" nameStructure="IEDName" />
+
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="Reporter1" apName="AP1">
+        <GSE ldInst="LD1" cbName="gcbInd">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-01</P>
+            <P type="APPID">1000</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <IED name="Reporter1">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="LD1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="ds1" desc="Indication dataset">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="q" />
+            </DataSet>
+            <!-- Deliberately a SEPARATE dataset from ds1, not a second RCB
+                 sharing it: mms_report_client's cross-RCB duplicate-content
+                 suppression (MmsReportClientUseCases_shouldForwardAcrossRcb,
+                 see its own doc comment) is a single, client-wide cache that
+                 suppresses ANY second RCB's report whose (reference, value)
+                 content exactly matches the immediately-preceding forwarded
+                 report - by design, since real devices configure genuinely
+                 redundant/reserved RCB instances this way. If rcbMulti also
+                 declared datSet="ds1", its report after the same indication
+                 flip would carry IDENTICAL entries to brcbMain's own (both
+                 Ind1.stVal + Ind1.q) and get suppressed as an apparent
+                 duplicate - exactly the failure this fixture used to produce
+                 before this dataset was split out. ds2 covers only stVal (no
+                 q), giving rcbMulti's report a different entryCount than
+                 brcbMain's - crossRcbEntriesEqual's own first check
+                 (cachedCount != entryCount) already rules out a false-positive
+                 match, so both reports now genuinely reach the callback,
+                 still driven by the exact same real SimServer_setIndication
+                 flip this test relies on. -->
+            <DataSet name="ds2" desc="Indication dataset (stVal only) - deliberately distinct from ds1">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+            </DataSet>
+            <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
+                intgPd="60000" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <!-- Mirrors a real ABB REC650 SCD's own declaration verbatim
+                 (name has no instance suffix, RptEnabled max="5") - the live
+                 device (and integration_tests/ied_simulator's sim_server.c,
+                 deliberately made to match) only ever exposes this on the
+                 wire as "rcbMulti01", never the bare "rcbMulti" this fixture
+                 declares. See e2e_test_orchestration_local_file.c. -->
+            <ReportControl name="rcbMulti" rptID="rcbMulti" datSet="ds2" confRev="1" buffered="true"
+                intgPd="60000" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="5" />
+            </ReportControl>
+            <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />
+          </LN0>
+          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+      <DO name="Health" type="ENS1" />
+      <DO name="NamPlt" type="LPL1" />
+    </LNodeType>
+
+    <LNodeType id="GGIOType" lnClass="GGIO">
+      <DO name="Ind1" type="SPS1" />
+      <DO name="SPCSO1" type="SPC1" />
+    </LNodeType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="Enum" type="HealthKind" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="LPL1" cdc="LPL">
+      <DA name="vendor" bType="VisString255" fc="DC" />
+      <DA name="swRev" bType="VisString255" fc="DC" />
+    </DOType>
+
+    <DOType id="SPS1" cdc="SPS">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="SPC1" cdc="SPC">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="Oper" bType="Struct" type="OperSPS" fc="CO" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DAType id="OperSPS">
+      <BDA name="ctlVal" bType="BOOLEAN" />
+    </DAType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+
+    <EnumType id="HealthKind">
+      <EnumVal ord="1">Ok</EnumVal>
+      <EnumVal ord="2">Warning</EnumVal>
+      <EnumVal ord="3">Alarm</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

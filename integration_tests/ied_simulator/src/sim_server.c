@@ -43,11 +43,44 @@ SimServer_create(void) {
     DataSetEntry_create(dataSet, "GGIO1$ST$Ind1$stVal", -1, NULL);
     DataSetEntry_create(dataSet, "GGIO1$ST$Ind1$q", -1, NULL);
 
+    /* A second, deliberately narrower dataset (stVal only, no q) - exists so
+     * rcbMulti01 (below) can report the same GGIO1.Ind1 flip as brcbMain
+     * without mms_report_client's cross-RCB duplicate-content suppression
+     * (MmsReportClientUseCases_shouldForwardAcrossRcb) treating its report as
+     * an exact-content duplicate of brcbMain's own (which carries both stVal
+     * AND q) and silently dropping it - see
+     * integration_tests/orchestration_local_file's own fixture and E2E test
+     * comment for the full real-world story (a live ABB REC650's RptEnabled
+     * max>1 RCB-suffix handling). */
+    DataSet* dataSetStValOnly = DataSet_create("ds2", ln0);
+    DataSetEntry_create(dataSetStValOnly, "GGIO1$ST$Ind1$stVal", -1, NULL);
+
     /* dataSetName left NULL (no server-side default dataset) - the client
      * (mms_report_client) always explicitly sets DatSet alongside RptEna on
      * enable, matching libiec61850's own reference client example
      * (client_example_no_thread.c), which is the validated, non-fragile path. */
     ReportControlBlock_create("brcbMain", ln0, "brcbMain", true, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            0, 60000);
+
+    /* Reproduces a real-world vendor quirk found against a live ABB REC650
+     * exposed via IED Scout: its SCD declares
+     * <ReportControl name="rcb_A" ...><RptEnabled max="5">, but the live
+     * server only ever answers on the wire to "rcb_A01".."rcb_A05" - never
+     * the bare "rcb_A" name (RptEnabled max>1 means the server exposes N
+     * separately-addressable, pre-instantiated RCB objects, each with its own
+     * "NN" suffix baked into its real name - libiec61850's dynamic model API
+     * has no separate "instance count" parameter for this, so the suffix is
+     * simply part of the literal name passed here, matching the live
+     * server's own actual object). Over ds2 (not ds1) so its report doesn't
+     * get suppressed as an exact-content duplicate of brcbMain's own - see
+     * ds2's own comment above. Only orchestration_local_file's own fixture
+     * (reporter1_rcb_instance_mismatch.cid) declares a matching
+     * <ReportControl name="rcbMulti" ...><RptEnabled max="5">, so no other
+     * E2E test that links this same sim_server.c ever attempts to enable
+     * it. */
+    ReportControlBlock_create("rcbMulti01", ln0, "rcbMulti01", true, "ds2", 1,
             TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
             RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
             0, 60000);
