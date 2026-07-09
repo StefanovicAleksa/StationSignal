@@ -9,7 +9,7 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
   compiling it together with `src/main_discovery_prompt.c`, every `.c` file under
-  `src/orchestration/`, and all six `src/features/<feature>/` directories (`service`/`data`/
+  `src/orchestration/`, and all seven `src/features/<feature>/` directories (`service`/`data`/
   `domain`/`utils`), e.g.:
   `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/main_discovery_prompt.c
   src/orchestration/*/*.c src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib
@@ -33,6 +33,13 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
     all). `host`/`mmsPort` still drive the real live `mms_report_client`/`goose_subscriber`
     connections; `ied_discovery`'s scan/manual-add still works the same beforehand to find
     that host. See `orchestration/`'s own bullet for the stage-by-stage behavior.
+  - If `sclFilePath` is **not** given and `Orchestration_run`'s bootstrap stage comes back with
+    exactly `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (the same device class the bullet above
+    describes, just without an operator having a local SCL copy in hand), `main.c` automatically
+    retries once via `Orchestration_runFromOnlineDiscovery` — builds the model directly from the
+    live device's own MMS data model instead of any SCL file at all. See `ied_model_online_loader/`'s
+    own Architecture bullet below and the "No over-the-wire tree discovery" Hard Rule's documented
+    exception.
 - Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
 - Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
 - Run unit tests: `cd tests && make run` — strictly unit, no file I/O beyond two
@@ -46,6 +53,12 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   real `ied_simulator` "Reporter1" IED in-process with its MMS file services pointed at a real
   fixture directory, TCP-probes and fetches its SCL file over a real MMS association (plus
   ACSE-password-auth-retry and negative-path cases). No `sudo` needed — plain TCP/MMS only.
+- Run the `ied_model_online_loader` E2E test: `cd integration_tests/ied_model_online_loader &&
+  make run` — runs a real `ied_simulator` "Reporter1" IED in-process with its MMS file services
+  pointed at a real, empty fixture directory (no SCL file at all — reproduces the exact real-world
+  precondition, `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND`), then drives `IedModelOnlineLoader_build`
+  directly against it and asserts the discovered report/GOOSE targets and dataset members match
+  `sim_server.c`'s own hand-built shape exactly. No `sudo` needed — plain TCP/MMS only.
 - Run the `mms_report_client` E2E test: `cd integration_tests/mms_report_client && make run`
   — runs a real `ied_simulator` "Reporter1" IED in-process, connects the real service, flips
   a value server-side, asserts a real report arrives. Also proves ACSE password auth
@@ -63,7 +76,18 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   mms_report_client -> goose_subscriber` sequence against it over loopback, connecting a real
   hand-rolled websocket client to orchestration's own `ipc_dispatcher` port and asserting both a
   real MMS-report JSON message and a real GOOSE JSON message arrive over it. **Needs `sudo`** —
-  inherits the GOOSE-subscriber step's raw-socket requirement.
+  inherits the GOOSE-subscriber step's raw-socket requirement. A second test in the same binary,
+  `test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd`, proves the online-discovery
+  fallback end to end against a second simulator instance whose MMS file services point at a
+  real, empty `fixtures/no_scl_files/` directory: asserts `Orchestration_run` genuinely fails
+  with `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND`, then `Orchestration_runFromOnlineDiscovery`
+  against the same host succeeds and real report/GOOSE JSON still arrives — the expected
+  reporting RCB differs from the first test (`urcbDyn`, not `brcbMain`) since `brcbMain`/
+  `brcbDup`/`rcbMulti01` are parented under `LLN0`, which has no `FC=ST/MX` attributes of its own
+  in this simulator, so `mms_report_client`'s existing dynamic-dataset fallback can't synthesize
+  a dataset for them from an online-discovered (`datasetReference=NULL`) RCB — confirmed
+  empirically (log output shows exactly these three failing setRCBValues while `urcbDyn`
+  succeeds), not a defect in discovery itself.
 - Run the `ipc_dispatcher` E2E test: `cd integration_tests/ipc_dispatcher && make run` —
   starts a real `IpcDispatcher` directly (real bind, real libwebsockets service thread, not
   through orchestration), connects a hand-rolled minimal websocket test client, drives hand-built
@@ -304,7 +328,11 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `ipc_dispatcher/` — all five now implemented; don't invent unrelated features beyond these
   without being asked. `ied_discovery/` is a sixth feature added later, explicitly at user
   request (LAN auto-discovery of candidate IEDs) — not a case of inventing scope unprompted, see
-  its own bullet below. `src/orchestration/` is a separate, top-level sibling of `src/features/`
+  its own bullet below. `ied_model_online_loader/` is a seventh feature, also added later at
+  explicit user request (a real device, e.g. OMICRON IED Scout's "Simulate IED" mode, that
+  associates fine but never serves an SCL file over MMS file services at all) — see its own
+  bullet below and the "No over-the-wire tree discovery" Hard Rule's documented exception.
+  `src/orchestration/` is a separate, top-level sibling of `src/features/`
   (not itself in this feature list) that sequences the reporting pipeline together — see its own
   bullet below. `ipc_dispatcher`'s lifecycle is owned entirely by orchestration (not by
   `src/main.c` directly) — `main.c` only ever configures it via
@@ -406,6 +434,29 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `tests/orchestration/test_orchestration_api.c` (mirrors `Orchestration_run`'s own cases); no
   dedicated E2E test yet — exercised so far via manual verification against a real IED Scout
   simulation.
+  **`Orchestration_runFromOnlineDiscovery(handle, host, mmsPort, iedName, interfaceId, accessMode,
+  acseAuthPassword, outDetail)`** is a THIRD public entry point, for devices whose MMS server
+  doesn't implement file services at all (unlike `_runFromLocalFile`'s scenario, there's no local
+  SCL file to hand in either — a real OMICRON IED Scout "Simulate IED" instance confirmed to
+  return `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` is the motivating case). Instead of parsing
+  any SCL at all, it calls `ied_model_online_loader`'s `IedModelOnlineLoader_build` (own one-shot
+  `IedConnection`, own ACSE-auth handling, own connect/discover/disconnect — this layer never
+  touches `IedConnection` directly, preserving its "zero direct third-party includes" invariant)
+  to walk the live device's MMS ACSI directory services and reconstruct an equivalent model, then
+  joins the SAME shared tail `Orchestration_run`/`_runFromLocalFile` already use (`mms_report_client`/
+  `goose_subscriber` start, fail-hard rollback) via a new private `runFromIedModelHandle` helper —
+  `runFromSclFile` was refactored to call this same helper instead of duplicating that tail
+  itself. New `ORCHESTRATION_STAGE_ONLINE_DISCOVERY` stage (replaces `BOOTSTRAP`/`STAGING`/
+  `MODEL_LOAD` for this entry point only) and `ORCHESTRATION_ERR_ONLINE_DISCOVERY_FAILED`/
+  `OrchestrationErrorDetail.onlineDiscoveryError`. `iedName` here only labels the constructed
+  model (no SCL `<IED>` list exists to auto-detect from over a live connection) — NOT a
+  resolution stage of its own, unlike the other two entry points' `iedName` semantics. **Never**
+  invoked automatically inside `Orchestration_run` itself (that would silently change its
+  behavior/latency based on how bootstrap happened to fail, violating its existing fail-hard,
+  no-silent-branching contract) — `src/main.c` calls it explicitly, only as a one-shot retry after
+  `Orchestration_run` itself has already failed with exactly that bootstrap status (see `main.c`'s
+  own top comment). See `ied_model_online_loader/`'s own bullet below for the discovery mechanism,
+  and the "No over-the-wire tree discovery" Hard Rule for why this is a narrow, explicit exception.
 - `ipc_dispatcher/` (implemented) — relays normalized `MmsReportRecord`/`GooseSubscriberRecord`
   data out over a websocket, hosted internally only (`127.0.0.1`, no TLS, no
   `IpcDispatcherConfig` field even exists to bind elsewhere), for a separate API layer/frontend
@@ -520,6 +571,101 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   (`scanSubnet`/`getifaddrs`) is machine-topology-dependent and not automatable; see that E2E
   test's own Commands bullet for the one deterministic `getifaddrs` case that is covered, and
   for how to manually verify a real scan.
+- `ied_model_online_loader/` (implemented) — a later, deliberate, user-requested addition (see
+  Expected-features note above): builds a complete `IedModelHandle` by walking a live IED's own
+  MMS ACSI directory/model-discovery services, for devices whose MMS server associates fine but
+  never serves an SCL file over file services at all (confirmed in practice against a real
+  OMICRON IED Scout "Simulate IED" instance — `scl_bootstrap` returns
+  `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` even after browsing its file directory). This is the
+  **one** narrow, deliberate exception to the "No over-the-wire tree discovery" Hard Rule below —
+  every call this feature makes is itself a `libiec61850` client API call (`IedConnection_get*`),
+  never hand-rolled protocol parsing, and it only ever runs as an explicit, caller-invoked
+  fallback (`Orchestration_runFromOnlineDiscovery`), never silently instead of SCL parsing. Public
+  boundary: `src/features/ied_model_online_loader/service/ied_model_online_loader_api.h`, one
+  entry point: `IedModelOnlineLoader_build(host, port, iedName, mode, acseAuthPassword, config,
+  outError)` — owns its own one-shot `IedConnection` end-to-end (create, optional ACSE password
+  auth via its own `data/ied_model_online_loader_auth.c`, duplicated from `scl_bootstrap`/
+  `mms_report_client`'s identical snippet per this codebase's own no-cross-feature-data-layer-reuse
+  convention, connect, discover, close+destroy) — same "owns its own MMS session" shape as
+  `SclBootstrap_scanAndFetch`/`MmsReportClient_create`, never a caller-supplied connection.
+  Discovery sequence, all via `libiec61850`'s `IEC61850_CLIENT_MODEL_DISCOVERY` API group:
+  `IedConnection_getLogicalDeviceList` (LDs) -> `getLogicalDeviceDirectory` (LNs per LD) ->
+  per-LN, `getLogicalNodeDirectory` with `ACSI_CLASS_BRCB`/`ACSI_CLASS_URCB`/`ACSI_CLASS_GoCB` to
+  enumerate control blocks directly (no FC-naming-convention guessing — the server states each
+  block's class outright) and `ACSI_CLASS_DATA_OBJECT` + `getDataDirectoryByFC` at FC=ST/MX (the
+  same "reportable" FC pair `IedModel_getReadTargets`/`_getReportableAttributeReferencesForLogicalNode`
+  already treat as the whole story) to build the DO/DA tree, with `getVariableSpecification`
+  resolving each leaf's coarse MMS type -> per-RCB `IedConnection_getRCBValues` and per-GoCB
+  `IedConnection_getGoCBValues` to read `DatSet`/`ConfRev`/(for GoCB) `DstAddress`, then
+  `IedConnection_getDataSetDirectory` to resolve any non-empty dataset's ordered member list -
+  the live-wire equivalent of `IedModel_getDataSetMemberReferences`'s own SCL-derived output.
+  Builds a real dynamic `IedModel*` from all of this (`IedModel_create`/`LogicalDevice_create`/
+  `LogicalNode_create`/`DataObject_create`/`DataAttribute_create`/`DataSet_create`/
+  `DataSetEntry_create`/`ReportControlBlock_create`/`GSEControlBlock_create` — the same
+  dynamic-model construction calls `integration_tests/ied_simulator/src/sim_server.c` already uses
+  and the same two documented gotchas apply: no LD-prefix on `DataSetEntry_create`'s reference,
+  bare local name for `DataSet_create`), then hands it to `ied_model`'s new
+  `IedModel_wrapDynamicModel(model, iedName, mode)` constructor — the one new function `ied_model`
+  itself gained for this (a thin `sIedModelHandle` wrap, symmetric to `IedModel_loadFromFile`'s
+  own), so every existing accessor (`getReportSubscriptionTargets`, `getGooseSubscriptionTargets`,
+  `getDataSetMemberReferences`, `getReportableAttributeReferencesForLogicalNode`) behaves
+  identically regardless of whether the model came from SCL parsing or live discovery —
+  `mms_report_client`/`goose_subscriber` require zero changes to consume it, including their
+  existing dynamic-("Dyn"-dataset) handling for a discovered RCB/GoCB with no configured dataset
+  (this loader just leaves `datasetReference` NULL in that case, exactly like an SCL-parsed
+  `datSet="Dyn"` RCB already does — no new logic needed, `mms_report_client`'s existing
+  `getOrCreateDynamicDataset` already covers it).
+  Reference-format bridging: `domain/ied_model_online_loader_usecases.c`'s
+  `IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef` converts `getDataSetDirectory`'s ACSI
+  dot/bracket-form references (`"LD/LN.DO[.SDO...].DA[FC]"`) into this codebase's own `"$"`-joined
+  wire form (`"LD/LN$FC$DO[$SDO...]$DA"`) — the exact mirror image of `mms_report_client`'s
+  existing `MmsReportClientUseCases_buildWireMemberReferences` (which converts the same wire form
+  the OTHER direction, for `IedConnection_createDataSet`). Array-index annotations
+  (`"item(idx)component"`) are stripped rather than preserved — this codebase doesn't model array
+  indices anywhere else either (see `ied_model`'s own documented, deliberately deferred `DAI/@ix`
+  limitation).
+  **Known, deliberately accepted v1 limitations** (mirroring how `mms_report_client`'s own
+  dynamic-dataset work documents its limitations rather than glossing over them): only builds
+  FC=ST/MX structure, so `IedModel_getReadTargets`/`_getControlTargets` see an incomplete/empty
+  tree against a discovered model — accepted since this entry point only ever drives
+  report/GOOSE consumption; `DataAttributeType` is only a coarse mapping from the MMS wire type
+  (confirmed harmless today — no existing `ied_model` accessor ever reads `DataAttributeType`
+  back off a built node, only `ModelNode_getType()`/FC are consulted); GoCB addressing
+  (`DstAddress`'s VLAN/AppID/MAC) is treated as "populated" only if not all-zero, since libiec61850
+  exposes no sentinel distinguishing "server never set this optional attribute" from "explicitly
+  zero" — unverified against a real device, degrades safely to unfiltered-by-`gocbRef`-only
+  reception either way (`goose_subscriber` already handles `hasAddress==false` with zero
+  special-casing); no dataset-count/`maxAttributes`-cap handling, same accepted limitation
+  `mms_report_client`'s own dynamic-dataset creation already has; discovery is materially slower
+  and more MMS-request-heavy than one SCL file transfer + local parse, scaling with model size —
+  the exact tradeoff the Hard Rule below already warns about, accepted here only because it's the
+  sole way to report anything from a file-service-less device at all.
+  **A third dynamic-model construction gotcha, found the hard way while building this
+  feature's own E2E test** (alongside the two already documented from `ied_simulator`):
+  `LogicalDevice_create(name, parent)` implicitly PREPENDS its parent `IedModel`'s own name to
+  `name` to form the LD's real wire name — feeding it `IedConnection_getLogicalDeviceList`'s
+  already-fully-qualified names (e.g. `"Reporter1LD1"`) against a model built via
+  `IedModel_create("Reporter1")` produced a corrupted double-prefixed name,
+  `"Reporter1Reporter1LD1"`. Fixed by building the internal model via `IedModel_create("")` —
+  sidesteps ever needing to know/derive the server's true IED name at all, since every LD name
+  discovery ever handles is already fully qualified straight from the wire. Relatedly:
+  `ReportControlBlock_create`'s `dataSetName` and `GSEControlBlock_create`'s `dataSet` parameters
+  both want the BARE local dataset name (confirmed against `ied_model_scl_loader.c`'s own usage,
+  which always passes SCL's raw `datSet="..."` attribute straight through) — passing
+  `getRCBValues`/`getGoCBValues`'s own fully-qualified reference there instead (as this loader
+  did before the E2E test caught it) produces an unresolvable double-qualified reference once
+  `IedModelUseCases_getReportSubscriptionTargets`/`_getGooseSubscriptionTargets` re-prepend their
+  own `lnRef$` on top of it a second time.
+  Proven end-to-end against a real `ied_simulator` IED with its MMS file services pointed at a
+  real, empty fixture directory (`SimServer_setFilestoreBasepath` + `fixtures/no_scl_files/`,
+  mirroring `scl_bootstrap`'s own identical fixture/precedent) in
+  `integration_tests/ied_model_online_loader/` — no `sudo` needed (MMS/TCP only). Deliberately
+  **not** simulated via a file-services-disabled server config: that was tried first and
+  empirically produces a different `scl_bootstrap` outcome
+  (`SCL_BOOTSTRAP_CANDIDATE_MMS_CONNECT_FAILED`, not `NO_SCL_FILE_FOUND`) than what a real OMICRON
+  IED Scout instance actually returns, so it would have tested the wrong precondition. Manually
+  verify GoCB reference-form/`DstAddress` behavior against a real OMICRON IED Scout instance
+  before relying on it in production, per this bullet's own flagged unknowns.
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,
@@ -533,11 +679,14 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 ## Hard Rules (with reasons)
 - **libiec61850 is mandatory** for all protocol handling — never hand-roll GOOSE or MMS parsing; this is a correctness and safety liability in this domain.
 - **No cyclic polling**, on either worker — polling defeats the reporter's whole reason for existing (event-driven, low-latency). **One narrow, deliberate exception**: `goose_subscriber`'s liveness thread (`data/goose_subscriber_connection.c`) polls `GooseSubscriber_isValid()` at a low rate purely to detect *staleness* (a publisher going silent) — GOOSE is connectionless and has no push signal for that (unlike `IedConnection`'s state-changed handler). It never gates or delays actual record delivery, which stays 100% event-driven via `GooseListener`; it only detects the absence of frames, which is structurally unobservable any other way in a connectionless protocol.
-- **No over-the-wire tree discovery.** Parse `.scd`/`.icd` at boot to know what to subscribe to — runtime discovery is slow and fragile against flaky IEDs.
+- **No over-the-wire tree discovery.** Parse `.scd`/`.icd` at boot to know what to subscribe to — runtime discovery is slow and fragile against flaky IEDs. **One narrow, deliberate exception**: `ied_model_online_loader` walks a live server's MMS ACSI directory services (`GetLogicalDeviceList`/`GetLogicalDeviceDirectory`/`GetLogicalNodeDirectory`/`GetDataDirectory[ByFC]`/`GetDataSetDirectory`/`GetRCBValues`/`GetGoCBValues`) to reconstruct an equivalent `IedModel` purely as a **fallback**, engaged only via the explicit `Orchestration_runFromOnlineDiscovery` entry point when `scl_bootstrap` has already exhausted every candidate with `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (a real, connectable IED — e.g. OMICRON IED Scout's "Simulate IED" mode — that never serves an SCL file over MMS file services at all). It never runs as a silent, automatic substitute inside `Orchestration_run` itself, and it's the same "no other way to observe this" class of exception as `goose_subscriber`'s liveness-polling thread above: without it, a device with no file services is entirely unreportable by this daemon, full stop. See `ied_model_online_loader/`'s own Architecture bullet for the full mechanism.
 - **No dangling connections.** Explicit pooling, keep-alives, exponential backoff on the MMS side — IEDs drop connections under load.
 - **Don't touch `third_party/`** — it's pre-built and vendored; if headers seem to be missing something, say so, don't hand-edit.
 - **Don't add dependencies without asking** — dependency surface is deliberately minimal.
 - **If unsure of exact IEC 61850 semantics** (FC codes, data attribute types, BRCB trigger options), say so and cite the spec section or the relevant `third_party/include` header — don't guess.
+
+- **One narrow, deliberate exception** - Genuinely degraded (vs. loading a real .scd/.icd file), for whenever the live-discovery fallback is used:
+GOOSE addressing precision. SCL almost always carries an explicit <GSE><Address> (VLAN/AppID/dst-MAC), so file-based subscriptions filter tightly at the socket level. Discovery only gets this if the device happens to expose the optional DstAddress GoCB attribute over MMS — plenty of real devices don't. When it's missing, reception still works (matches on gocbRef embedded in the frame instead), but the NIC sees more traffic before software-level filtering kicks in, and may need broader (near-promiscuous) reception to catch destination MACs it hasn't explicitly joined. Functionally correct, less efficient. Speed and fragility per connect. SCL = one file transfer + local parse. Discovery = many sequential MMS round-trips (LD list → per-LD LN list → per-LN class/DO/DA enumeration → per-dataset member query), scaling with model size — slower, and more exposed to a device flaking mid-walk than one atomic file transfer. This is exactly the reasoning the existing "no over-the-wire tree discovery" Hard Rule cites — it's why this stays a narrow, explicit fallback rather than replacing the SCL path for devices where SCL-over-file already works fine.
 
 ## IPC / Reporting Out
 - Normalize C structs (GOOSE frame, MMS report) to JSON.
