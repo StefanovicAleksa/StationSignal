@@ -78,4 +78,26 @@ SclBootstrap_destroyResult(void* result);
 void
 SclBootstrap_destroy(SclBootstrapHandle handle);
 
+/*
+ * Phase-1-only TCP reachability probe, exposed for sibling features (e.g.
+ * ied_discovery) that need the same bounded-concurrency async TCP scan
+ * without wanting scl_bootstrap's full MMS-association + SCL browse/fetch
+ * too. Thin wrapper around the exact SclBootstrapTcpProbe_scan machinery
+ * SclBootstrap_scanAndFetch already uses for its own phase 1 - reused rather
+ * than duplicated because that async-connect sliding-window state machine is
+ * substantial and easy to get subtly wrong a second time, unlike the small
+ * ACSE-auth-setup snippet mms_report_client duplicates from this feature
+ * (see mms_report_client's own Architecture bullet in CLAUDE.md).
+ *
+ * Reuses handle->config.tcpProbeTimeoutMs/maxConcurrentTcpProbes - no
+ * separate config parameter.
+ *
+ * Returns a newly malloc'd bool array, LinkedList_size(hostList) entries, in
+ * the same order/ownership contract as SclBootstrapTcpProbe_scan itself
+ * (caller must free()). NULL on NULL handle/hostList, empty hostList, bad
+ * port, or allocation failure.
+ */
+bool*
+SclBootstrap_tcpProbeOnly(SclBootstrapHandle handle, LinkedList hostList, int mmsPort);
+
 #endif /* SCL_BOOTSTRAP_API_H_ */

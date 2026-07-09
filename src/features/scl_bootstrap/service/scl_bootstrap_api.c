@@ -121,3 +121,13 @@ SclBootstrap_destroy(SclBootstrapHandle handle) {
     free(handle->ownedAuthPassword);
     free(handle);
 }
+
+bool*
+SclBootstrap_tcpProbeOnly(SclBootstrapHandle handle, LinkedList hostList, int mmsPort) {
+    if (!handle || !SclBootstrapUseCases_isHostListValid(hostList) || mmsPort <= 0) {
+        return NULL;
+    }
+
+    return SclBootstrapTcpProbe_scan(hostList, mmsPort,
+            handle->config.tcpProbeTimeoutMs, handle->config.maxConcurrentTcpProbes);
+}
