@@ -44,17 +44,38 @@ static const char* MINIMAL_SCL =
         "</SCL>\n";
 
 static char*
-writeTempSclFile(void) {
+writeTempFile(const char* contents) {
     char* path = strdup("/tmp/ied_model_test_XXXXXX");
     int fd = mkstemp(path);
     TEST_ASSERT_TRUE_MESSAGE(fd >= 0, "failed to create temp SCL fixture file");
 
     FILE* fp = fdopen(fd, "w");
-    fputs(MINIMAL_SCL, fp);
+    fputs(contents, fp);
     fclose(fp);
 
     return path;
 }
+
+static char*
+writeTempSclFile(void) {
+    return writeTempFile(MINIMAL_SCL);
+}
+
+/* Two <IED> elements - proves IedModelSclLoader_listIedNames doesn't stop at
+ * the first match (unlike mxmlFindElement, which only returns one). */
+static const char* TWO_IED_SCL =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<SCL xmlns=\"http://www.iec.ch/61850/2003/SCL\">\n"
+        "  <IED name=\"FirstIED\" />\n"
+        "  <IED name=\"SecondIED\" />\n"
+        "</SCL>\n";
+
+/* Zero <IED> elements - a valid, non-error parse result. */
+static const char* ZERO_IED_SCL =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<SCL xmlns=\"http://www.iec.ch/61850/2003/SCL\">\n"
+        "  <Header id=\"none\" />\n"
+        "</SCL>\n";
 
 /* ---- IedModel_loadFromFile ---- */
 
@@ -107,6 +128,71 @@ void
 test_release_doesNotCrash_onNullHandle(void) {
     IedModel_release(NULL); /* must not crash - this is the assertion */
     TEST_PASS();
+}
+
+/* ---- IedModel_listIedNames ---- */
+
+void
+test_listIedNames_errorFileNotFound_whenPathDoesNotExist(void) {
+    IedModelLoadError error;
+    LinkedList names = IedModel_listIedNames("/nonexistent/path/should/not/exist.icd", &error);
+
+    TEST_ASSERT_NULL(names);
+    TEST_ASSERT_EQUAL(IED_MODEL_ERR_FILE_NOT_FOUND, error);
+}
+
+void
+test_listIedNames_returnsOne_forSingleIedFixture(void) {
+    char* path = writeTempSclFile();
+
+    IedModelLoadError error;
+    LinkedList names = IedModel_listIedNames(path, &error);
+
+    TEST_ASSERT_NOT_NULL(names);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(names));
+    TEST_ASSERT_EQUAL_STRING("TestIED", (char*) LinkedList_getData(LinkedList_getNext(names)));
+
+    LinkedList_destroyDeep(names, free);
+    unlink(path);
+    free(path);
+}
+
+void
+test_listIedNames_returnsTwo_forTwoIedFixture(void) {
+    char* path = writeTempFile(TWO_IED_SCL);
+
+    IedModelLoadError error;
+    LinkedList names = IedModel_listIedNames(path, &error);
+
+    TEST_ASSERT_NOT_NULL(names);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(names));
+
+    LinkedList element = LinkedList_getNext(names);
+    TEST_ASSERT_EQUAL_STRING("FirstIED", (char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("SecondIED", (char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(names, free);
+    unlink(path);
+    free(path);
+}
+
+void
+test_listIedNames_returnsEmpty_forZeroIedFixture(void) {
+    char* path = writeTempFile(ZERO_IED_SCL);
+
+    IedModelLoadError error;
+    LinkedList names = IedModel_listIedNames(path, &error);
+
+    TEST_ASSERT_NOT_NULL(names);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(names));
+
+    LinkedList_destroyDeep(names, free);
+    unlink(path);
+    free(path);
 }
 
 /* ---- AccessMode gating ----
@@ -216,6 +302,11 @@ main(void) {
     RUN_TEST(test_loadFromFile_errorIedNotFound_whenIedNameDoesNotMatch);
     RUN_TEST(test_loadFromFile_success_wiresModelAndAccessModeIntoHandle);
     RUN_TEST(test_release_doesNotCrash_onNullHandle);
+
+    RUN_TEST(test_listIedNames_errorFileNotFound_whenPathDoesNotExist);
+    RUN_TEST(test_listIedNames_returnsOne_forSingleIedFixture);
+    RUN_TEST(test_listIedNames_returnsTwo_forTwoIedFixture);
+    RUN_TEST(test_listIedNames_returnsEmpty_forZeroIedFixture);
 
     RUN_TEST(test_gating_reportOnly_allowsGooseAndReport_deniesReadAndControl);
     RUN_TEST(test_gating_readOnly_allowsRead_stillDeniesControl);

@@ -19,3 +19,15 @@ tools/smoke_tests/*
 
 # Local/personal Claude Code config - not shared project config
 .claude/settings.local.json
+
+# Real device SCL/ICD exports kept at repo root for manual testing against
+# actual hardware - not tracked source, potentially large (tens of MB) and
+# may contain real substation configuration data (IED names, network
+# addresses). The leading slash anchors this to the repo root only -
+# integration_tests/*/fixtures/*.icd|.cid|.scd etc. (small, self-authored
+# test fixtures) are unaffected and stay tracked.
+/*.icd
+/*.cid
+/*.scd
+/*.ssd
+/*.sed

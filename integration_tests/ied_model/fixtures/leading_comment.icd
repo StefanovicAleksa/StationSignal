@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Generated with some vendor tool - regression fixture for a leading
+    top-level comment before <SCL>. This vendored Mini-XML has no distinct
+    comment node type (mxml_type_t has no MXML_COMMENT), so a comment here
+    is itself represented as an MXML_ELEMENT whose "element name" is its raw
+    "!--...--" text - loadSclRoot must find <SCL> by name, not just grab
+    "the first element-typed child" (which would be this comment).-->
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <IED name="LeadingCommentIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="ED1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type1" inst="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type1" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+    </DOType>
+  </DataTypeTemplates>
+</SCL>

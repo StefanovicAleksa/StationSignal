@@ -2,6 +2,7 @@
 #define IED_MODEL_SCL_LOADER_H_
 
 #include "iec61850_model.h"
+#include "linked_list.h"
 #include "features/ied_model/domain/ied_model_types.h"
 
 /*
@@ -17,5 +18,25 @@
  */
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError);
+
+/*
+ * Lists every direct-child <IED>'s name attribute at the SCL's top level
+ * (IED elements are always direct children of the SCL root, never nested -
+ * so this deliberately doesn't descend, unlike IedModelSclLoader_load's own
+ * mxmlFindElement(..., MXML_DESCEND) lookup which searches for one specific
+ * name anywhere below the root). Lighter than a full _load: no
+ * DataTypeTemplates resolution, no IedModel construction at all.
+ *
+ * A file that parses fine but declares zero <IED> elements returns a valid,
+ * non-NULL, empty list - that's not an error. NULL + *outError is reserved
+ * for the same file/parse failures _load itself can hit
+ * (IED_MODEL_ERR_FILE_NOT_FOUND / IED_MODEL_ERR_XML_PARSE) - never
+ * IED_MODEL_ERR_IED_NOT_FOUND, which doesn't apply here since no specific
+ * name is being looked up.
+ *
+ * Caller owns the returned list: LinkedList_destroyDeep(list, free).
+ */
+LinkedList
+IedModelSclLoader_listIedNames(const char* path, IedModelLoadError* outError);
 
 #endif /* IED_MODEL_SCL_LOADER_H_ */
