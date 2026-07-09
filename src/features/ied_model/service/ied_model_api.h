@@ -14,6 +14,19 @@
 IedModelHandle
 IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError);
 
+/*
+ * Lists every <IED name="..."> declared at the top level of the SCL file at
+ * `path`, without building a full model (no DataTypeTemplates resolution) -
+ * lighter than IedModel_loadFromFile, and useful when the caller doesn't
+ * already know the exact IED name to load (e.g. orchestration's optional
+ * auto-detect: exactly one result means there's no ambiguity to resolve).
+ * A file with zero <IED> elements returns a valid, non-NULL, empty list -
+ * not an error. NULL + *outError only for file/parse failures. Caller owns
+ * the list: LinkedList_destroyDeep(list, free).
+ */
+LinkedList
+IedModel_listIedNames(const char* path, IedModelLoadError* outError);
+
 void
 IedModel_release(IedModelHandle handle);
 

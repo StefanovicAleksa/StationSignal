@@ -28,6 +28,11 @@ typedef enum {
     ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED,
     ORCHESTRATION_ERR_BOOTSTRAP_FAILED,
     ORCHESTRATION_ERR_STAGING_FAILED,
+    ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED, /* iedName was empty (auto-detect requested) and
+                                                      the staged SCL declared zero or more than one
+                                                      <IED> - no interactive retry, an accepted
+                                                      limitation for now (see orchestration's own
+                                                      Architecture bullet in CLAUDE.md) */
     ORCHESTRATION_ERR_MODEL_LOAD_FAILED,
     ORCHESTRATION_ERR_REPORT_CLIENT_FAILED,
     ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED
@@ -40,6 +45,7 @@ typedef enum {
                                                   network-facing MMS/GOOSE side at all */
     ORCHESTRATION_STAGE_BOOTSTRAP,
     ORCHESTRATION_STAGE_STAGING,
+    ORCHESTRATION_STAGE_IED_NAME_RESOLUTION, /* only entered when iedName is empty (auto-detect) */
     ORCHESTRATION_STAGE_MODEL_LOAD,
     ORCHESTRATION_STAGE_REPORT_CLIENT_START,
     ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START
@@ -61,6 +67,14 @@ typedef struct {
                                                            status of the last candidate scanned,
                                                            diagnostics only */
     int stagingErrno;                                  /* stage==STAGING */
+    int discoveredIedCount;                            /* stage==IED_NAME_RESOLUTION, 0 = SCL
+                                                           declared no <IED> at all, >1 = ambiguous
+                                                           (which one was meant is unresolvable
+                                                           without an explicit iedName) */
+    IedModelLoadError iedNameListError;                /* stage==IED_NAME_RESOLUTION, only set if
+                                                           listing itself failed (file/XML error) -
+                                                           IED_MODEL_OK if it succeeded but returned
+                                                           0 or >1 names (see discoveredIedCount) */
     IedModelLoadError modelLoadError;                  /* stage==MODEL_LOAD */
     MmsReportClientError reportClientError;            /* stage==REPORT_CLIENT_START */
     GooseSubscriberError gooseSubscriberError;         /* stage==GOOSE_SUBSCRIBER_START */

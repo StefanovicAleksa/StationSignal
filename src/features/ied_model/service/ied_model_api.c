@@ -36,6 +36,11 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     return handle;
 }
 
+LinkedList
+IedModel_listIedNames(const char* path, IedModelLoadError* outError) {
+    return IedModelSclLoader_listIedNames(path, outError);
+}
+
 void
 IedModel_release(IedModelHandle handle) {
     if (!handle) return;

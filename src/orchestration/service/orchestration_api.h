@@ -71,15 +71,25 @@ void Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
  * Blocking. Runs, in order: (0) IpcDispatcher_start (bind 127.0.0.1:
  * config.ipcDispatcherConfig.port, start its service thread); (1)
  * SclBootstrap_scanAndFetch over hostList/mmsPort, picking the first
- * FILE_RETRIEVED candidate; (2) stages its bytes to a temp file, deleted
- * immediately after step 3 regardless of outcome; (3)
- * IedModel_loadFromFile(tempPath, iedName, accessMode); (4)
- * MmsReportClient_create+_start against the winning candidate's own host/
- * port (not a separately supplied parameter - bootstrap and reporting
- * target the same physical IED) using the loaded model, with its report
- * callback unconditionally set to IpcDispatcher_onMmsReport; (5)
- * GooseSubscription_create+_start on interfaceId using the same model, same
- * unconditional IpcDispatcher_onGooseRecord wiring.
+ * FILE_RETRIEVED candidate; (2) stages its bytes to a temp file; (2.5) if
+ * iedName is NULL/empty, IedModel_listIedNames(tempPath) - exactly one
+ * result is used silently, zero or more than one fails with
+ * ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED (no interactive retry - an
+ * accepted limitation, see this feature's own Architecture bullet in
+ * CLAUDE.md); (3) IedModel_loadFromFile(tempPath, resolved iedName,
+ * accessMode) - the temp file is deleted immediately after this step
+ * regardless of outcome; (4) MmsReportClient_create+_start against the
+ * winning candidate's own host/port (not a separately supplied parameter -
+ * bootstrap and reporting target the same physical IED) using the loaded
+ * model, with its report callback unconditionally set to
+ * IpcDispatcher_onMmsReport; (5) GooseSubscription_create+_start on
+ * interfaceId using the same model, same unconditional
+ * IpcDispatcher_onGooseRecord wiring.
+ *
+ * iedName: NULL or "" triggers auto-detection from the staged SCL (see step
+ * 2.5 above) - useful when the caller (e.g. ied_discovery's interactive
+ * picker) knows a host to bootstrap from but not its exact SCL-declared IED
+ * name. A non-empty iedName is used exactly as before, unchanged.
  *
  * Returns once both long-running workers' own _start() calls have returned
  * - this does NOT mean a report/GOOSE frame has arrived yet or the MMS
@@ -100,6 +110,33 @@ void Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
 OrchestrationError
 Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
         const char* iedName, const char* interfaceId, AccessMode accessMode,
+        OrchestrationErrorDetail* outDetail);
+
+/*
+ * Same end state as Orchestration_run, but skips scl_bootstrap/staging
+ * entirely: sclFilePath is read directly (never modified or deleted - it's
+ * the caller's own file, not staged/owned by this handle) instead of being
+ * fetched over MMS from host. Exists for IEDs/simulators whose MMS server
+ * doesn't implement file services (so scl_bootstrap can never succeed
+ * against them) but whose SCL is available locally some other way (e.g.
+ * exported from the tool driving the simulation).
+ *
+ * host/mmsPort are still required and still drive the real
+ * mms_report_client/goose_subscriber connections for live reporting -
+ * loading the model locally only replaces *how the SCL description is
+ * obtained*, not the live MMS/GOOSE connection to the real device. iedName
+ * empty still triggers the same auto-detect-from-SCL behavior as
+ * Orchestration_run.
+ *
+ * Blocking, same stage semantics as Orchestration_run (IPC_DISPATCHER_START
+ * -> IED_NAME_RESOLUTION (if iedName empty) -> MODEL_LOAD ->
+ * REPORT_CLIENT_START -> GOOSE_SUBSCRIBER_START) - BOOTSTRAP/STAGING stages
+ * are simply never reached. Same fail-hard rollback contract, same
+ * re-runnable-after-failure guarantee, same re-entrancy check.
+ */
+OrchestrationError
+Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePath, const char* host,
+        int mmsPort, const char* iedName, const char* interfaceId, AccessMode accessMode,
         OrchestrationErrorDetail* outDetail);
 
 /*

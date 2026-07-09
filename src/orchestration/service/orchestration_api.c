@@ -75,6 +75,164 @@ Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
     handle->bootstrapProgressCallbackParam = userParam;
 }
 
+/*
+ * Shared continuation for both Orchestration_run (network-fetched SCL) and
+ * Orchestration_runFromLocalFile (caller-supplied SCL): IED-name
+ * auto-detection, ied_model load, mms_report_client start, goose_subscriber
+ * start - identical regardless of where sclPath's bytes came from. Assumes
+ * ipc_dispatcher is already started (both callers' own stage 0) and rolls it
+ * back on any failure here.
+ *
+ * sclPathIsOwnedTempFile: true for the scl_bootstrap path (sclPath is a
+ * heap-allocated mkstemp path this function must unlink+free once
+ * IedModel_loadFromFile has parsed it into memory - it has zero purpose
+ * afterward, see the original stage 3 comment this preserves); false for the
+ * local-file path (sclPath is the caller's own file, never touched beyond
+ * reading it).
+ */
+static OrchestrationError
+runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOwnedTempFile,
+        const char* host, int port, const char* iedName, const char* interfaceId,
+        AccessMode accessMode, OrchestrationErrorDetail* outDetail) {
+    /* --- IED-name auto-detection - only entered when iedName is empty. No
+     * interactive retry for the ambiguous (0 or >1 <IED>) case; see this
+     * feature's own Architecture bullet in CLAUDE.md. */
+    const char* resolvedIedName = iedName;
+    char* autoDetectedIedName = NULL;
+
+    if (!iedName || !iedName[0]) {
+        IedModelLoadError listErr;
+        LinkedList iedNames = IedModel_listIedNames(sclPath, &listErr);
+        int discoveredCount = iedNames ? LinkedList_size(iedNames) : 0;
+
+        if (!iedNames || discoveredCount != 1) {
+            if (iedNames) LinkedList_destroyDeep(iedNames, free);
+            if (sclPathIsOwnedTempFile) {
+                OrchestrationStaging_cleanup(sclPath);
+                free((char*) sclPath);
+            }
+            IpcDispatcher_stop(handle->ipcDispatcher);
+            if (outDetail) {
+                outDetail->stage = ORCHESTRATION_STAGE_IED_NAME_RESOLUTION;
+                outDetail->discoveredIedCount = discoveredCount;
+                outDetail->iedNameListError = iedNames ? IED_MODEL_OK : listErr;
+            }
+            return ORCHESTRATION_ERR_IED_NAME_RESOLUTION_FAILED;
+        }
+
+        autoDetectedIedName = strdup((char*) LinkedList_getData(LinkedList_getNext(iedNames)));
+        LinkedList_destroyDeep(iedNames, free);
+        resolvedIedName = autoDetectedIedName;
+    }
+
+    /* ied_model - parses fully into memory in one call, so an owned temp
+     * file has zero purpose afterward; clean it up immediately regardless
+     * of outcome rather than deferring. A caller-supplied local file is left
+     * untouched either way - it's not ours to delete. */
+    IedModelLoadError modelErr;
+    IedModelHandle iedModel = IedModel_loadFromFile(sclPath, resolvedIedName, accessMode, &modelErr);
+    if (sclPathIsOwnedTempFile) {
+        OrchestrationStaging_cleanup(sclPath);
+        free((char*) sclPath);
+    }
+    free(autoDetectedIedName);
+
+    if (!iedModel) {
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_MODEL_LOAD;
+            outDetail->modelLoadError = modelErr;
+        }
+        return ORCHESTRATION_ERR_MODEL_LOAD_FAILED;
+    }
+
+    /* --- mms_report_client, against the caller-supplied host/port (the
+     * winning scl_bootstrap candidate's own host/port, or the caller's own
+     * argument for the local-file path) - MmsReportClient_create copies
+     * host internally. Report callback is always, unconditionally wired to
+     * ipc_dispatcher - see orchestration_api.h's note on why there is no
+     * caller-facing setter for this slot. */
+    MmsReportClientError reportErr;
+    MmsReportClientHandle reportClient = MmsReportClient_create(iedModel, host, port,
+            &handle->config.reportClientConfig, &reportErr);
+
+    if (!reportClient) {
+        IedModel_release(iedModel);
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_REPORT_CLIENT_START;
+            outDetail->reportClientError = reportErr;
+        }
+        return ORCHESTRATION_ERR_REPORT_CLIENT_FAILED;
+    }
+
+    MmsReportClient_setReportCallback(reportClient, IpcDispatcher_onMmsReport, handle->ipcDispatcher);
+    if (handle->connStateCallback) {
+        MmsReportClient_setConnectionStateCallback(reportClient, handle->connStateCallback,
+                handle->connStateCallbackParam);
+    }
+    if (handle->rcbStatusCallback) {
+        MmsReportClient_setRcbStatusCallback(reportClient, handle->rcbStatusCallback,
+                handle->rcbStatusCallbackParam);
+    }
+
+    reportErr = MmsReportClient_start(reportClient);
+    if (reportErr != MMS_REPORT_CLIENT_OK) {
+        MmsReportClient_destroy(reportClient);
+        IedModel_release(iedModel);
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_REPORT_CLIENT_START;
+            outDetail->reportClientError = reportErr;
+        }
+        return ORCHESTRATION_ERR_REPORT_CLIENT_FAILED;
+    }
+
+    /* --- goose_subscriber - fail-hard: a failure here tears down the
+     * already-started report client (and ipc_dispatcher) too, leaving the
+     * handle clean and re-runnable rather than half-started. Record
+     * callback unconditionally wired to ipc_dispatcher, same as above. */
+    GooseSubscriberError gooseErr;
+    GooseSubscriberHandle gooseHandle = GooseSubscription_create(iedModel, interfaceId,
+            &handle->config.gooseSubscriberConfig, &gooseErr);
+    if (!gooseHandle) {
+        MmsReportClient_destroy(reportClient);
+        IedModel_release(iedModel);
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START;
+            outDetail->gooseSubscriberError = gooseErr;
+        }
+        return ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED;
+    }
+
+    GooseSubscription_setRecordCallback(gooseHandle, IpcDispatcher_onGooseRecord, handle->ipcDispatcher);
+    if (handle->gooseStatusCallback) {
+        GooseSubscription_setStatusCallback(gooseHandle, handle->gooseStatusCallback,
+                handle->gooseStatusCallbackParam);
+    }
+
+    gooseErr = GooseSubscription_start(gooseHandle);
+    if (gooseErr != GOOSE_SUBSCRIBER_OK) {
+        GooseSubscription_destroy(gooseHandle);
+        MmsReportClient_destroy(reportClient);
+        IedModel_release(iedModel);
+        IpcDispatcher_stop(handle->ipcDispatcher);
+        if (outDetail) {
+            outDetail->stage = ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START;
+            outDetail->gooseSubscriberError = gooseErr;
+        }
+        return ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED;
+    }
+
+    handle->iedModel = iedModel;
+    handle->reportClient = reportClient;
+    handle->gooseSubscriber = gooseHandle;
+    handle->running = true;
+
+    return ORCHESTRATION_OK;
+}
+
 OrchestrationError
 Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
         const char* iedName, const char* interfaceId, AccessMode accessMode,
@@ -82,7 +240,7 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
     if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
 
     if (!handle || handle->running || !hostList || LinkedList_size(hostList) == 0
-            || mmsPort <= 0 || !iedName || !iedName[0] || !interfaceId || !interfaceId[0]) {
+            || mmsPort <= 0 || !interfaceId || !interfaceId[0]) {
         return ORCHESTRATION_ERR_INVALID_ARGUMENT;
     }
 
@@ -155,110 +313,42 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
         return ORCHESTRATION_ERR_STAGING_FAILED;
     }
 
-    /* --- stage 3: ied_model - parses fully into memory in one call, so the
-     * temp file has zero purpose afterward; clean it up immediately
-     * regardless of outcome rather than deferring */
-    IedModelLoadError modelErr;
-    IedModelHandle iedModel = IedModel_loadFromFile(tempPath, iedName, accessMode, &modelErr);
-    OrchestrationStaging_cleanup(tempPath);
-    free(tempPath);
-
-    if (!iedModel) {
-        SclBootstrap_destroyResult(winner);
-        IpcDispatcher_stop(handle->ipcDispatcher);
-        if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_MODEL_LOAD;
-            outDetail->modelLoadError = modelErr;
-        }
-        return ORCHESTRATION_ERR_MODEL_LOAD_FAILED;
-    }
-
-    /* --- stage 4: mms_report_client, against the winning candidate's own
-     * host/port - MmsReportClient_create copies host internally, so winner
-     * only needs to survive this one call. Report callback is always,
-     * unconditionally wired to ipc_dispatcher - see orchestration_api.h's
-     * note on why there is no caller-facing setter for this slot. */
-    MmsReportClientError reportErr;
-    MmsReportClientHandle reportClient = MmsReportClient_create(iedModel, winner->host, winner->port,
-            &handle->config.reportClientConfig, &reportErr);
+    /* --- stages 3-5: shared with Orchestration_runFromLocalFile, see that
+     * function's own comment. tempPath is freed/unlinked inside (owned). */
+    OrchestrationError runErr = runFromSclFile(handle, tempPath, true, winner->host, winner->port,
+            iedName, interfaceId, accessMode, outDetail);
     SclBootstrap_destroyResult(winner);
-    winner = NULL;
 
-    if (!reportClient) {
-        IedModel_release(iedModel);
-        IpcDispatcher_stop(handle->ipcDispatcher);
+    return runErr;
+}
+
+OrchestrationError
+Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePath, const char* host,
+        int mmsPort, const char* iedName, const char* interfaceId, AccessMode accessMode,
+        OrchestrationErrorDetail* outDetail) {
+    if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
+
+    if (!handle || handle->running || !sclFilePath || !sclFilePath[0] || !host || !host[0]
+            || mmsPort <= 0 || !interfaceId || !interfaceId[0]) {
+        return ORCHESTRATION_ERR_INVALID_ARGUMENT;
+    }
+
+    /* --- stage 0: ipc_dispatcher, same as Orchestration_run's own stage 0 -
+     * started first, deliberately, so a bind failure fails fast. */
+    IpcDispatcherError ipcStartErr = IpcDispatcher_start(handle->ipcDispatcher);
+    if (ipcStartErr != IPC_DISPATCHER_OK) {
         if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_REPORT_CLIENT_START;
-            outDetail->reportClientError = reportErr;
+            outDetail->stage = ORCHESTRATION_STAGE_IPC_DISPATCHER_START;
+            outDetail->ipcDispatcherError = ipcStartErr;
         }
-        return ORCHESTRATION_ERR_REPORT_CLIENT_FAILED;
+        return ORCHESTRATION_ERR_IPC_DISPATCHER_FAILED;
     }
 
-    MmsReportClient_setReportCallback(reportClient, IpcDispatcher_onMmsReport, handle->ipcDispatcher);
-    if (handle->connStateCallback) {
-        MmsReportClient_setConnectionStateCallback(reportClient, handle->connStateCallback,
-                handle->connStateCallbackParam);
-    }
-    if (handle->rcbStatusCallback) {
-        MmsReportClient_setRcbStatusCallback(reportClient, handle->rcbStatusCallback,
-                handle->rcbStatusCallbackParam);
-    }
-
-    reportErr = MmsReportClient_start(reportClient);
-    if (reportErr != MMS_REPORT_CLIENT_OK) {
-        MmsReportClient_destroy(reportClient);
-        IedModel_release(iedModel);
-        IpcDispatcher_stop(handle->ipcDispatcher);
-        if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_REPORT_CLIENT_START;
-            outDetail->reportClientError = reportErr;
-        }
-        return ORCHESTRATION_ERR_REPORT_CLIENT_FAILED;
-    }
-
-    /* --- stage 5: goose_subscriber - fail-hard: a failure here tears down
-     * the already-started report client (and ipc_dispatcher) too, leaving
-     * the handle clean and re-runnable rather than half-started. Record
-     * callback unconditionally wired to ipc_dispatcher, same as stage 4. */
-    GooseSubscriberError gooseErr;
-    GooseSubscriberHandle gooseHandle = GooseSubscription_create(iedModel, interfaceId,
-            &handle->config.gooseSubscriberConfig, &gooseErr);
-    if (!gooseHandle) {
-        MmsReportClient_destroy(reportClient);
-        IedModel_release(iedModel);
-        IpcDispatcher_stop(handle->ipcDispatcher);
-        if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START;
-            outDetail->gooseSubscriberError = gooseErr;
-        }
-        return ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED;
-    }
-
-    GooseSubscription_setRecordCallback(gooseHandle, IpcDispatcher_onGooseRecord, handle->ipcDispatcher);
-    if (handle->gooseStatusCallback) {
-        GooseSubscription_setStatusCallback(gooseHandle, handle->gooseStatusCallback,
-                handle->gooseStatusCallbackParam);
-    }
-
-    gooseErr = GooseSubscription_start(gooseHandle);
-    if (gooseErr != GOOSE_SUBSCRIBER_OK) {
-        GooseSubscription_destroy(gooseHandle);
-        MmsReportClient_destroy(reportClient);
-        IedModel_release(iedModel);
-        IpcDispatcher_stop(handle->ipcDispatcher);
-        if (outDetail) {
-            outDetail->stage = ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START;
-            outDetail->gooseSubscriberError = gooseErr;
-        }
-        return ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED;
-    }
-
-    handle->iedModel = iedModel;
-    handle->reportClient = reportClient;
-    handle->gooseSubscriber = gooseHandle;
-    handle->running = true;
-
-    return ORCHESTRATION_OK;
+    /* No scl_bootstrap/staging stage at all - sclFilePath is read directly
+     * and left untouched (not ours to delete), see runFromSclFile's own
+     * sclPathIsOwnedTempFile doc comment. */
+    return runFromSclFile(handle, sclFilePath, false, host, mmsPort, iedName, interfaceId, accessMode,
+            outDetail);
 }
 
 void
