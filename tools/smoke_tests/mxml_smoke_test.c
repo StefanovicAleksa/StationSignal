@@ -4,7 +4,7 @@
 
 /* Proves libmxml links and can parse a real SCL file, not just well-formed XML in the abstract. */
 
-#define SAMPLE_SCL_PATH "/home/aleksa/code/goose_rep/libiec61850/examples/server_example_goose/simpleIO_direct_control_goose.cid"
+#define SAMPLE_SCL_PATH "/home/aleksa/code/ied_reporter/libiec61850/examples/server_example_goose/simpleIO_direct_control_goose.cid"
 
 int main(void) {
     FILE* fp = fopen(SAMPLE_SCL_PATH, "r");

@@ -6,7 +6,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-OUT="${1:-/tmp/goose_rep_daemon}"
+OUT="${1:-/tmp/ied_reporter_daemon}"
 
 gcc -g -Wall -Isrc -idirafter third_party/include \
     src/main.c src/main_discovery_prompt.c \

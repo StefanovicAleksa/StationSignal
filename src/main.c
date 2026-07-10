@@ -7,6 +7,7 @@
 #include "orchestration/service/orchestration_api.h"
 #include "orchestration/utils/orchestration_utils.h"
 #include "features/ied_discovery/service/ied_discovery_api.h"
+#include "scan_orchestration/service/scan_orchestration_api.h"
 #include "main_discovery_prompt.h"
 
 /*
@@ -83,6 +84,12 @@ onGooseStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status
     (void) userParam;
     printf("[goose_subscriber] %s status=%d (lastParseError=%d)\n", goCbRef ? goCbRef : "?", status,
             lastParseError);
+}
+
+static void
+onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort) {
+    (void) userParam;
+    printf("[scan] found %s:%d (scan #%llu)\n", host, mmsPort, (unsigned long long) scanId);
 }
 
 static const char*
@@ -169,27 +176,71 @@ main(int argc, char** argv) {
     Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
     Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
 
-    /* host omitted/empty: interactive scan/manual-add/pick via ied_discovery
-     * instead of a hardcoded fallback (see this file's own top comment). */
+    /* host omitted/empty: start the continuous background scan
+     * (scan_orchestration) and let the operator pick a device from its
+     * live, growing list (or type a manual IP, still verified via
+     * ied_discovery directly) while the scan keeps running concurrently -
+     * instead of a hardcoded fallback or the old one-shot blocking scan
+     * (see this file's own top comment). */
     char* discoveredHost = NULL;
     const char* host = hostArg;
     if (!host) {
-        IedDiscoveryConfig discoveryConfig;
-        IedDiscoveryConfig_defaults(&discoveryConfig);
-        discoveryConfig.acseAuthPassword = acseAuthPassword; /* same argv[6], same reuse
-                                                                  pattern as bootstrapConfig/
-                                                                  reportClientConfig above */
+        ScanOrchestrationConfig scanConfig;
+        ScanOrchestrationConfig_defaults(&scanConfig);
 
-        IedDiscoveryError discoveryError;
-        IedDiscoveryHandle discoveryHandle = IedDiscovery_create(&discoveryConfig, &discoveryError);
-        if (!discoveryHandle) {
-            fprintf(stderr, "[CORE] IedDiscovery_create failed (error %d)\n", (int) discoveryError);
+        ScanOrchestrationError scanCreateErr;
+        ScanOrchestrationHandle scanHandle = ScanOrchestration_create(&scanConfig, &scanCreateErr);
+        if (!scanHandle) {
+            fprintf(stderr, "[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
             Orchestration_destroy(handle);
             return EXIT_FAILURE;
         }
 
-        discoveredHost = MainDiscoveryPrompt_run(discoveryHandle, interfaceId, mmsPort);
-        IedDiscovery_destroy(discoveryHandle);
+        ScanOrchestration_setDeviceFoundCallback(scanHandle, onDeviceFound, NULL);
+
+        ScanRequest scanRequest = {
+            .interfaceId = interfaceId,
+            .mmsPort = mmsPort,
+            .sweepIntervalMs = 0, /* use scanConfig.defaultSweepIntervalMs */
+            .acseAuthPassword = acseAuthPassword /* same argv[6], same reuse pattern as
+                                                     bootstrapConfig/reportClientConfig above */
+        };
+        uint64_t scanId;
+        ScanOrchestrationError scanStartErr = ScanOrchestration_startScan(scanHandle, &scanRequest, &scanId);
+        if (scanStartErr != SCAN_ORCHESTRATION_OK) {
+            fprintf(stderr, "[CORE] ScanOrchestration_startScan failed (error %d)\n", (int) scanStartErr);
+            ScanOrchestration_destroy(scanHandle);
+            Orchestration_destroy(handle);
+            return EXIT_FAILURE;
+        }
+
+        printf("[CORE] Continuous scan #%llu started on interface '%s', port %d. "
+                "scan_dispatcher listening on 127.0.0.1:%u.\n",
+                (unsigned long long) scanId, interfaceId, mmsPort,
+                (unsigned) scanConfig.scanDispatcherConfig.port);
+
+        /* Unchanged: manual-typed-IP verification still uses a plain
+         * IedDiscoveryHandle, created exactly as before this change - the
+         * scan above never touches this path (see main_discovery_prompt.h). */
+        IedDiscoveryConfig manualVerifyConfig;
+        IedDiscoveryConfig_defaults(&manualVerifyConfig);
+        manualVerifyConfig.acseAuthPassword = acseAuthPassword;
+
+        IedDiscoveryError discoveryError;
+        IedDiscoveryHandle manualVerifyHandle = IedDiscovery_create(&manualVerifyConfig, &discoveryError);
+        if (!manualVerifyHandle) {
+            fprintf(stderr, "[CORE] IedDiscovery_create failed (error %d)\n", (int) discoveryError);
+            ScanOrchestration_destroy(scanHandle);
+            Orchestration_destroy(handle);
+            return EXIT_FAILURE;
+        }
+
+        discoveredHost = MainDiscoveryPrompt_run(scanHandle, scanId, manualVerifyHandle, mmsPort);
+        IedDiscovery_destroy(manualVerifyHandle);
+
+        printf("[CORE] Stopping scan #%llu...\n", (unsigned long long) scanId);
+        ScanOrchestration_stopScan(scanHandle, scanId); /* may block - see its own doc comment */
+        ScanOrchestration_destroy(scanHandle); /* also tears down scan_dispatcher if this was the last scan */
 
         if (!discoveredHost) {
             fprintf(stderr, "[CORE] No host picked, exiting.\n");

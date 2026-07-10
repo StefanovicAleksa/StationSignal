@@ -60,12 +60,12 @@ runCase(const char* path, const char* iedName) {
 int
 main(void) {
     /* No <Communication> section - exercises the missing-addressing path. */
-    runCase("/home/aleksa/code/goose_rep/libiec61850/tools/model_generator/complexModel.icd", "ied1");
+    runCase("/home/aleksa/code/ied_reporter/libiec61850/tools/model_generator/complexModel.icd", "ied1");
 
     /* Has <Communication> - exercises full GSE addressing resolution. */
-    runCase("/home/aleksa/code/goose_rep/libiec61850/tools/model_generator/sampleModel_with_dataset.icd", "SampleIED");
+    runCase("/home/aleksa/code/ied_reporter/libiec61850/tools/model_generator/sampleModel_with_dataset.icd", "SampleIED");
 
-    runCase("/home/aleksa/code/goose_rep/libiec61850/tools/model_generator/inverter_with_report.icd", "ied1");
+    runCase("/home/aleksa/code/ied_reporter/libiec61850/tools/model_generator/inverter_with_report.icd", "ied1");
 
     return 0;
 }

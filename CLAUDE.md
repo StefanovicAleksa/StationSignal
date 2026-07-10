@@ -1,4 +1,4 @@
-# IEC 61850 GOOSE/MMS Reporter — Backend Daemon
+# IEC 61850 GOOSE/MMS Reporter — ied_reporter_daemon
 
 ## Purpose
 Backend daemon that reports IEC 61850 traffic: sniffs GOOSE messages off the wire and
@@ -9,19 +9,22 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
   compiling it together with `src/main_discovery_prompt.c`, every `.c` file under
-  `src/orchestration/`, and all seven `src/features/<feature>/` directories (`service`/`data`/
-  `domain`/`utils`), e.g.:
+  `src/orchestration/` and `src/scan_orchestration/`, and all eight `src/features/<feature>/`
+  directories (`service`/`data`/`domain`/`utils`), e.g.:
   `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/main_discovery_prompt.c
-  src/orchestration/*/*.c src/features/*/*/*.c -o /tmp/goose_rep_daemon -Lthird_party/lib
-  -liec61850 -lhal -lmxml -lwebsockets -lcjson -lpthread && sudo /tmp/goose_rep_daemon [host]
-  [mmsPort] [iedName] [interface] [ipcPort] [acseAuthPassword] [sclFilePath]` — this is a
-  manual stopgap, not a substitute for a real build system; don't invent or guess a permanent
-  build command, ask before assuming one. Only `mmsPort`/`interface`/`ipcPort`/
-  `acseAuthPassword` have fallback defaults (102/`eth0`/8765/unauthenticated) if omitted:
-  - `host` omitted/empty: no hardcoded fallback — runs `ied_discovery`'s interactive terminal
-    flow instead (scans the local subnet on `interface` for real IEC 61850 MMS devices, lets
-    you also type in extra candidate IPs to verify and add, then pick one). See
-    `ied_discovery/`'s own Architecture bullet below.
+  src/orchestration/*/*.c src/scan_orchestration/*/*.c src/features/*/*/*.c -o
+  /tmp/ied_reporter_daemon -Lthird_party/lib -liec61850 -lhal -lmxml -lwebsockets -lcjson
+  -lpthread && sudo /tmp/ied_reporter_daemon [host] [mmsPort] [iedName] [interface] [ipcPort]
+  [acseAuthPassword] [sclFilePath]` — this is a manual stopgap, not a substitute for a real
+  build system; don't invent or guess a permanent build command, ask before assuming one. Only
+  `mmsPort`/`interface`/`ipcPort`/`acseAuthPassword` have fallback defaults
+  (102/`eth0`/8765/unauthenticated) if omitted:
+  - `host` omitted/empty: no hardcoded fallback — runs the continuous background scan
+    (`scan_orchestration`) on `interface` instead, streaming discovered IEC 61850 MMS devices
+    over its own shared websocket (default port 8766) while an interactive terminal prompt lets
+    you pick a device from the live, growing list (or type in an extra candidate IP to verify
+    and add) at any time; picking one stops the scan before continuing. See
+    `scan_orchestration/`'s own Architecture bullet below.
   - `iedName` omitted/empty: passed through as auto-detect to `Orchestration_run`/
     `_runFromLocalFile` — works only if the SCL declares exactly one `<IED>` (see
     `orchestration/`'s own bullet).
@@ -105,6 +108,25 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   lives in `tests/ied_discovery/test_ied_discovery_api.c` instead. Manually verify a real subnet
   scan by just running the daemon with no `host` argv on a machine with a real neighbor IED —
   same "manual smoke test, not automatable" class as the GOOSE loopback smoke test below.
+- Run the `scan_dispatcher` E2E test: `cd integration_tests/scan_dispatcher && make run` —
+  starts a real `ScanDispatcher` directly (real bind, real libwebsockets service thread, not
+  through `scan_orchestration`), connects a hand-rolled minimal websocket test client, drives
+  hand-built `ScanDispatcher_publishDeviceFound` calls, and asserts real `SCAN_RESULT` JSON
+  arrives over the real socket, in order. No `sudo` needed (loopback TCP only, same as
+  `ipc_dispatcher`) and no `ied_simulator` needed — this feature has no external IED to talk to,
+  only its own transport.
+- Run the `scan_orchestration` E2E test: `cd integration_tests/scan_orchestration && make run` —
+  drives the real `ScanOrchestration_startScan`/`_stopScan` against the real `lo` interface with
+  two different `mmsPort`s, proving the refcounted shared-websocket sequencing end to end (a 2nd
+  concurrent scan shares the already-bound dispatcher, stopping one of two leaves it running,
+  stopping the last one tears it down, a subsequent scan cleanly rebinds the same port) via the
+  same hand-rolled websocket test-client shape as `scan_dispatcher`'s own E2E test. Sweeps
+  against `lo` are *expected* to fail with `IED_DISCOVERY_ERR_SUBNET_TOO_LARGE` (loopback's real
+  netmask is `/8`, deterministically exceeding the default `maxHosts` ceiling — see
+  `tests/ied_discovery/test_ied_discovery_api.c`'s own proof of this) and are tolerated
+  gracefully; this test proves sequencing/refcounting/threading, not sweep success — same
+  reasoning `integration_tests/ied_discovery/` already documents for avoiding a real `scanSubnet`
+  call over a real interface. No `sudo` needed.
 - Raw-socket loopback smoke test (build manually, no Makefile — throwaway linkage/behavior
   probe): `gcc -g -Wall -Isrc -idirafter third_party/include tools/smoke_tests/goose_loopback_smoke_test.c
   -o /tmp/goose_loopback_smoke_test -Lthird_party/lib -liec61850 -lhal -lpthread && sudo
@@ -139,6 +161,27 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   interactive discovery flow instead of silently defaulting to the test simulator's address; no
   automated test depended on the old defaults (every `tests/`/`integration_tests/` case calls
   `orchestration`'s API directly, never the compiled `main.c` binary).
+- **`main.c`'s `host`-omitted flow was rewired from a one-shot blocking scan to a continuous
+  background scan (`scan_orchestration`)**, so `main.c` can prove the new process actually works
+  end-to-end the same way it already proves orchestration's report/GOOSE pipeline works — this
+  mirrors the daemon's broader direction of becoming a set of background processes eventually
+  managed by an external Go API + local-network frontend (not built yet), rather than a
+  one-shot CLI tool. Previously `main_discovery_prompt.c` called `IedDiscovery_scanSubnet` once,
+  blocking until the whole sweep finished, then presented a static list. Now `main.c` starts a
+  `ScanOrchestration` scan (interactive-flow default, on `interface`), registers a printf
+  device-found callback (same style as the existing `onReportConnState`/`onRcbStatus`/
+  `onGooseStatus` passthroughs) so discoveries print as they stream in, and
+  `main_discovery_prompt.c`'s loop now re-snapshots the scan's live, growing host list
+  (`ScanOrchestration_snapshotDiscoveredHosts`) fresh before every prompt reprint instead of
+  reading a static list — the scan keeps running concurrently in the background the whole time
+  the operator is at the prompt. The manually-typed-IP path is unchanged (still a separate,
+  plain `IedDiscoveryHandle` calling `IedDiscovery_verifyHost` directly — `ied_discovery` itself
+  was not modified at all by this change). Once a device is picked (from the list or manually
+  verified), `main.c` stops that scan (`ScanOrchestration_stopScan` — may block, see
+  `scan_orchestration/`'s own bullet's documented limitation; `main.c` prints a "Stopping
+  scan..." diagnostic first) before falling through to the existing, completely unmodified
+  `scl_bootstrap`/`orchestration` pipeline. See `scan_dispatcher/`'s and `scan_orchestration/`'s
+  own Architecture bullets below for the full mechanism.
 - **Bugfix surfaced by wiring `ipc_dispatcher` into orchestration's own rollback paths**:
   `MmsReportClientConnection_destroy` (`src/features/mms_report_client/data/mms_report_client_connection.c`)
   used to destroy `handle->wakeSignal` (the semaphore) *before* `IedConnection_destroy` - but
@@ -296,11 +339,11 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   binary itself, only into test binaries under `tests/`/`integration_tests/`.
 - `third_party/include` has the full libiec61850 header set flattened in already (goose_receiver.h, goose_subscriber.h, mms_client_connection.h, reporting.h, etc.), plus `mxml.h`, `unity.h`/`unity_internals.h`, `cJSON.h`, and `libwebsockets.h` (+ its generated `lws_config.h` sibling, plus a `libwebsockets/` **subdirectory** of ~120 headers — unlike every other vendored header set, these are deliberately **not** flattened, because `libwebsockets.h` itself `#include`s them via `<libwebsockets/lws-*.h>` path-qualified angle-bracket includes; flattening would require hand-editing 100+ generated includes, so the one exception to the flat-vendoring convention is preserving this one subdirectory) — read these instead of guessing function signatures.
 - `third_party/include/stdbool.h` is a broken vendored shim (`#define bool int`, no `true`/`false` — meant only for MSVC), no include guard, that can shadow the real system `<stdbool.h>`. Real builds use `-idirafter third_party/include` (never plain `-I`) so gcc prefers the real header, but IDE tooling (VS Code's C/C++ extension) doesn't reliably honor the same ordering through `includePath` alone. Don't hand-edit the vendored file — instead, any of our own code that uses `bool`/`true`/`false` should `#include "stdbool_compat.h"` (at `src/stdbool_compat.h`) instead of `<stdbool.h>` directly; it self-heals regardless of which `stdbool.h` a given toolchain resolves.
-- `libmxml.a`/`mxml.h` (Mini-XML v3.3.1, Apache-2.0) is vendored for SCL (`.icd`/`.cid`/`.scd`) parsing — no XML/SCL parser exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/mxml` (not committed here — only the build artifacts are vendored, matching the libiec61850 pattern). Smoke test proving linkage + real SCL parsing: `tools/smoke_tests/mxml_smoke_test.c`.
+- `libmxml.a`/`mxml.h` (Mini-XML v3.3.1, Apache-2.0) is vendored for SCL (`.icd`/`.cid`/`.scd`) parsing — no XML/SCL parser exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/mxml` (not committed here — only the build artifacts are vendored, matching the libiec61850 pattern). Smoke test proving linkage + real SCL parsing: `tools/smoke_tests/mxml_smoke_test.c`.
 - No libpcap/Npcap present in `third_party/` — that's a system dependency, link against the system lib, don't vendor it.
-- Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves. **This vendored build has double-precision assertions excluded** (`TEST_ASSERT_EQUAL_DOUBLE`/`_FLOAT` fail with "Unity Double Precision Disabled") — compare floating-point values with a plain C `==`/epsilon check instead, not a Unity float/double macro (see `tests/ipc_dispatcher/test_ipc_dispatcher_value_codec.c` for the pattern).
-- `libwebsockets.a`/`libwebsockets.h` (libwebsockets, MIT) is vendored for `ipc_dispatcher`'s websocket transport — no websocket implementation exists elsewhere in this repo; do not hand-roll one for production code (the E2E test's minimal client is the one deliberate exception — see `ipc_dispatcher/`'s own bullet below for why). Source built from a sibling checkout at `/home/aleksa/code/goose_rep/libwebsockets` (not committed here, same convention as mxml/Unity's build) via CMake with `-DLWS_WITH_SSL=OFF -DLWS_WITHOUT_EXTENSIONS=ON -DLWS_WITH_SHARED=OFF -DLWS_WITH_STATIC=ON -DLWS_WITHOUT_TESTAPPS=ON` (no TLS needed — internal-only, loopback). Link flag is `-lwebsockets` (the archive is named `libwebsockets.a`, not `liblws.a`).
-- `libcjson.a`/`cJSON.h` (cJSON, MIT) is vendored for `ipc_dispatcher`'s JSON serialization — no JSON library exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/goose_rep/cJSON` (not committed here, same convention) via CMake with `-DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF` (cJSON's own `BUILD_SHARED_AND_STATIC_LIBS` option does **not** suppress the shared build by itself — `BUILD_SHARED_LIBS=OFF` is the flag that actually produces a static-only `libcjson.a`). Push-only in this repo (serialize only, no parse counterpart in production code — cJSON's own parser is only used by tests, to assert JSON shape without brittle string matching).
+- Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves. **This vendored build has double-precision assertions excluded** (`TEST_ASSERT_EQUAL_DOUBLE`/`_FLOAT` fail with "Unity Double Precision Disabled") — compare floating-point values with a plain C `==`/epsilon check instead, not a Unity float/double macro (see `tests/ipc_dispatcher/test_ipc_dispatcher_value_codec.c` for the pattern).
+- `libwebsockets.a`/`libwebsockets.h` (libwebsockets, MIT) is vendored for `ipc_dispatcher`'s websocket transport — no websocket implementation exists elsewhere in this repo; do not hand-roll one for production code (the E2E test's minimal client is the one deliberate exception — see `ipc_dispatcher/`'s own bullet below for why). Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/libwebsockets` (not committed here, same convention as mxml/Unity's build) via CMake with `-DLWS_WITH_SSL=OFF -DLWS_WITHOUT_EXTENSIONS=ON -DLWS_WITH_SHARED=OFF -DLWS_WITH_STATIC=ON -DLWS_WITHOUT_TESTAPPS=ON` (no TLS needed — internal-only, loopback). Link flag is `-lwebsockets` (the archive is named `libwebsockets.a`, not `liblws.a`).
+- `libcjson.a`/`cJSON.h` (cJSON, MIT) is vendored for `ipc_dispatcher`'s JSON serialization — no JSON library exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/cJSON` (not committed here, same convention) via CMake with `-DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF` (cJSON's own `BUILD_SHARED_AND_STATIC_LIBS` option does **not** suppress the shared build by itself — `BUILD_SHARED_LIBS=OFF` is the flag that actually produces a static-only `libcjson.a`). Push-only in this repo (serialize only, no parse counterpart in production code — cJSON's own parser is only used by tests, to assert JSON shape without brittle string matching).
 - `build_out` at repo root is currently a stray compiled binary from a manual verification build, not an empty directory — this line is inaccurate until cleaned up or the doc is corrected; don't rely on it being a directory.
 - **Include convention**: one project-wide include root, `-Isrc`, for all our own code — every intra-project `#include` is fully qualified from `src/` (e.g. `#include "features/ied_model/service/ied_model_api.h"`), never a bare filename or `../` relative path. Vendored third-party headers stay bare filenames against `-idirafter third_party/include` (see above). `.vscode/c_cpp_properties.json`/`tasks.json` are kept in sync with this — update both if the include strategy ever changes.
 
@@ -322,6 +365,14 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   netmask has far more hosts than the default ceiling, so this proves the safety valve without
   ever sending a network probe), and argument-validation wiring — never a real subnet scan or
   MMS association, that's `integration_tests/ied_discovery/`'s job.
+  `tests/scan_dispatcher/` covers the duplicated ring-buffer/JSON-writer/api wiring the same way
+  `tests/ipc_dispatcher/` covers its own (including a real loopback bind, same "no external
+  dependency to avoid" rationale). `tests/scan_orchestration/` covers seen-set dedup logic plus a
+  full start/stop/scanId-monotonicity/refcounting lifecycle driven against a deliberately
+  nonexistent interface (`"nonexistent0"`) — every sweep fails fast and is tolerated gracefully,
+  proving the lifecycle without needing any real reachable network; a real device actually being
+  found and streamed is `integration_tests/scan_dispatcher/`'s and
+  `integration_tests/scan_orchestration/`'s job instead.
 - `integration_tests/<feature>/` — E2E tests of a real feature's public API against a
   real, self-authored fixture file (e.g. `integration_tests/ied_model/fixtures/breaker1.cid`
   + `e2e_test_ied_model.c`), also Unity-based (`-lunity` against the vendored
@@ -353,11 +404,17 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   explicit user request (a real device, e.g. OMICRON IED Scout's "Simulate IED" mode, that
   associates fine but never serves an SCL file over MMS file services at all) — see its own
   bullet below and the "No over-the-wire tree discovery" Hard Rule's documented exception.
-  `src/orchestration/` is a separate, top-level sibling of `src/features/`
-  (not itself in this feature list) that sequences the reporting pipeline together — see its own
-  bullet below. `ipc_dispatcher`'s lifecycle is owned entirely by orchestration (not by
-  `src/main.c` directly) — `main.c` only ever configures it via
-  `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config.
+  `scan_dispatcher/` is an eighth feature, also added later at explicit user request (turning
+  network scanning into a continuously-running background process with its own streamed-out
+  websocket, managed by start/stop entry points ahead of the real external API layer that will
+  eventually drive them) — see its own bullet below.
+  `src/orchestration/` and `src/scan_orchestration/` are both separate, top-level siblings of
+  `src/features/` (not themselves in this feature list) that each sequence a pipeline together —
+  see their own bullets below. `ipc_dispatcher`'s lifecycle is owned entirely by orchestration
+  (not by `src/main.c` directly) — `main.c` only ever configures it via
+  `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config; `scan_dispatcher`'s
+  lifecycle is likewise owned entirely by `scan_orchestration` (reference-counted by active-scan
+  count, not by `src/main.c` directly either) — see `scan_orchestration/`'s own bullet below.
 - `scl_bootstrap/` (implemented) — one-shot, synchronous bootstrap/probe utility: given a
   caller-supplied list of candidate host addresses, TCP-probes each for MMS on a given port,
   and for each one found, browses its file directory and fetches one SCL file (`.icd`/`.cid`/
@@ -687,6 +744,80 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   IED Scout instance actually returns, so it would have tested the wrong precondition. Manually
   verify GoCB reference-form/`DstAddress` behavior against a real OMICRON IED Scout instance
   before relying on it in production, per this bullet's own flagged unknowns.
+- `scan_dispatcher/` (implemented) — an eighth feature, a later, deliberate, user-requested
+  addition (see Expected-features note above): a near-verbatim structural duplicate of
+  `ipc_dispatcher`'s ring-buffer + libwebsockets-service-thread transport (own port, default
+  **8766** — distinct from `ipc_dispatcher`'s 8765 since both can be bound in the same process),
+  relaying "device found" scan events instead of MMS-report/GOOSE data. Deliberately
+  **duplicated, not shared** — `ipc_dispatcher`'s ring buffer/ws-server code is already
+  content-agnostic (pushes/reads opaque JSON strings, zero MMS/GOOSE coupling), but this
+  codebase has no precedent for a cross-feature "shared" directory, and every other reusable
+  third-party-integration snippet in this repo (e.g. ACSE-auth setup) is already duplicated per
+  feature rather than factored out, for the same "features never reach into each other's
+  data/domain layers" reasoning. Public boundary:
+  `src/features/scan_dispatcher/service/scan_dispatcher_api.h` — create/start/stop/destroy
+  mirror `ipc_dispatcher`'s own contract exactly (stop fully tears down the lws context so a
+  later start cleanly rebinds), plus one **typed** publish entry point,
+  `ScanDispatcher_publishDeviceFound(handle, scanId, host, mmsPort)` — deliberately not a
+  generic `publishJson`, since `ipc_dispatcher`'s own public surface has zero such entry point
+  either (`_onMmsReport`/`_onGooseRecord` both take typed structs) and keeping the envelope's
+  field-naming knowledge entirely inside this feature preserves the "message shape is a stable
+  contract" single-source-of-truth property. This feature has **no knowledge of scans,
+  interfaces, or reference-counting at all** — purely transport; `scan_orchestration` (below)
+  decides when to start/stop it. JSON envelope (stable contract): `{schemaVersion, type:
+  "SCAN_RESULT", scanId, host, mmsPort, discoveredAtMs}` — `discoveredAtMs` sourced from
+  `Hal_getTimeInMs()` (wall-clock ms since epoch, same HAL call `scl_bootstrap_tcp_probe.c`
+  already uses). Proven end-to-end (real bind, the same hand-rolled minimal RFC6455 test-client
+  shape `ipc_dispatcher`'s own E2E test uses, hand-built `publishDeviceFound` calls rather than a
+  real scan — this feature's job starts after a scan has already found something) in
+  `integration_tests/scan_dispatcher/` — no `sudo`, no `ied_simulator` needed.
+- `src/scan_orchestration/` (implemented) — a top-level sibling of `src/features/` (not itself a
+  "feature" in the Expected-features sense, same as `src/orchestration/`), sequencing
+  `ied_discovery` (subnet enumeration + host verification, left entirely **untouched** — this
+  layer only ever calls its existing, unmodified `IedDiscovery_scanSubnet`/`_create`/`_destroy`)
+  and `scan_dispatcher` (transport, above) into a continuous, background, reference-counted,
+  multi-scan-capable service. Public boundary:
+  `src/scan_orchestration/service/scan_orchestration_api.h` —
+  `ScanOrchestration_create`/`_destroy`, `_setDeviceFoundCallback` (one process-wide slot,
+  snapshotted per-worker at start time, mirrors `Orchestration`'s own single-callback-slot
+  convention), `ScanOrchestration_startScan(handle, request, outScanId)` /
+  `_stopScan(handle, scanId)` (returns a `uint64_t scanId`, a simple mutex-guarded monotonic
+  counter starting at 1 — no string-alloc churn, and the registry already needs a mutex for the
+  active-scan array anyway), and `_snapshotDiscoveredHosts` (a thread-safe read-only snapshot of
+  one scan's currently-announced hosts, for an in-process caller like
+  `main_discovery_prompt.c` that needs the live, growing list without connecting to the
+  daemon's own websocket as a client of itself).
+  **Per-scan worker** (`data/scan_orchestration_worker.c`): owns a **private**
+  `IedDiscoveryHandle` and its own mutex-guarded seen-set of already-announced hosts, looping
+  sweep (`IedDiscovery_scanSubnet`, reused as one blocking call per sweep — deliberate
+  simplification, results become visible at sweep-end rather than incrementally mid-sweep,
+  avoids touching tested `ied_discovery` internals) -> diff each result against the seen-set ->
+  publish only genuinely new hosts (to `scan_dispatcher` and the optional caller callback) ->
+  interruptible sleep for the configured sweep interval -> repeat, until stopped. Mirrors
+  `goose_subscriber_connection.c`'s `interruptibleSleep`/`stopRequested`/`exited` idiom exactly
+  (`hal_thread.h` has no `Thread_join` — the worker sets `exited=true` as its last act, the stop
+  function does a bounded `while(!exited) Thread_sleep(20)` loop). **Known, accepted
+  limitation**: stop cannot interrupt an in-flight sweep — `IedDiscovery_scanSubnet` has no
+  cancellation hook — so `ScanOrchestration_stopScan` blocks until the current sweep's own
+  `scanSubnet` call returns on its own, worst case bounded by `tcpProbeTimeoutMs *
+  ceil(hostCount/maxConcurrentTcpProbes) + mmsConnectTimeoutMs * tcpSurvivorCount` (several
+  seconds for a /24 at default config) — `main.c` prints a "Stopping scan..." diagnostic before
+  calling it, since this is a real, user-visible pause.
+  **Registry** (`data/scan_orchestration_registry.c`) is the refcounting core, deliberately
+  **two-phase locked**: a short critical section reserves scanIds and does the 0→1
+  `ScanDispatcher_start`/registration together (a bind failure here registers nothing), but
+  removal (`_remove`) only unregisters a worker under the lock and hands it back to the caller
+  to stop/destroy — the potentially slow, blocking part — entirely **outside** any lock,
+  afterward, along with a separately-decided 1→0 `ScanDispatcher_stop`. Without this split, one
+  scan's slow stop (see the worker's own known limitation above) would serialize every other
+  concurrent scan's start/stop behind it, directly violating "multiple concurrent scans must run
+  independently."
+  Proven end-to-end (real `ScanOrchestration_startScan`/`_stopScan` against the real `lo`
+  interface with two different `mmsPort`s, a hand-rolled websocket test client probing the
+  shared dispatcher's liveness through the full 0→1→2→1→0→1-rebind refcount cycle) in
+  `integration_tests/scan_orchestration/` — no `sudo` needed. Sweeps against `lo` are expected
+  to fail (see that test's own Commands bullet) — this test proves sequencing/refcounting/
+  threading, not sweep success.
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,

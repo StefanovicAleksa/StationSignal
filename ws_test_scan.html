@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>scan_dispatcher websocket test</title></head>
+<body style="font-family: monospace; background:#111; color:#0f0; padding:1em;">
+<div id="status">connecting...</div>
+<div id="counts" style="margin: 0.5em 0; color:#0af;">Devices found: 0 &nbsp;|&nbsp; other: 0</div>
+<div id="log"></div>
+<script>
+  const statusEl = document.getElementById("status");
+  const countsEl = document.getElementById("counts");
+  const logEl = document.getElementById("log");
+  /* scan_dispatcher's own port (default 8766) - deliberately different from
+     ipc_dispatcher's reporting port (default 8765, see ws_test.html) so both
+     websockets can run in the same daemon process at once. */
+  const ws = new WebSocket("ws://127.0.0.1:8766");
+
+  let deviceCount = 0, otherCount = 0;
+
+  const updateCounts = () => {
+    countsEl.textContent = `Devices found: ${deviceCount} | other: ${otherCount}`;
+  };
+
+  ws.onopen = () => { statusEl.textContent = "CONNECTED"; statusEl.style.color = "#0f0"; };
+  ws.onerror = (e) => {
+    statusEl.textContent = "ERROR (see below)"; statusEl.style.color = "#f00";
+    prependEntry("#f00", "ERROR", JSON.stringify(e));
+  };
+  ws.onclose = () => { statusEl.textContent = "CLOSED"; statusEl.style.color = "#f80"; };
+
+  function prependEntry(color, label, bodyText) {
+    const ts = new Date().toLocaleTimeString();
+    const entry = document.createElement("div");
+    entry.style.borderLeft = `4px solid ${color}`;
+    entry.style.margin = "0.5em 0";
+    entry.style.paddingLeft = "0.5em";
+    entry.innerHTML =
+      `<div style="color:${color}; font-weight:bold;">[${ts}] ${label}</div>` +
+      `<pre style="white-space: pre-wrap; margin: 0.2em 0;"></pre>`;
+    entry.querySelector("pre").textContent = bodyText;
+    logEl.insertBefore(entry, logEl.firstChild);
+  }
+
+  ws.onmessage = (e) => {
+    let parsed;
+    try { parsed = JSON.parse(e.data); } catch (err) { parsed = null; }
+
+    const type = parsed && parsed.type;
+    let color = "#aaa", label = "UNKNOWN MESSAGE";
+    if (type === "SCAN_RESULT") {
+      color = "#0f0";
+      label = `SCAN_RESULT  ${parsed.host}:${parsed.mmsPort}  (scan #${parsed.scanId})`;
+      deviceCount++;
+    } else {
+      otherCount++;
+    }
+    updateCounts();
+
+    const pretty = parsed ? JSON.stringify(parsed, null, 2) : e.data;
+    prependEntry(color, label, pretty);
+  };
+</script>
+</body>
+</html>

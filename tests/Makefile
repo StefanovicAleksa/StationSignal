@@ -21,6 +21,8 @@ SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
 ORCHESTRATION := $(SRC)/orchestration
 IPC_DISPATCHER := $(SRC)/features/ipc_dispatcher
 IED_DISCOVERY := $(SRC)/features/ied_discovery
+SCAN_DISPATCHER := $(SRC)/features/scan_dispatcher
+SCAN_ORCHESTRATION := $(SRC)/scan_orchestration
 
 CC      := gcc
 CFLAGS  := -g -Wall -I$(SRC) -idirafter $(THIRD_PARTY_INCLUDE)
@@ -33,7 +35,10 @@ TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
          test_orchestration_staging test_orchestration_usecases test_orchestration_utils test_orchestration_api \
          test_ipc_dispatcher_usecases test_ipc_dispatcher_value_codec test_ipc_dispatcher_ring_buffer \
          test_ipc_dispatcher_json_writer test_ipc_dispatcher_api \
-         test_ied_discovery_cidr test_ied_discovery_netif test_ied_discovery_api
+         test_ied_discovery_cidr test_ied_discovery_netif test_ied_discovery_api \
+         test_scan_dispatcher_usecases test_scan_dispatcher_json_writer test_scan_dispatcher_ring_buffer \
+         test_scan_dispatcher_api \
+         test_scan_orchestration_usecases test_scan_orchestration_api
 
 .PHONY: all clean run
 
@@ -286,6 +291,75 @@ test_ied_discovery_api: ied_discovery/test_ied_discovery_api.c \
 		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+
+# usecases.c is pure logic (deep-copy event assembly) - no libiec61850/cjson
+# symbols touched at all, same situation as test_ipc_dispatcher_usecases.
+test_scan_dispatcher_usecases: scan_dispatcher/test_scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# json_writer.c only touches cJSON - needs cjson, no libiec61850/mxml/lws.
+test_scan_dispatcher_json_writer: scan_dispatcher/test_scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lcjson
+
+# ring_buffer.c only touches hal_thread.h's Semaphore - needs hal+pthread, no libiec61850/mxml/cjson/lws.
+test_scan_dispatcher_ring_buffer: scan_dispatcher/test_scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lhal -lpthread
+
+# api.c pulls in the full stack (real bind/start/stop on loopback for real,
+# same reasoning as test_ipc_dispatcher_api - no external IED dependency to
+# avoid here) plus hal (Thread/Semaphore/Hal_getTimeInMs), cjson, lws - no
+# libiec61850 symbols touched anywhere in this feature.
+test_scan_dispatcher_api: scan_dispatcher/test_scan_dispatcher_api.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ws_server.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_adapter.c \
+		$(SCAN_DISPATCHER)/service/scan_dispatcher_api.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lhal -lcjson -lwebsockets -lpthread
+
+# usecases.c is pure logic (seen-set membership) - no libiec61850/cjson/lws
+# symbols touched at all, same situation as test_ipc_dispatcher_usecases.
+test_scan_orchestration_usecases: scan_orchestration/test_scan_orchestration_usecases.c \
+		$(SCAN_ORCHESTRATION)/domain/scan_orchestration_usecases.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# api.c pulls in scan_orchestration's own full stack plus scan_dispatcher's
+# full stack (its own shared websocket) plus ied_discovery's full stack (each
+# scan's own private IedDiscoveryHandle) plus scl_bootstrap's full source set
+# (ied_discovery's TCP-probe delegate references it as one translation unit,
+# same situation as test_ied_discovery_api's own build rule) - argument-
+# validation-only wiring plus a full start/stop lifecycle against a
+# deliberately nonexistent interface (never a real subnet scan or MMS
+# association), matching every other feature's own api-test convention.
+test_scan_orchestration_api: scan_orchestration/test_scan_orchestration_api.c \
+		$(SCAN_ORCHESTRATION)/domain/scan_orchestration_usecases.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_worker.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_registry.c \
+		$(SCAN_ORCHESTRATION)/service/scan_orchestration_api.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ws_server.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_adapter.c \
+		$(SCAN_DISPATCHER)/service/scan_dispatcher_api.c \
+		$(IED_DISCOVERY)/service/ied_discovery_api.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_mms_probe.c \
+		$(IED_DISCOVERY)/data/ied_discovery_auth.c \
+		$(IED_DISCOVERY)/utils/ied_discovery_utils.c \
+		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_auth.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_file_download.c \
+		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
+		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lcjson -lwebsockets -lpthread
 
 run: $(TESTS)
 	@status=0; \
