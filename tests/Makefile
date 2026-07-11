@@ -23,6 +23,8 @@ IPC_DISPATCHER := $(SRC)/features/ipc_dispatcher
 IED_DISCOVERY := $(SRC)/features/ied_discovery
 SCAN_DISPATCHER := $(SRC)/features/scan_dispatcher
 SCAN_ORCHESTRATION := $(SRC)/scan_orchestration
+DEVICE_MANAGER := $(SRC)/device_manager
+CONTROL_DISPATCHER := $(SRC)/features/control_dispatcher
 
 CC      := gcc
 CFLAGS  := -g -Wall -I$(SRC) -idirafter $(THIRD_PARTY_INCLUDE)
@@ -38,7 +40,11 @@ TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
          test_ied_discovery_cidr test_ied_discovery_netif test_ied_discovery_api \
          test_scan_dispatcher_usecases test_scan_dispatcher_json_writer test_scan_dispatcher_ring_buffer \
          test_scan_dispatcher_api \
-         test_scan_orchestration_usecases test_scan_orchestration_api
+         test_scan_orchestration_usecases test_scan_orchestration_api \
+         test_device_manager_port_allocator test_device_manager_registry test_device_manager_api \
+         test_control_dispatcher_ring_buffer test_control_dispatcher_request_queue \
+         test_control_dispatcher_json_writer test_control_dispatcher_json_parser \
+         test_control_dispatcher_usecases test_control_dispatcher_api
 
 .PHONY: all clean run
 
@@ -360,6 +366,210 @@ test_scan_orchestration_api: scan_orchestration/test_scan_orchestration_api.c \
 		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lcjson -lwebsockets -lpthread
+
+# port_allocator.c is pure logic (range + free-list bookkeeping) - no
+# libiec61850/hal/cjson/lws symbols touched at all, same situation as
+# test_ipc_dispatcher_usecases/test_orchestration_staging.
+test_device_manager_port_allocator: device_manager/test_device_manager_port_allocator.c \
+		$(DEVICE_MANAGER)/data/device_manager_port_allocator.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# registry.c touches hal_thread.h's Semaphore plus orchestration_utils.c's
+# safeStringDup - orchestration_utils.h (pulled in transitively) pulls in
+# orchestration_types.h's sibling feature _api.h headers, same link line as
+# test_orchestration_utils's own rule.
+test_device_manager_registry: device_manager/test_device_manager_registry.c \
+		$(DEVICE_MANAGER)/data/device_manager_registry.c \
+		$(DEVICE_MANAGER)/data/device_manager_port_allocator.c \
+		$(ORCHESTRATION)/utils/orchestration_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+
+# api.c pulls in device_manager's own full stack plus orchestration's entire
+# stack (all 5 sibling features, fully - same reasoning as
+# test_orchestration_api's own build rule) - argument-validation-only wiring,
+# never a real Orchestration_run* against a reachable host.
+test_device_manager_api: device_manager/test_device_manager_api.c \
+		$(DEVICE_MANAGER)/service/device_manager_api.c \
+		$(DEVICE_MANAGER)/data/device_manager_registry.c \
+		$(DEVICE_MANAGER)/data/device_manager_port_allocator.c \
+		$(DEVICE_MANAGER)/domain/device_manager_bootstrap_policy.c \
+		$(ORCHESTRATION)/service/orchestration_api.c \
+		$(ORCHESTRATION)/domain/orchestration_usecases.c \
+		$(ORCHESTRATION)/data/orchestration_staging.c \
+		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_auth.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_file_download.c \
+		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
+		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
+		$(IED_MODEL)/service/ied_model_api.c \
+		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_utils.c \
+		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_connection.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_auth.c \
+		$(IED_MODEL_ONLINE_LOADER)/domain/ied_model_online_loader_usecases.c \
+		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
+		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
+		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
+		$(GOOSE_SUBSCRIBER)/domain/goose_subscriber_usecases.c \
+		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
+		$(IPC_DISPATCHER)/service/ipc_dispatcher_api.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ring_buffer.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
+		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lpthread
+
+# ring_buffer.c only touches hal_thread.h's Semaphore, no ControlRequest/
+# device_manager types at all - needs hal+pthread, no libiec61850/mxml/
+# cjson/lws.
+test_control_dispatcher_ring_buffer: control_dispatcher/test_control_dispatcher_ring_buffer.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_ring_buffer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lhal -lpthread
+
+# request_queue.c touches hal_thread.h's Semaphore plus ControlRequest (whose
+# own header transitively pulls in device_manager/orchestration's sibling
+# feature headers) - same link line as test_orchestration_utils's own rule.
+test_control_dispatcher_request_queue: control_dispatcher/test_control_dispatcher_request_queue.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_request_queue.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+
+# json_writer.c only touches cJSON - needs cjson, no libiec61850/mxml/lws.
+test_control_dispatcher_json_writer: control_dispatcher/test_control_dispatcher_json_writer.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_writer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lcjson
+
+# json_parser.c touches cJSON plus orchestration_utils.c's safeStringDup -
+# needs cjson + the same iec61850/hal link line as test_orchestration_utils.
+test_control_dispatcher_json_parser: control_dispatcher/test_control_dispatcher_json_parser.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_parser.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_request_queue.c \
+		$(ORCHESTRATION)/utils/orchestration_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lcjson -lpthread
+
+# usecases.c pulls in device_manager's own full stack plus orchestration's
+# entire stack (same reasoning as test_device_manager_api's own build rule) -
+# dispatch/error-mapping tests only, driven against a real DeviceManagerHandle
+# in deliberately-failing, no-network cases.
+test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_usecases.c \
+		$(CONTROL_DISPATCHER)/domain/control_dispatcher_usecases.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_writer.c \
+		$(DEVICE_MANAGER)/service/device_manager_api.c \
+		$(DEVICE_MANAGER)/data/device_manager_registry.c \
+		$(DEVICE_MANAGER)/data/device_manager_port_allocator.c \
+		$(DEVICE_MANAGER)/domain/device_manager_bootstrap_policy.c \
+		$(ORCHESTRATION)/service/orchestration_api.c \
+		$(ORCHESTRATION)/domain/orchestration_usecases.c \
+		$(ORCHESTRATION)/data/orchestration_staging.c \
+		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_auth.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_file_download.c \
+		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
+		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
+		$(IED_MODEL)/service/ied_model_api.c \
+		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_utils.c \
+		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_connection.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_auth.c \
+		$(IED_MODEL_ONLINE_LOADER)/domain/ied_model_online_loader_usecases.c \
+		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
+		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
+		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
+		$(GOOSE_SUBSCRIBER)/domain/goose_subscriber_usecases.c \
+		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
+		$(IPC_DISPATCHER)/service/ipc_dispatcher_api.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ring_buffer.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
+		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lpthread
+
+# api.c pulls in control_dispatcher's own full stack (now including
+# ws_server/worker, hence lws+hal) plus device_manager's full stack plus
+# orchestration's entire stack (same reasoning as
+# test_control_dispatcher_usecases/test_device_manager_api's own build
+# rules) - real bind/start/stop on loopback for real (no external IED
+# dependency to avoid here, same as test_ipc_dispatcher_api), never a real
+# websocket frame sent (that's integration_tests/control_dispatcher/'s job).
+test_control_dispatcher_api: control_dispatcher/test_control_dispatcher_api.c \
+		$(CONTROL_DISPATCHER)/service/control_dispatcher_api.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_ring_buffer.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_request_queue.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_writer.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_parser.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_ws_server.c \
+		$(CONTROL_DISPATCHER)/data/control_dispatcher_worker.c \
+		$(CONTROL_DISPATCHER)/domain/control_dispatcher_usecases.c \
+		$(DEVICE_MANAGER)/service/device_manager_api.c \
+		$(DEVICE_MANAGER)/data/device_manager_registry.c \
+		$(DEVICE_MANAGER)/data/device_manager_port_allocator.c \
+		$(DEVICE_MANAGER)/domain/device_manager_bootstrap_policy.c \
+		$(ORCHESTRATION)/service/orchestration_api.c \
+		$(ORCHESTRATION)/domain/orchestration_usecases.c \
+		$(ORCHESTRATION)/data/orchestration_staging.c \
+		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_auth.c \
+		$(SCL_BOOTSTRAP)/data/scl_bootstrap_file_download.c \
+		$(SCL_BOOTSTRAP)/domain/scl_bootstrap_usecases.c \
+		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
+		$(IED_MODEL)/service/ied_model_api.c \
+		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_utils.c \
+		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_connection.c \
+		$(IED_MODEL_ONLINE_LOADER)/data/ied_model_online_loader_auth.c \
+		$(IED_MODEL_ONLINE_LOADER)/domain/ied_model_online_loader_usecases.c \
+		$(MMS_REPORT_CLIENT)/service/mms_report_client_api.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_connection.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_auth.c \
+		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
+		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
+		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
+		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
+		$(GOOSE_SUBSCRIBER)/domain/goose_subscriber_usecases.c \
+		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
+		$(IPC_DISPATCHER)/service/ipc_dispatcher_api.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ring_buffer.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
+		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_json_writer.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lpthread
 
 run: $(TESTS)
 	@status=0; \

@@ -3,59 +3,70 @@
 #include <stdint.h>
 #include <signal.h>
 #include <unistd.h>
-#include "linked_list.h"
-#include "orchestration/service/orchestration_api.h"
+#include "device_manager/service/device_manager_api.h"
+#include "features/control_dispatcher/service/control_dispatcher_api.h"
 #include "orchestration/utils/orchestration_utils.h"
 #include "features/ied_discovery/service/ied_discovery_api.h"
 #include "scan_orchestration/service/scan_orchestration_api.h"
 #include "main_discovery_prompt.h"
 
 /*
- * Wiring only, no business logic (see CLAUDE.md's "Architecture" rule) - the
- * real sequencing lives in src/orchestration/service/orchestration_api.c.
- * No config-file system exists yet, so host/port/IED name/interface come
- * from argv: [host] [mmsPort] [iedName] [interface] [ipcPort]
- * [acseAuthPassword] [sclFilePath] - mmsPort/interface/ipcPort/
- * acseAuthPassword fall back to 102/"eth0"/8765/NULL(unauthenticated) if
- * omitted.
+ * Wiring only, no business logic (see CLAUDE.md's "Architecture" rule).
  *
- * host and iedName have NO hardcoded fallback (they used to default to
- * integration_tests/ied_simulator's "Reporter1" fixture at 127.0.0.1 - that
- * only ever matched the bundled test simulator and directly contradicted
- * the point of the ied_discovery flow below):
- *   - host omitted/empty: runs the interactive ied_discovery scan/manual-add/
- *     pick flow (see main_discovery_prompt.h) to find one instead of
- *     requiring the operator to already know it.
- *   - iedName omitted/empty: passed straight through as NULL/"" to
- *     Orchestration_run/_runFromLocalFile, which auto-detects it from the
- *     SCL's own <IED> element(s) (works only if the SCL declares exactly one).
+ * main.c's primary long-lived job is now device_manager + control_dispatcher:
+ * an always-on control websocket (default 127.0.0.1:8767) accepts
+ * START_REPORTING/STOP_REPORTING JSON commands for any number of
+ * concurrently running devices, each auto-assigned its own ipc_dispatcher
+ * websocket port from device_manager's own configured range (default
+ * 9000-9999) - see CLAUDE.md's device_manager/control_dispatcher Architecture
+ * bullets for the full envelope shape and threading design. This replaces
+ * the old single-device-per-process model, where main.c built exactly one
+ * OrchestrationHandle from argv and blocked until SIGINT.
  *
- * sclFilePath (argv[7], optional): if supplied, the daemon skips
- * scl_bootstrap entirely and loads this local file instead
- * (Orchestration_runFromLocalFile) - for IEDs/simulators (e.g. OMICRON IED
- * Scout's "Simulate IED" mode) whose MMS server doesn't implement file
- * services, so scl_bootstrap can never fetch an SCL from them even though
- * they're otherwise a real, connectable MMS/GOOSE device. host/mmsPort still
- * drive the real live connection - ied_discovery's scan/manual-add still
- * works exactly the same beforehand to find/confirm that host.
+ * No config-file system exists yet, so an OPTIONAL boot-time device still
+ * comes from argv: [host] [mmsPort] [iedName] [interface] [acseAuthPassword]
+ * [sclFilePath] - mmsPort/interface fall back to 102/"eth0" if omitted. This
+ * boot-time device is started via the exact same DeviceManager_startReporting
+ * call a control-websocket client would use, not a separate code path -
+ * including the host-omitted/scan-driven flow below, which now hands its
+ * picked host to DeviceManager_startReporting too instead of calling
+ * Orchestration_run/_runFromLocalFile directly the way this file used to.
  *
- * If sclFilePath is NOT given and Orchestration_run's own scl_bootstrap stage
- * comes back with SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND (associated fine,
- * no SCL file anywhere in its file directory - the same device class
- * sclFilePath exists for, just without an operator having a local copy to
- * hand in), this file automatically retries once via
- * Orchestration_runFromOnlineDiscovery, which builds the model directly from
- * the device's own live MMS data model instead of any SCL file at all - see
- * ied_model_online_loader's own Architecture bullet in CLAUDE.md. This is the
- * one deliberate exception to CLAUDE.md's "no over-the-wire tree discovery"
- * Hard Rule; it never runs unless file-based SCL acquisition has already,
- * genuinely failed this exact way.
+ * host omitted/empty: runs the continuous background scan (scan_orchestration)
+ * on interface, streaming discovered IEC 61850 MMS devices over its own
+ * shared websocket (default port 8766) while an interactive terminal prompt
+ * (main_discovery_prompt.c) lets the operator pick a device from the live,
+ * growing list (or type in an extra candidate IP to verify and add) at any
+ * time; picking one stops the scan before falling through to the same
+ * DeviceManager_startReporting call the argv-supplied-host path uses. If no
+ * host is ever picked (stdin EOF), control_dispatcher simply stays up,
+ * waiting for commands - this is no longer a fatal condition, since the
+ * control websocket is this daemon's real interface now, not this one
+ * boot-time convenience.
  *
- * Note this file never includes features/ipc_dispatcher/service/
- * ipc_dispatcher_api.h directly - orchestration owns that feature's entire
- * lifecycle end-to-end (bind/start/stop/destroy, plus wiring its callbacks
- * onto mms_report_client/goose_subscriber internally). This file only
- * configures it via OrchestrationConfig.ipcDispatcherConfig.
+ * iedName omitted/empty: passed straight through - auto-detected from the
+ * fetched SCL's own <IED> element(s), UNLESS sclFilePath is also given, in
+ * which case device_manager requires iedName explicitly (see its own service
+ * header) - a stricter contract than Orchestration_runFromLocalFile's own
+ * auto-detect, deliberately, per this feature's own explicit requirement.
+ *
+ * sclFilePath (argv[6], optional): if supplied, skips scl_bootstrap entirely
+ * (via device_manager -> Orchestration_runFromLocalFile) - see
+ * device_manager's own Architecture bullet for the full fallback sequence
+ * (network bootstrap, then one automatic online-discovery retry on
+ * SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND) that fires when sclFilePath is
+ * NOT given.
+ *
+ * Notable behavior change from the single-device version of this file: the
+ * old 5th argv slot (an ipc_dispatcher port override) is gone - there's no
+ * longer one fixed dispatcher to point an override at, since device_manager
+ * owns per-device port allocation from its own configured range. The three
+ * old per-device diagnostic printf passthroughs
+ * (onReportConnState/onRcbStatus/onGooseStatus) are also gone - device_manager
+ * creates each device's own OrchestrationHandle internally and doesn't expose
+ * it to main.c, so there's no attachment point for them anymore; the control
+ * websocket is the real diagnostic/status interface going forward, not
+ * process-local printf.
  */
 
 static volatile sig_atomic_t g_stopRequested = 0;
@@ -67,66 +78,22 @@ onSignal(int sig) {
 }
 
 static void
-onReportConnState(void* userParam, MmsReportClientConnState state) {
-    (void) userParam;
-    printf("[mms_report_client] connection state: %d\n", state);
-}
-
-static void
-onRcbStatus(void* userParam, const char* rcbReference, bool enabled, IedClientError lastError) {
-    (void) userParam;
-    printf("[mms_report_client] RCB %s %s (lastError=%d)\n", rcbReference ? rcbReference : "?",
-            enabled ? "enabled" : "disabled", lastError);
-}
-
-static void
-onGooseStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status, GooseParseError lastParseError) {
-    (void) userParam;
-    printf("[goose_subscriber] %s status=%d (lastParseError=%d)\n", goCbRef ? goCbRef : "?", status,
-            lastParseError);
-}
-
-static void
 onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort) {
     (void) userParam;
     printf("[scan] found %s:%d (scan #%llu)\n", host, mmsPort, (unsigned long long) scanId);
 }
 
-static const char*
-sclCandidateStatusToString(SclBootstrapCandidateStatus status) {
-    switch (status) {
-        case SCL_BOOTSTRAP_CANDIDATE_NO_MMS_SERVER: return "no MMS server (TCP never connected)";
-        case SCL_BOOTSTRAP_CANDIDATE_MMS_CONNECT_FAILED: return "MMS association/browse/download failed";
-        case SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND:
-            return "associated fine, but no SCL file (.icd/.cid/.scd/.ssd/.sed) found in its file directory";
-        case SCL_BOOTSTRAP_CANDIDATE_ACCESS_DENIED: return "access denied (auth required/rejected)";
-        case SCL_BOOTSTRAP_CANDIDATE_DOWNLOAD_FAILED: return "SCL file found but download failed";
-        case SCL_BOOTSTRAP_CANDIDATE_FILE_RETRIEVED: return "file retrieved (unexpected here)";
-        default: return "unknown";
-    }
-}
-
-/* Prints the stage-specific diagnostic field(s) OrchestrationErrorDetail carries -
- * the generic OrchestrationUtils_errorToString(runError) alone doesn't say
- * *why* a stage failed, only *which* stage did. */
 static void
-printRunFailureDetail(const OrchestrationErrorDetail* detail) {
-    switch (detail->stage) {
-        case ORCHESTRATION_STAGE_BOOTSTRAP:
-            fprintf(stderr, "  bootstrap detail: %s\n", sclCandidateStatusToString(detail->lastCandidateStatus));
-            break;
-        case ORCHESTRATION_STAGE_IED_NAME_RESOLUTION:
-            fprintf(stderr, "  IED name auto-detection found %d <IED> element(s) in the SCL "
-                    "(need exactly 1 - pass an explicit iedName instead)\n", detail->discoveredIedCount);
-            break;
-        case ORCHESTRATION_STAGE_MODEL_LOAD:
-            fprintf(stderr, "  model load error: %d\n", (int) detail->modelLoadError);
-            break;
-        case ORCHESTRATION_STAGE_ONLINE_DISCOVERY:
-            fprintf(stderr, "  online discovery error: %d\n", (int) detail->onlineDiscoveryError);
-            break;
-        default:
-            break;
+printStartFailure(const char* host, DeviceManagerError err, const DeviceManagerErrorDetail* detail) {
+    fprintf(stderr, "[CORE] DeviceManager_startReporting(%s) failed (error %d)\n", host, (int) err);
+    if (err == DEVICE_MANAGER_ERR_ORCHESTRATION_FAILED && detail) {
+        fprintf(stderr, "  orchestration stage: %s (%s)\n",
+                OrchestrationUtils_stageToString(detail->orchestrationDetail.stage),
+                OrchestrationUtils_errorToString(detail->orchestrationError));
+        if (detail->orchestrationDetail.stage == ORCHESTRATION_STAGE_BOOTSTRAP) {
+            fprintf(stderr, "  bootstrap detail: %s\n",
+                    OrchestrationUtils_candidateStatusToString(detail->orchestrationDetail.lastCandidateStatus));
+        }
     }
 }
 
@@ -138,50 +105,51 @@ main(int argc, char** argv) {
     const char* interfaceId = (argc > 4) ? argv[4] : "eth0";
     /* Optional - only needed if the target IED requires ACSE authentication.
      * NULL (the default, argv omitted) means every association attempt is
-     * unauthenticated, exactly as before this was added. argv[6] is stable
-     * for the whole process lifetime, so it's safe to borrow directly into
-     * both config structs below (their own doc comments describe this same
-     * borrowed-then-internally-copied convention). */
-    const char* acseAuthPassword = (argc > 6 && argv[6][0]) ? argv[6] : NULL;
+     * unauthenticated. argv[5] is stable for the whole process lifetime, so
+     * it's safe to borrow directly for the boot-time DeviceManager_startReporting
+     * call below (device_manager itself takes its own owned copy). */
+    const char* acseAuthPassword = (argc > 5 && argv[5][0]) ? argv[5] : NULL;
     /* Optional - if given, skip scl_bootstrap and load this file directly
      * instead (see this file's own top comment). */
-    const char* sclFilePath = (argc > 7 && argv[7][0]) ? argv[7] : NULL;
+    const char* sclFilePath = (argc > 6 && argv[6][0]) ? argv[6] : NULL;
 
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
 
-    OrchestrationConfig config;
-    OrchestrationConfig_defaults(&config);
-    if (argc > 5) config.ipcDispatcherConfig.port = (uint16_t) atoi(argv[5]);
-    /* Same physical IED authenticates both associations with the same
-     * ACSE password in practice - scl_bootstrap's SCL-discovery connection
-     * and mms_report_client's reporting connection are independent
-     * IedConnections, so each needs it set explicitly. */
-    config.bootstrapConfig.acseAuthPassword = acseAuthPassword;
-    config.reportClientConfig.acseAuthPassword = acseAuthPassword;
-
-    OrchestrationError createError;
-    OrchestrationHandle handle = Orchestration_create(&config, &createError);
-    if (!handle) {
-        fprintf(stderr, "[CORE] Orchestration_create failed: %s\n", OrchestrationUtils_errorToString(createError));
+    DeviceManagerError dmCreateErr;
+    DeviceManagerHandle deviceManager = DeviceManager_create(NULL, &dmCreateErr);
+    if (!deviceManager) {
+        fprintf(stderr, "[CORE] DeviceManager_create failed (error %d)\n", (int) dmCreateErr);
         return EXIT_FAILURE;
     }
 
-    /* Report/GOOSE data records are always relayed via ipc_dispatcher,
-     * wired internally by orchestration itself - no setter for those slots
-     * exists here. Connection-state/RCB-status/liveness diagnostics stay on
-     * printf passthroughs, out of ipc_dispatcher's v1 scope (data records
-     * only). */
-    Orchestration_setReportConnStateCallback(handle, onReportConnState, NULL);
-    Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
-    Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
+    ControlDispatcherError cdCreateErr;
+    ControlDispatcherHandle controlDispatcher = ControlDispatcher_create(NULL, deviceManager, &cdCreateErr);
+    if (!controlDispatcher) {
+        fprintf(stderr, "[CORE] ControlDispatcher_create failed (error %d)\n", (int) cdCreateErr);
+        DeviceManager_destroy(deviceManager);
+        return EXIT_FAILURE;
+    }
+
+    ControlDispatcherError cdStartErr = ControlDispatcher_start(controlDispatcher);
+    if (cdStartErr != CONTROL_DISPATCHER_OK) {
+        fprintf(stderr, "[CORE] ControlDispatcher_start failed (error %d)\n", (int) cdStartErr);
+        ControlDispatcher_destroy(controlDispatcher);
+        DeviceManager_destroy(deviceManager);
+        return EXIT_FAILURE;
+    }
+
+    ControlDispatcherConfig cdConfig;
+    ControlDispatcherConfig_defaults(&cdConfig);
+    printf("[CORE] control_dispatcher listening on 127.0.0.1:%u - send START_REPORTING/STOP_REPORTING "
+            "JSON commands here.\n", (unsigned) cdConfig.port);
 
     /* host omitted/empty: start the continuous background scan
-     * (scan_orchestration) and let the operator pick a device from its
-     * live, growing list (or type a manual IP, still verified via
-     * ied_discovery directly) while the scan keeps running concurrently -
-     * instead of a hardcoded fallback or the old one-shot blocking scan
-     * (see this file's own top comment). */
+     * (scan_orchestration) and let the operator pick a device from its live,
+     * growing list (or type a manual IP, still verified via ied_discovery
+     * directly) while the scan keeps running concurrently - unchanged in
+     * spirit from before this file's device_manager rewrite (see this file's
+     * own top comment). */
     char* discoveredHost = NULL;
     const char* host = hostArg;
     if (!host) {
@@ -192,7 +160,8 @@ main(int argc, char** argv) {
         ScanOrchestrationHandle scanHandle = ScanOrchestration_create(&scanConfig, &scanCreateErr);
         if (!scanHandle) {
             fprintf(stderr, "[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
-            Orchestration_destroy(handle);
+            ControlDispatcher_destroy(controlDispatcher);
+            DeviceManager_destroy(deviceManager);
             return EXIT_FAILURE;
         }
 
@@ -202,15 +171,15 @@ main(int argc, char** argv) {
             .interfaceId = interfaceId,
             .mmsPort = mmsPort,
             .sweepIntervalMs = 0, /* use scanConfig.defaultSweepIntervalMs */
-            .acseAuthPassword = acseAuthPassword /* same argv[6], same reuse pattern as
-                                                     bootstrapConfig/reportClientConfig above */
+            .acseAuthPassword = acseAuthPassword
         };
         uint64_t scanId;
         ScanOrchestrationError scanStartErr = ScanOrchestration_startScan(scanHandle, &scanRequest, &scanId);
         if (scanStartErr != SCAN_ORCHESTRATION_OK) {
             fprintf(stderr, "[CORE] ScanOrchestration_startScan failed (error %d)\n", (int) scanStartErr);
             ScanOrchestration_destroy(scanHandle);
-            Orchestration_destroy(handle);
+            ControlDispatcher_destroy(controlDispatcher);
+            DeviceManager_destroy(deviceManager);
             return EXIT_FAILURE;
         }
 
@@ -220,8 +189,8 @@ main(int argc, char** argv) {
                 (unsigned) scanConfig.scanDispatcherConfig.port);
 
         /* Unchanged: manual-typed-IP verification still uses a plain
-         * IedDiscoveryHandle, created exactly as before this change - the
-         * scan above never touches this path (see main_discovery_prompt.h). */
+         * IedDiscoveryHandle, created exactly as before - the scan above
+         * never touches this path (see main_discovery_prompt.h). */
         IedDiscoveryConfig manualVerifyConfig;
         IedDiscoveryConfig_defaults(&manualVerifyConfig);
         manualVerifyConfig.acseAuthPassword = acseAuthPassword;
@@ -231,7 +200,8 @@ main(int argc, char** argv) {
         if (!manualVerifyHandle) {
             fprintf(stderr, "[CORE] IedDiscovery_create failed (error %d)\n", (int) discoveryError);
             ScanOrchestration_destroy(scanHandle);
-            Orchestration_destroy(handle);
+            ControlDispatcher_destroy(controlDispatcher);
+            DeviceManager_destroy(deviceManager);
             return EXIT_FAILURE;
         }
 
@@ -243,71 +213,42 @@ main(int argc, char** argv) {
         ScanOrchestration_destroy(scanHandle); /* also tears down scan_dispatcher if this was the last scan */
 
         if (!discoveredHost) {
-            fprintf(stderr, "[CORE] No host picked, exiting.\n");
-            Orchestration_destroy(handle);
-            return EXIT_FAILURE;
-        }
-        host = discoveredHost;
-    }
-
-    OrchestrationErrorDetail detail;
-    OrchestrationError runError;
-
-    if (sclFilePath) {
-        /* Skip scl_bootstrap entirely - see this file's own top comment on
-         * why (e.g. OMICRON IED Scout's simulated server not implementing
-         * MMS file services). host/mmsPort still drive the real live
-         * mms_report_client/goose_subscriber connections. */
-        printf("[CORE] Mode: local SCL file ('%s') - no network-based SCL discovery of any kind "
-                "(scl_bootstrap or online discovery) will be attempted.\n", sclFilePath);
-        runError = Orchestration_runFromLocalFile(handle, sclFilePath, host, mmsPort, iedName, interfaceId,
-                IED_MODEL_ACCESS_REPORT_ONLY, &detail);
-    } else {
-        printf("[CORE] Mode: network bootstrap (scl_bootstrap) - falling back to live online discovery "
-                "only if scl_bootstrap finds an associable server with no SCL file at all.\n");
-        LinkedList hostList = LinkedList_create();
-        LinkedList_add(hostList, (void*) host);
-
-        runError = Orchestration_run(handle, hostList, mmsPort, iedName, interfaceId,
-                IED_MODEL_ACCESS_REPORT_ONLY, &detail);
-
-        LinkedList_destroyStatic(hostList); /* host is stack/argv/discoveredHost-owned, not heap-owned by the list */
-
-        /* Fallback: this exact, narrow condition (associated fine, genuinely
-         * no SCL file over MMS file services) is what ied_model_online_loader
-         * exists for - see this file's own top comment and
-         * Orchestration_runFromOnlineDiscovery's doc comment for why this
-         * stays an explicit retry here rather than a silent branch inside
-         * Orchestration_run itself. */
-        if (runError == ORCHESTRATION_ERR_BOOTSTRAP_FAILED
-                && detail.lastCandidateStatus == SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND) {
-            fprintf(stderr, "[CORE] No SCL file found over MMS file services - falling back to live "
-                    "online discovery (building the model directly from %s's own MMS data model)\n", host);
-            runError = Orchestration_runFromOnlineDiscovery(handle, host, mmsPort, iedName, interfaceId,
-                    IED_MODEL_ACCESS_REPORT_ONLY, acseAuthPassword, &detail);
+            fprintf(stderr, "[CORE] No host picked - control_dispatcher stays up, waiting for commands.\n");
+        } else {
+            host = discoveredHost;
         }
     }
 
-    if (runError != ORCHESTRATION_OK) {
-        fprintf(stderr, "[CORE] Orchestration_run failed at stage %d: %s\n", detail.stage,
-                OrchestrationUtils_errorToString(runError));
-        printRunFailureDetail(&detail);
-        Orchestration_destroy(handle);
-        free(discoveredHost);
-        return EXIT_FAILURE;
+    /* Boot-time device, if a host is known (argv-supplied or just picked
+     * above) - reuses the exact same DeviceManager_startReporting path a
+     * control-websocket client would use, not a separate code path. Failure
+     * here is no longer fatal to the whole process - control_dispatcher is
+     * this daemon's real interface now, so it keeps running regardless. */
+    if (host) {
+        uint64_t deviceId;
+        uint16_t wsPort;
+        DeviceManagerErrorDetail detail;
+        DeviceManagerError startErr = DeviceManager_startReporting(deviceManager, host, mmsPort, iedName,
+                interfaceId, sclFilePath, acseAuthPassword, IED_MODEL_ACCESS_REPORT_ONLY,
+                &deviceId, &wsPort, &detail);
+        if (startErr != DEVICE_MANAGER_OK) {
+            printStartFailure(host, startErr, &detail);
+        } else {
+            printf("[CORE] Boot-time device #%llu running against %s:%d (IED '%s', interface '%s'). "
+                    "Its own ipc_dispatcher listens on 127.0.0.1:%u. Ctrl+C to stop.\n",
+                    (unsigned long long) deviceId, host, mmsPort, iedName ? iedName : "<auto-detected>",
+                    interfaceId, (unsigned) wsPort);
+        }
     }
 
-    printf("[CORE] Orchestration running against %s:%d (IED '%s', interface '%s', ACSE auth %s). "
-            "ipc_dispatcher listening on 127.0.0.1:%u. Ctrl+C to stop.\n",
-            host, mmsPort, iedName ? iedName : "<auto-detected>", interfaceId,
-            acseAuthPassword ? "enabled" : "disabled", (unsigned) config.ipcDispatcherConfig.port);
+    free(discoveredHost);
 
     while (!g_stopRequested) {
         pause();
     }
 
     printf("[CORE] Shutdown requested, stopping...\n");
-    Orchestration_destroy(handle);
-    free(discoveredHost);
+    ControlDispatcher_destroy(controlDispatcher); /* stop accepting new commands first */
+    DeviceManager_destroy(deviceManager);         /* drains + tears down every still-running device */
     return EXIT_SUCCESS;
 }

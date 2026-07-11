@@ -9,26 +9,44 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
   compiling it together with `src/main_discovery_prompt.c`, every `.c` file under
-  `src/orchestration/` and `src/scan_orchestration/`, and all eight `src/features/<feature>/`
-  directories (`service`/`data`/`domain`/`utils`), e.g.:
+  `src/orchestration/`, `src/scan_orchestration/`, and `src/device_manager/`, and all nine
+  `src/features/<feature>/` directories (`service`/`data`/`domain`/`utils`), e.g.:
   `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/main_discovery_prompt.c
-  src/orchestration/*/*.c src/scan_orchestration/*/*.c src/features/*/*/*.c -o
-  /tmp/ied_reporter_daemon -Lthird_party/lib -liec61850 -lhal -lmxml -lwebsockets -lcjson
-  -lpthread && sudo /tmp/ied_reporter_daemon [host] [mmsPort] [iedName] [interface] [ipcPort]
-  [acseAuthPassword] [sclFilePath]` — this is a manual stopgap, not a substitute for a real
-  build system; don't invent or guess a permanent build command, ask before assuming one. Only
-  `mmsPort`/`interface`/`ipcPort`/`acseAuthPassword` have fallback defaults
-  (102/`eth0`/8765/unauthenticated) if omitted:
-  - `host` omitted/empty: no hardcoded fallback — runs the continuous background scan
-    (`scan_orchestration`) on `interface` instead, streaming discovered IEC 61850 MMS devices
-    over its own shared websocket (default port 8766) while an interactive terminal prompt lets
-    you pick a device from the live, growing list (or type in an extra candidate IP to verify
-    and add) at any time; picking one stops the scan before continuing. See
+  src/orchestration/*/*.c src/scan_orchestration/*/*.c src/device_manager/*/*.c
+  src/features/*/*/*.c -o /tmp/ied_reporter_daemon -Lthird_party/lib -liec61850 -lhal -lmxml
+  -lwebsockets -lcjson -lpthread && /tmp/ied_reporter_daemon [host] [mmsPort] [iedName]
+  [interface] [acseAuthPassword] [sclFilePath]` (also wrapped by `rebuild_proj.sh`) — this is a
+  manual stopgap, not a substitute for a real build system; don't invent or guess a permanent
+  build command, ask before assuming one. `sudo` is only required if a real device is actually
+  reached over GOOSE (raw socket) — the process itself starts fine without it, see
+  `device_manager`'s own bullet below on why a failed boot-time device is no longer fatal. Only
+  `mmsPort`/`interface`/`acseAuthPassword` have fallback defaults (102/`eth0`/unauthenticated) if
+  omitted:
+  - **`main.c`'s primary job now is `device_manager` + `control_dispatcher`** (see their own
+    Architecture bullets below), not this one boot-time device — an always-on control websocket
+    (default `127.0.0.1:8767`) accepts `START_REPORTING`/`STOP_REPORTING` JSON commands for any
+    number of concurrently running devices, each auto-assigned its own `ipc_dispatcher` websocket
+    port from `device_manager`'s own configured range (default 9000-9999). The argv-supplied
+    `host` (below) is entirely optional and, when given, is started via the exact same
+    `DeviceManager_startReporting` call a control-websocket client would use — not a separate
+    code path. **Breaking change from the single-device version of this file**: there is no
+    longer an `ipcPort` argv slot (5th slot used to override the one fixed dispatcher's port) —
+    `device_manager` owns per-device port allocation now, so `acseAuthPassword`/`sclFilePath`
+    each moved one slot earlier (5th/6th, not 6th/7th).
+  - `host` omitted/empty: runs the continuous background scan (`scan_orchestration`) on
+    `interface` instead, streaming discovered IEC 61850 MMS devices over its own shared websocket
+    (default port 8766) while an interactive terminal prompt lets you pick a device from the
+    live, growing list (or type in an extra candidate IP to verify and add) at any time; picking
+    one stops the scan, then hands the picked host to the same `DeviceManager_startReporting`
+    call the argv-supplied-host path uses. If no host is ever picked (stdin EOF), this is no
+    longer fatal — `control_dispatcher` stays up regardless, waiting for commands. See
     `scan_orchestration/`'s own Architecture bullet below.
-  - `iedName` omitted/empty: passed through as auto-detect to `Orchestration_run`/
-    `_runFromLocalFile` — works only if the SCL declares exactly one `<IED>` (see
-    `orchestration/`'s own bullet).
-  - `sclFilePath` (optional, 7th slot): if given, skips `scl_bootstrap` entirely and loads
+  - `iedName` omitted/empty: passed through as auto-detect — works only if the SCL declares
+    exactly one `<IED>` (see `orchestration/`'s own bullet) — UNLESS `sclFilePath` is also given,
+    in which case `device_manager` requires `iedName` explicitly (see its own bullet below) — a
+    stricter contract than `Orchestration_runFromLocalFile`'s own auto-detect, deliberately, per
+    this feature's own explicit requirement.
+  - `sclFilePath` (optional, 6th slot): if given, skips `scl_bootstrap` entirely and loads
     this local SCL file instead (`Orchestration_runFromLocalFile`) — for devices whose MMS
     server doesn't implement file services (confirmed in practice against OMICRON IED Scout's
     "Simulate IED" mode: a real, connectable MMS/GOOSE device that associates fine but returns
@@ -36,12 +54,14 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
     all). `host`/`mmsPort` still drive the real live `mms_report_client`/`goose_subscriber`
     connections; `ied_discovery`'s scan/manual-add still works the same beforehand to find
     that host. See `orchestration/`'s own bullet for the stage-by-stage behavior.
-  - If `sclFilePath` is **not** given and `Orchestration_run`'s bootstrap stage comes back with
-    exactly `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (the same device class the bullet above
-    describes, just without an operator having a local SCL copy in hand), `main.c` automatically
-    retries once via `Orchestration_runFromOnlineDiscovery` — builds the model directly from the
-    live device's own MMS data model instead of any SCL file at all. See `ied_model_online_loader/`'s
-    own Architecture bullet below and the "No over-the-wire tree discovery" Hard Rule's documented
+  - If `sclFilePath` is **not** given and the bootstrap stage comes back with exactly
+    `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (the same device class the bullet above
+    describes, just without an operator having a local SCL copy in hand), `device_manager`
+    automatically retries once via `Orchestration_runFromOnlineDiscovery` (via
+    `DeviceManagerBootstrapPolicy_run`, extracted from this file's own original inline sequencing
+    — see `device_manager`'s own bullet below) — builds the model directly from the live device's
+    own MMS data model instead of any SCL file at all. See `ied_model_online_loader/`'s own
+    Architecture bullet below and the "No over-the-wire tree discovery" Hard Rule's documented
     exception.
 - Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
 - Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
@@ -127,6 +147,27 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   gracefully; this test proves sequencing/refcounting/threading, not sweep success — same
   reasoning `integration_tests/ied_discovery/` already documents for avoiding a real `scanSubnet`
   call over a real interface. No `sudo` needed.
+- Run the `device_manager` E2E test: `cd integration_tests/device_manager && sudo make run` —
+  drives two real, concurrent `DeviceManager_startReporting` calls (from two threads) against
+  two real `ied_simulator` "Reporter1" instances at two different `mmsPort`s, proving: the
+  two-phase-locked registry doesn't serialize one device's slow bootstrap+MMS+GOOSE sequence
+  behind the other's (a coarse, deliberately non-flaky wall-clock bound — the precise "lock isn't
+  held across the slow call" property is proven structurally by
+  `tests/device_manager/test_device_manager_registry.c` instead); each gets a distinct deviceId
+  and a distinct, real, independently-connectable `ipc_dispatcher` websocket streaming real GOOSE
+  JSON; stopping one leaves the other running; stopping the second frees its port for reuse by a
+  subsequent start. **Needs `sudo`** — inherits the GOOSE-subscriber step's raw-socket requirement
+  via every `DeviceManager_startReporting` call.
+- Run the `control_dispatcher` E2E test: `cd integration_tests/control_dispatcher && sudo make
+  run` — a hand-rolled RFC6455 client that both SENDS masked command frames (the first E2E test
+  in this repo to send a client→server frame — every other dispatcher is push-only) and receives
+  responses. Malformed-JSON and unknown-action cases run with no privilege and no simulator at
+  all (fail entirely on the lws thread before ever reaching `device_manager`); a third case
+  drives a real `START_REPORTING`/`STOP_REPORTING` round trip against a real `ied_simulator`
+  instance, asserting the returned `wsPort` streams real GOOSE JSON (proving the whole chain:
+  control message → `device_manager` → `orchestration` → per-device `ipc_dispatcher`) and that
+  the port is torn down after stop. **Needs `sudo`** for that third case only, same reasoning as
+  `device_manager`'s own E2E test.
 - Raw-socket loopback smoke test (build manually, no Makefile — throwaway linkage/behavior
   probe): `gcc -g -Wall -Isrc -idirafter third_party/include tools/smoke_tests/goose_loopback_smoke_test.c
   -o /tmp/goose_loopback_smoke_test -Lthird_party/lib -liec61850 -lhal -lpthread && sudo
@@ -182,6 +223,34 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   scan..." diagnostic first) before falling through to the existing, completely unmodified
   `scl_bootstrap`/`orchestration` pipeline. See `scan_dispatcher/`'s and `scan_orchestration/`'s
   own Architecture bullets below for the full mechanism.
+- **`main.c` was rewritten again, most recently, to support reporting on MULTIPLE IEDs at once**
+  (explicit user request) — its primary long-lived job is now `device_manager` +
+  `control_dispatcher` (see their own Architecture bullets below), not one fixed boot-time device.
+  The entire inline `if (sclFilePath) {...} else {...}` bootstrap-fallback block plus the direct
+  `Orchestration_create`/`Orchestration_set*Callback` calls this bullet originally described above
+  are GONE from `main.c` — extracted verbatim into `device_manager/domain/
+  device_manager_bootstrap_policy.c` so both `main.c`'s own boot-time device and
+  `control_dispatcher`'s worker thread share exactly one copy. **Consequence, an accepted
+  simplification, not a silent regression**: the three diagnostic `printf` passthroughs
+  (`onReportConnState`/`onRcbStatus`/`onGooseStatus`) are gone too — `device_manager` creates each
+  device's own `OrchestrationHandle` internally and never exposes it to `main.c`, so there's no
+  attachment point for them anymore; the control websocket is the real diagnostic/status
+  interface going forward, not process-local `printf`. **Breaking argv change**: the old 5th argv
+  slot (an `ipc_dispatcher` port override) is gone — there's no longer one fixed dispatcher to
+  point an override at, since `device_manager` owns per-device port allocation from its own
+  configured range; `acseAuthPassword`/`sclFilePath` each moved one slot earlier as a result (see
+  this file's own `main.c` Commands bullet above for the exact new layout). The `host`-omitted
+  scan flow (previous bullet, above) is otherwise unchanged in spirit — once it picks a host, that
+  host is now handed to the same `DeviceManager_startReporting` call the argv-supplied-host path
+  uses, instead of calling `Orchestration_run`/`_runFromLocalFile` directly the way this file used
+  to — one path for "start a device" instead of two divergent ones. A failed boot-time device (scan
+  picked nothing, or `DeviceManager_startReporting` itself failed) is no longer fatal to the whole
+  process either — `control_dispatcher` stays up regardless, since it's this daemon's real
+  interface now. `rebuild_proj.sh` and this file's own manual build command were updated to
+  include `src/device_manager/*/*.c` alongside `src/orchestration/`/`src/scan_orchestration/`'s
+  own `.c` files (the latter two were themselves missing from `rebuild_proj.sh` until this pass —
+  a gap from `scan_orchestration`'s own original commit, fixed here since `main.c` cannot build
+  without them regardless).
 - **Bugfix surfaced by wiring `ipc_dispatcher` into orchestration's own rollback paths**:
   `MmsReportClientConnection_destroy` (`src/features/mms_report_client/data/mms_report_client_connection.c`)
   used to destroy `handle->wakeSignal` (the semaphore) *before* `IedConnection_destroy` - but
@@ -343,7 +412,12 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 - No libpcap/Npcap present in `third_party/` — that's a system dependency, link against the system lib, don't vendor it.
 - Unity (ThrowTheSwitch/Unity, MIT) is vendored the same way as libiec61850/mxml: built into `libunity.a` and copied into `third_party/lib`/`third_party/include` (plus `unity_LICENSE.txt` for attribution) — not left as loose source. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/Unity` (not committed here, same convention as mxml's build). Test binaries link `-lunity`, they don't compile `unity.c` themselves. **This vendored build has double-precision assertions excluded** (`TEST_ASSERT_EQUAL_DOUBLE`/`_FLOAT` fail with "Unity Double Precision Disabled") — compare floating-point values with a plain C `==`/epsilon check instead, not a Unity float/double macro (see `tests/ipc_dispatcher/test_ipc_dispatcher_value_codec.c` for the pattern).
 - `libwebsockets.a`/`libwebsockets.h` (libwebsockets, MIT) is vendored for `ipc_dispatcher`'s websocket transport — no websocket implementation exists elsewhere in this repo; do not hand-roll one for production code (the E2E test's minimal client is the one deliberate exception — see `ipc_dispatcher/`'s own bullet below for why). Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/libwebsockets` (not committed here, same convention as mxml/Unity's build) via CMake with `-DLWS_WITH_SSL=OFF -DLWS_WITHOUT_EXTENSIONS=ON -DLWS_WITH_SHARED=OFF -DLWS_WITH_STATIC=ON -DLWS_WITHOUT_TESTAPPS=ON` (no TLS needed — internal-only, loopback). Link flag is `-lwebsockets` (the archive is named `libwebsockets.a`, not `liblws.a`).
-- `libcjson.a`/`cJSON.h` (cJSON, MIT) is vendored for `ipc_dispatcher`'s JSON serialization — no JSON library exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/cJSON` (not committed here, same convention) via CMake with `-DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF` (cJSON's own `BUILD_SHARED_AND_STATIC_LIBS` option does **not** suppress the shared build by itself — `BUILD_SHARED_LIBS=OFF` is the flag that actually produces a static-only `libcjson.a`). Push-only in this repo (serialize only, no parse counterpart in production code — cJSON's own parser is only used by tests, to assert JSON shape without brittle string matching).
+- `libcjson.a`/`cJSON.h` (cJSON, MIT) is vendored for `ipc_dispatcher`'s JSON serialization — no JSON library exists elsewhere in this repo; do not hand-roll one. Source built from a sibling checkout at `/home/aleksa/code/ied_reporter/cJSON` (not committed here, same convention) via CMake with `-DBUILD_SHARED_LIBS=OFF -DENABLE_CJSON_TEST=OFF` (cJSON's own `BUILD_SHARED_AND_STATIC_LIBS` option does **not** suppress the shared build by itself — `BUILD_SHARED_LIBS=OFF` is the flag that actually produces a static-only `libcjson.a`). Serialize-only everywhere except one deliberate exception: `control_dispatcher/`'s
+  `data/control_dispatcher_json_parser.c` is this codebase's first production `cJSON_Parse` call
+  (it must parse untrusted inbound `START_REPORTING`/`STOP_REPORTING` commands off the wire — see
+  its own Architecture bullet above) — every other feature (`ipc_dispatcher`, `scan_dispatcher`)
+  remains push-only/serialize-only, and cJSON's own parser is otherwise only used by tests, to
+  assert JSON shape without brittle string matching.
 - `build_out` at repo root is currently a stray compiled binary from a manual verification build, not an empty directory — this line is inaccurate until cleaned up or the doc is corrected; don't rely on it being a directory.
 - **Include convention**: one project-wide include root, `-Isrc`, for all our own code — every intra-project `#include` is fully qualified from `src/` (e.g. `#include "features/ied_model/service/ied_model_api.h"`), never a bare filename or `../` relative path. Vendored third-party headers stay bare filenames against `-idirafter third_party/include` (see above). `.vscode/c_cpp_properties.json`/`tasks.json` are kept in sync with this — update both if the include strategy ever changes.
 
@@ -373,6 +447,20 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   proving the lifecycle without needing any real reachable network; a real device actually being
   found and streamed is `integration_tests/scan_dispatcher/`'s and
   `integration_tests/scan_orchestration/`'s job instead.
+  `tests/device_manager/` covers the port allocator (alloc/free/reuse/exhaustion on a tiny
+  range, hermetic) and the two-phase-locked registry (reserve/finalize/rollback/removeIfRunning/
+  host-dedupe transitions, driven directly against the registry's own public API with a fake,
+  never-dereferenced `OrchestrationHandle` pointer — the registry only stores/hands back the
+  pointer, never touches it) plus argument-validation wiring for the public API — never a real
+  `Orchestration_run*` call, that's `integration_tests/device_manager/`'s job.
+  `tests/control_dispatcher/` covers the duplicated ring-buffer wiring the same way
+  `tests/ipc_dispatcher/`/`tests/scan_dispatcher/` cover their own, plus the request queue
+  (push/pop/full/empty/fifo-order), the JSON writer/parser (envelope shape, malformed/missing/
+  wrong-typed field cases — the parser is this codebase's first production `cJSON_Parse` call,
+  see `control_dispatcher/`'s own Architecture bullet below), dispatch/error-mapping (driven
+  against a real `DeviceManagerHandle` in deliberately-failing, no-network cases only), and a
+  real bind/start/stop lifecycle for the API layer — never a real websocket frame sent, that's
+  `integration_tests/control_dispatcher/`'s job.
 - `integration_tests/<feature>/` — E2E tests of a real feature's public API against a
   real, self-authored fixture file (e.g. `integration_tests/ied_model/fixtures/breaker1.cid`
   + `e2e_test_ied_model.c`), also Unity-based (`-lunity` against the vendored
@@ -408,13 +496,20 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   network scanning into a continuously-running background process with its own streamed-out
   websocket, managed by start/stop entry points ahead of the real external API layer that will
   eventually drive them) — see its own bullet below.
-  `src/orchestration/` and `src/scan_orchestration/` are both separate, top-level siblings of
-  `src/features/` (not themselves in this feature list) that each sequence a pipeline together —
-  see their own bullets below. `ipc_dispatcher`'s lifecycle is owned entirely by orchestration
-  (not by `src/main.c` directly) — `main.c` only ever configures it via
-  `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config; `scan_dispatcher`'s
-  lifecycle is likewise owned entirely by `scan_orchestration` (reference-counted by active-scan
-  count, not by `src/main.c` directly either) — see `scan_orchestration/`'s own bullet below.
+  `control_dispatcher/` is a ninth feature, also added later at explicit user request (turning
+  reporting itself into a multi-device, callable-action service — "start reporting on device X",
+  "stop reporting on device Y" — instead of one fixed device per process run) — see its own
+  bullet below.
+  `src/orchestration/`, `src/scan_orchestration/`, and `src/device_manager/` are three separate,
+  top-level siblings of `src/features/` (not themselves in this feature list) that each sequence
+  a pipeline together — see their own bullets below. `ipc_dispatcher`'s lifecycle is owned
+  entirely by orchestration (not by `src/main.c` directly) — `main.c` only ever configures it via
+  `OrchestrationConfig.ipcDispatcherConfig`, same as every other feature's config;
+  `scan_dispatcher`'s lifecycle is likewise owned entirely by `scan_orchestration` (reference-
+  counted by active-scan count); `control_dispatcher`'s lifecycle is owned by `main.c` directly
+  (unlike the other two dispatchers) since it's a single, shared, always-on control channel, not
+  something any per-pipeline layer starts/stops on the caller's behalf — see `device_manager/`'s
+  and `control_dispatcher/`'s own bullets below.
 - `scl_bootstrap/` (implemented) — one-shot, synchronous bootstrap/probe utility: given a
   caller-supplied list of candidate host addresses, TCP-probes each for MMS on a given port,
   and for each one found, browses its file directory and fetches one SCL file (`.icd`/`.cid`/
@@ -818,6 +913,138 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `integration_tests/scan_orchestration/` — no `sudo` needed. Sweeps against `lo` are expected
   to fail (see that test's own Commands bullet) — this test proves sequencing/refcounting/
   threading, not sweep success.
+- `src/device_manager/` (implemented) — a top-level sibling of `src/features/`/
+  `src/orchestration/`/`src/scan_orchestration/` (not itself a "feature" in the Expected-features
+  sense), added at explicit user request to support reporting on **multiple IEDs at once**: runs
+  SEVERAL `orchestration` pipelines concurrently, one per physical IED, each auto-assigned its
+  own `ipc_dispatcher` websocket port, addressable by a server-generated `deviceId`. Confirmed via
+  codebase research before building this: the feature layer was ALREADY multi-instance-safe (no
+  global/static state anywhere in `ipc_dispatcher`/`mms_report_client`/`goose_subscriber`/
+  `orchestration`/`ied_model`/`scl_bootstrap` blocks running several concurrent
+  `OrchestrationHandle`s in one process — every bit of state lives in a per-call handle struct;
+  `GooseReceiver` opens its own independent raw socket per instance, so multiple on the same
+  interface for different devices is fine, standard Linux behavior). What was actually missing,
+  and what this layer plus `control_dispatcher/` (below) provide: a registry that can run several
+  `OrchestrationHandle`s at once, and a control-plane transport to actually call start/stop from
+  outside the process. A synchronous library, no thread of its own (same as
+  `ScanOrchestration_startScan`/`_stopScan`) — `DeviceManager_startReporting`/`_stopReporting`
+  each block the calling thread for as long as the underlying `Orchestration_run*`/`_stop` call
+  takes, but never serialize behind a DIFFERENT device's own slow call. Public boundary:
+  `src/device_manager/service/device_manager_api.h` —
+  `DeviceManager_startReporting(handle, host, mmsPort, iedName, interfaceId, sclFilePath,
+  acseAuthPassword, accessMode, outDeviceId, outWsPort, outDetail)` /
+  `DeviceManager_stopReporting(handle, deviceId, outDetail)`. `iedName` is mandatory (validated,
+  fails fast) whenever `sclFilePath` is given — a stricter, explicit contract this feature adds
+  on top of `Orchestration_runFromLocalFile`'s own auto-detect, per the original request; optional/
+  auto-detectable otherwise, matching `Orchestration_run`'s existing semantics.
+  **`domain/device_manager_bootstrap_policy.c`** extracts `main.c`'s own original inline
+  sequencing (`if sclFilePath: _runFromLocalFile; else: _run, then retry via
+  _runFromOnlineDiscovery exactly once on SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND`) into one
+  reusable function, so both `main.c`'s boot-time device and `control_dispatcher`'s worker thread
+  share exactly one copy — this is also the answer to "if no file is given, discover the
+  structure": that's `scl_bootstrap`/`ied_model_online_loader`'s existing job (see their own
+  bullets), **not** `ied_discovery`'s (which only finds an unknown host IP on the LAN — a
+  separate, already-solved problem via `scan_orchestration`).
+  **`data/device_manager_port_allocator.c`**: a simple `[rangeStart, rangeEnd]` range (default
+  `9000`-`9999`) with a free-list populated on release (reuse-after-stop preferred over growing
+  the never-yet-issued counter, keeps the allocated range compact) — explicit bookkeeping, no
+  bind-and-retry probing.
+  **`data/device_manager_registry.c`** is the two-phase-locked core, a direct structural mirror of
+  `scan_orchestration_registry.c` (short-lock reserve/remove) with one extra phase START needs
+  that STOP/scan_orchestration's own registry doesn't: the slow step (`Orchestration_run*`) must
+  happen *after* the deviceId+port are reserved (so two concurrent starts never race for the same
+  port or duplicate a host) and *before* the reservation is finalized or rolled back — three
+  phases total: `_reserve` (short lock: host-dedupe check, deviceId+port allocation, `running=false`
+  placeholder insert) → `Orchestration_create`/`DeviceManagerBootstrapPolicy_run` (**no lock
+  held** — the slow part, real network I/O, seconds-scale) → `_finalize`/`_rollback` (short lock).
+  Stop mirrors `scan_orchestration`'s own two phases exactly: `_removeIfRunning` (short lock,
+  atomic find-and-remove so a concurrent duplicate stop can never double-tear-down; returns
+  `DEVICE_MANAGER_ERR_START_IN_PROGRESS` if the entry exists but is still mid-start on another
+  thread — no cancellation hook exists, same accepted limitation `ScanOrchestrationWorker_stop`
+  already documents for its own in-flight sweep) → `Orchestration_stop`/`_destroy` (**no lock
+  held**) → `_freePort` (short lock).
+  **`acseAuthPassword` is a real, easy-to-miss use-after-free risk, handled explicitly**:
+  `OrchestrationConfig` documents its own `acseAuthPassword` fields as "stays borrowed... caller
+  must keep it alive for the `OrchestrationHandle`'s whole lifetime" — true for `main.c`'s own
+  argv (alive for the whole process), but NOT true once a value arrives via a parsed
+  control-plane message, whose source buffer is freed the moment that one request finishes
+  processing. `DeviceManagerRegistry_reserve` therefore `strdup`s it immediately into the
+  registry entry and hands back a BORROWED pointer to its own copy for the caller to wire
+  directly into `OrchestrationConfig` — the copy is freed only after `Orchestration_destroy` has
+  actually run (rollback or stop), never before.
+  **Host-duplicate-start policy** (default, not dictated by the original ask, trivially relaxed):
+  a second `StartReporting` for the same `(host, mmsPort)` while one is already running or
+  mid-start is rejected with `DEVICE_MANAGER_ERR_HOST_ALREADY_RUNNING`, rather than silently
+  doubling MMS/GOOSE load on the same physical device for no benefit.
+  Proven end-to-end (two real `ied_simulator` instances at two `mmsPort`s, two concurrent
+  `DeviceManager_startReporting` calls from two threads, a coarse non-flaky wall-clock bound
+  proving they didn't fully serialize, distinct deviceIds/ports each streaming real GOOSE JSON,
+  stop-one-leaves-other-running, stop-second-frees-port-for-reuse) in
+  `integration_tests/device_manager/` — needs `sudo` (GOOSE, inherited transitively).
+- `control_dispatcher/` (implemented) — a ninth feature, the first **bidirectional** websocket
+  surface in this codebase: unlike `ipc_dispatcher`/`scan_dispatcher` (push-only, confirmed via
+  grep — no `LWS_CALLBACK_RECEIVE` anywhere in either), this one RECEIVES JSON commands
+  (`START_REPORTING`/`STOP_REPORTING`) over its one well-known websocket port (default **8767** —
+  next after `ipc_dispatcher`'s 8765 and `scan_dispatcher`'s 8766; a single shared control
+  channel, not per-device — only the per-device report websockets, from `ipc_dispatcher`, are
+  per-device) and pushes back JSON acks/errors, relaying them to `device_manager`. Public
+  boundary: `src/features/control_dispatcher/service/control_dispatcher_api.h` —
+  `ControlDispatcher_create(config, deviceManager, outError)` (deviceManager borrowed — caller,
+  `main.c`, owns its lifetime) / `_start` / `_stop` / `_destroy`, same create/start/stop/destroy
+  contract as `ipc_dispatcher`/`scan_dispatcher`.
+  **This is the first `cJSON_Parse` call in this codebase's production code** —
+  `data/control_dispatcher_json_parser.c` — directly correcting the cJSON vendoring bullet's
+  former "push-only... no parse counterpart in production code" claim (see that bullet, now
+  updated). Every field is defensively type/`NULL`-checked before use, since this is untrusted
+  network input, unlike every other cJSON use in this repo (which only ever serializes trusted,
+  internally-generated data).
+  **Threading** (three threads total, one genuinely new in kind — the first callback in this
+  codebase whose job is anything besides draining a broadcast ring): (1) the lws service thread
+  (`data/control_dispatcher_ws_server.c`, adapted from `ipc_dispatcher`/`scan_dispatcher`'s own)
+  handles `LWS_CALLBACK_RECEIVE` by accumulating fragments into a bounded (8KB) per-session
+  buffer; on the final fragment, parses via `control_dispatcher_json_parser.h` — a parse/
+  validation failure OR a full request queue is handled ENTIRELY on this thread (builds the error
+  JSON directly, pushes it straight onto the ring buffer, triggers writable) and never touches
+  the worker; a successfully parsed+queued request instead calls a generic
+  `ControlDispatcherRequestQueuedCallback` (deliberately a function pointer, not a direct
+  dependency on the worker's own type — `control_dispatcher_ws_server.h` never includes
+  `control_dispatcher_worker.h`; the worker is the one thing depending on the ws-server, for
+  `_wake()`, not the other way around, resolving what would otherwise be a circular reference).
+  (2) The dedicated worker thread (`data/control_dispatcher_worker.c`, `Semaphore_create(0)` as a
+  wake signal — the exact idiom `mms_report_client_connection.c`'s own supervisor thread already
+  uses) pops the request queue and runs the one genuinely slow call
+  (`DeviceManager_startReporting`/`_stopReporting`) off the lws thread entirely, then pushes the
+  JSON result onto the ring buffer and calls `ControlDispatcherWsServer_wake` (the one
+  libwebsockets call a producer thread may make directly, same rule `ipc_dispatcher`/
+  `scan_dispatcher` already document). (3) the lws thread already counted in (1).
+  **Request queue** (`data/control_dispatcher_request_queue.c`): bounded FIFO of `ControlRequest*`,
+  its own `Semaphore(1)`-as-mutex, deliberately separate from the ring buffer's own lock (different
+  producer/consumer thread pairs — queue is lws→worker, ring buffer is worker→lws). A full queue
+  is `SERVER_BUSY`, built and returned directly from the lws thread — never blocks it.
+  **JSON envelope** (stable contract): inbound
+  `{requestId, action: "START_REPORTING"|"STOP_REPORTING", params: {...}}` (start params: `host`
+  required non-empty, `mmsPort` optional default 102, `iedName` optional unless `sclFilePath` is
+  given (then mandatory), `interfaceId` required non-empty (no `"eth0"` default — that only ever
+  matched developer machines), `sclFilePath`/`acseAuthPassword` optional, `accessMode` optional
+  one of `"REPORT_ONLY"`/`"READ_ONLY"`/`"READ_AND_WRITE"`, default `"REPORT_ONLY"`; stop params:
+  `deviceId` required non-negative integer); outbound `{schemaVersion, requestId, action, success,
+  result, error}` — `error: {code, message, stage?, detail?}`, `code` a stable string mirroring
+  `DeviceManagerError` (`INVALID_ARGUMENT`, `HOST_ALREADY_RUNNING`, `ORCHESTRATION_FAILED`,
+  `DEVICE_NOT_FOUND`, `START_IN_PROGRESS`, `PORT_EXHAUSTED`) plus parse-side codes
+  (`MALFORMED_REQUEST`, `UNKNOWN_ACTION`, `SERVER_BUSY`); `stage`/`detail` populated only for
+  `ORCHESTRATION_FAILED`, via the new public `OrchestrationUtils_stageToString`/
+  `_candidateStatusToString` (extracted from `main.c`'s own original private helpers so both
+  `main.c` and this feature share one copy instead of duplicating the string tables).
+  **Fan-out is broadcast to every connected control client** (identical mechanism to
+  `ipc_dispatcher`'s own broadcast, filterable client-side by `requestId`) — the simplest
+  possible v1 design, reusing the proven ring buffer verbatim; flagged as a real tradeoff if the
+  "loopback-only, one real client (the future external API layer)" trust assumption ever changes.
+  Proven end-to-end (real bind, a hand-rolled RFC6455 client that both SENDS masked command
+  frames — the first E2E test in this repo to send a client→server frame — and receives
+  responses; malformed-JSON/unknown-action cases need no privilege/simulator at all; a real
+  `START_REPORTING`/`STOP_REPORTING` round trip against a real `ied_simulator` instance proves
+  the whole chain end to end) in `integration_tests/control_dispatcher/` — needs `sudo` only for
+  that last real-device case.
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,

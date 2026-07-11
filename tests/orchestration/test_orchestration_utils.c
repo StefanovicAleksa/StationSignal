@@ -51,6 +51,43 @@ test_errorToString_returnsNonNull_forUnknownValue(void) {
     TEST_ASSERT_NOT_NULL(OrchestrationUtils_errorToString((OrchestrationError) 9999));
 }
 
+/* ---- OrchestrationUtils_stageToString ---- */
+
+void
+test_stageToString_returnsNonNull_forEveryKnownStage(void) {
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_NONE));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_IPC_DISPATCHER_START));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_BOOTSTRAP));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_STAGING));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_IED_NAME_RESOLUTION));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_MODEL_LOAD));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_ONLINE_DISCOVERY));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_REPORT_CLIENT_START));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString(ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START));
+}
+
+void
+test_stageToString_returnsNonNull_forUnknownValue(void) {
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_stageToString((OrchestrationStage) 9999));
+}
+
+/* ---- OrchestrationUtils_candidateStatusToString ---- */
+
+void
+test_candidateStatusToString_returnsNonNull_forEveryKnownStatus(void) {
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_NO_MMS_SERVER));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_MMS_CONNECT_FAILED));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_ACCESS_DENIED));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_DOWNLOAD_FAILED));
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString(SCL_BOOTSTRAP_CANDIDATE_FILE_RETRIEVED));
+}
+
+void
+test_candidateStatusToString_returnsNonNull_forUnknownValue(void) {
+    TEST_ASSERT_NOT_NULL(OrchestrationUtils_candidateStatusToString((SclBootstrapCandidateStatus) 9999));
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -60,6 +97,12 @@ main(void) {
 
     RUN_TEST(test_errorToString_returnsNonNull_forEveryKnownError);
     RUN_TEST(test_errorToString_returnsNonNull_forUnknownValue);
+
+    RUN_TEST(test_stageToString_returnsNonNull_forEveryKnownStage);
+    RUN_TEST(test_stageToString_returnsNonNull_forUnknownValue);
+
+    RUN_TEST(test_candidateStatusToString_returnsNonNull_forEveryKnownStatus);
+    RUN_TEST(test_candidateStatusToString_returnsNonNull_forUnknownValue);
 
     return UNITY_END();
 }

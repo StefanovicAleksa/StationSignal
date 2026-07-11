@@ -11,6 +11,8 @@ OUT="${1:-/tmp/ied_reporter_daemon}"
 gcc -g -Wall -Isrc -idirafter third_party/include \
     src/main.c src/main_discovery_prompt.c \
     src/orchestration/*/*.c \
+    src/scan_orchestration/*/*.c \
+    src/device_manager/*/*.c \
     src/features/*/*/*.c \
     -o "$OUT" \
     -Lthird_party/lib -liec61850 -lhal -lmxml -lwebsockets -lcjson -lpthread
