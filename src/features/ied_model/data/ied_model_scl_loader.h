@@ -13,11 +13,22 @@
  * addressing (VLAN/MAC/APPID) is attached only if a matching <Communication>
  * entry exists; its absence (typical for plain .icd files) is not an error.
  *
+ * *outDaSemantics is set to NULL immediately, and (on success) reassigned to a
+ * newly-created LinkedList of heap-boxed IedModelDaSemanticEntry* right before
+ * returning - one entry per DataAttribute whose real SCL bType was genuinely
+ * "Dbpos" (captured before IedModelUtils_mapBType collapses it into the
+ * generic IEC61850_CODEDENUM type alongside "Tcmd" - see
+ * IedModelDaSemantic's own doc comment). Caller owns the list and its
+ * elements (LinkedList_destroyDeep(list, free)) - ied_model_api.c's
+ * IedModel_loadFromFile copies each entry by value into the handle's own flat
+ * array and then destroys this list.
+ *
  * Returns NULL and sets *outError on failure. Caller owns the returned IedModel
  * (IedModel_destroy when done).
  */
 IedModel*
-IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError);
+IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
+        LinkedList* outDaSemantics);
 
 /*
  * Lists every direct-child <IED>'s name attribute at the SCL's top level

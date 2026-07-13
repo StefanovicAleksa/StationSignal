@@ -12,6 +12,8 @@ typedef struct {
     mxml_node_t* sclRoot;
     mxml_node_t* templates; /* may be NULL - every lookup against it must handle that */
     const char* iedName;
+    LinkedList daSemantics; /* model-scoped (unlike enumAttrs, which is LN-scoped and
+                                created/destroyed per-LN) - see buildDataAttribute */
 } LoaderContext;
 
 /*
@@ -76,11 +78,11 @@ resolveFc(const char* fcStr) {
 /* ---- recursive DataObject/DataAttribute construction from DataTypeTemplates ---- */
 
 static void buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_node_t* templates,
-        LinkedList enumAttrs);
+        LinkedList enumAttrs, LinkedList daSemantics);
 
 static void
 buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc, mxml_node_t* templates,
-        LinkedList enumAttrs) {
+        LinkedList enumAttrs, LinkedList daSemantics) {
     const char* name = IedModelUtils_attrRequired(node, "name");
     const char* bType = IedModelUtils_attrRequired(node, "bType");
     if (!name || !bType) {
@@ -99,6 +101,20 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
     }
 
     DataAttribute* da = DataAttribute_create(name, parent, type, fc, trgOps, 0, 0);
+
+    if (strcmp(bType, "Dbpos") == 0 && daSemantics) {
+        /* Captured from the raw SCL bType string directly, BEFORE
+         * IedModelUtils_mapBType collapses it into the generic
+         * IEC61850_CODEDENUM type alongside "Tcmd" - see
+         * IedModelDaSemantic's own doc comment for why this can't be
+         * recovered later from `type` alone. */
+        IedModelDaSemanticEntry* entry = malloc(sizeof(IedModelDaSemanticEntry));
+        if (entry) {
+            entry->da = da;
+            entry->semantic = IED_MODEL_DA_SEMANTIC_DBPOS;
+            LinkedList_add(daSemantics, entry);
+        }
+    }
 
     if (type == IEC61850_ENUMERATED && enumAttrs) {
         /* type= here is the EnumType/@id (schema overloads the same "type"
@@ -126,7 +142,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
         }
         for (mxml_node_t* bda = firstElementChild(daType); bda; bda = nextElementSibling(bda)) {
             if (isElement(bda, "BDA")) {
-                buildDataAttribute(bda, (ModelNode*) da, fcStr, templates, enumAttrs);
+                buildDataAttribute(bda, (ModelNode*) da, fcStr, templates, enumAttrs, daSemantics);
             }
         }
     }
@@ -134,7 +150,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
 
 static void
 buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_node_t* templates,
-        LinkedList enumAttrs) {
+        LinkedList enumAttrs, LinkedList daSemantics) {
     DataObject* dobj = DataObject_create(name, parent, 0);
 
     mxml_node_t* doType = findTemplateById(templates, "DOType", doTypeId);
@@ -146,7 +162,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
 
     for (mxml_node_t* child = firstElementChild(doType); child; child = nextElementSibling(child)) {
         if (isElement(child, "DA")) {
-            buildDataAttribute(child, (ModelNode*) dobj, NULL, templates, enumAttrs);
+            buildDataAttribute(child, (ModelNode*) dobj, NULL, templates, enumAttrs, daSemantics);
         } else if (isElement(child, "SDO")) {
             const char* sdoName = IedModelUtils_attrRequired(child, "name");
             const char* sdoTypeId = IedModelUtils_attrRequired(child, "type");
@@ -154,7 +170,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
                 fprintf(stderr, "[ied_model] WARN: skipping malformed SDO under DOType '%s'\n", doTypeId);
                 continue;
             }
-            buildDataObject(sdoName, sdoTypeId, (ModelNode*) dobj, templates, enumAttrs);
+            buildDataObject(sdoName, sdoTypeId, (ModelNode*) dobj, templates, enumAttrs, daSemantics);
         }
     }
 }
@@ -714,7 +730,7 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
                 fprintf(stderr, "[ied_model] WARN: skipping malformed DO under LNodeType '%s'\n", lnType);
                 continue;
             }
-            buildDataObject(doName, doTypeId, (ModelNode*) ln, ctx->templates, enumAttrs);
+            buildDataObject(doName, doTypeId, (ModelNode*) ln, ctx->templates, enumAttrs, ctx->daSemantics);
         }
     }
 
@@ -913,7 +929,10 @@ IedModelSclLoader_listIedNames(const char* path, IedModelLoadError* outError) {
 }
 
 IedModel*
-IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError) {
+IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
+        LinkedList* outDaSemantics) {
+    if (outDaSemantics) *outDaSemantics = NULL;
+
     mxml_node_t* tree;
     mxml_node_t* sclRoot = loadSclRoot(path, &tree, outError);
     if (!sclRoot) return NULL;
@@ -936,7 +955,13 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
         return NULL;
     }
 
-    LoaderContext ctx = { .model = model, .sclRoot = sclRoot, .templates = templates, .iedName = iedName };
+    /* Model-scoped (unlike enumAttrs, which is LN-scoped, created/destroyed
+     * per-LN inside buildLogicalNodeStructure) - lives for this whole load,
+     * handed back to the caller at the end. */
+    LinkedList daSemantics = LinkedList_create();
+
+    LoaderContext ctx = { .model = model, .sclRoot = sclRoot, .templates = templates, .iedName = iedName,
+        .daSemantics = daSemantics };
 
     for (mxml_node_t* apNode = firstElementChild(iedNode); apNode; apNode = nextElementSibling(apNode)) {
         if (!isElement(apNode, "AccessPoint")) continue;
@@ -958,5 +983,7 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
     }
 
     mxmlDelete(tree);
+    if (outDaSemantics) *outDaSemantics = daSemantics;
+    else LinkedList_destroyDeep(daSemantics, free); /* caller doesn't want it - don't leak */
     return model;
 }

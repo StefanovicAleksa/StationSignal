@@ -32,15 +32,15 @@ buildScalarValueJson(const IpcScalarValue* value) {
 }
 
 static cJSON*
-buildQualityJson(const IpcDataPoint* point) {
-    if (!point->hasQuality) return cJSON_CreateNull();
+buildQualityValueJson(bool hasQuality, const IpcQuality* quality) {
+    if (!hasQuality) return cJSON_CreateNull();
 
-    cJSON* quality = cJSON_CreateObject();
-    if (!quality) return NULL;
+    cJSON* obj = cJSON_CreateObject();
+    if (!obj) return NULL;
 
-    cJSON_AddStringToObject(quality, "validity", validityString(point->quality.validity));
-    cJSON_AddNumberToObject(quality, "detailFlags", (double) point->quality.detailFlags);
-    return quality;
+    cJSON_AddStringToObject(obj, "validity", validityString(quality->validity));
+    cJSON_AddNumberToObject(obj, "detailFlags", (double) quality->detailFlags);
+    return obj;
 }
 
 static cJSON*
@@ -54,8 +54,29 @@ buildDataPointJson(const IpcDataPoint* point) {
     cJSON* value = buildScalarValueJson(&point->value);
     cJSON_AddItemToObject(obj, "value", value ? value : cJSON_CreateNull());
 
-    cJSON* quality = buildQualityJson(point);
+    cJSON* quality = buildQualityValueJson(point->hasQuality, &point->quality);
     cJSON_AddItemToObject(obj, "quality", quality ? quality : cJSON_CreateNull());
+
+    /* Always present (null when absent) - matches the "quality" field's own
+     * convention above, per this contract's own design decision (see
+     * CLAUDE.md's ipc_dispatcher bullet). Absent only in the narrow,
+     * pre-existing structural case documented on IpcDataPoint.hasPreviousValue
+     * - not a routine occurrence. */
+    if (point->hasPreviousValue) {
+        cJSON* previousValue = buildScalarValueJson(&point->previousValue);
+        cJSON_AddItemToObject(obj, "previousValue", previousValue ? previousValue : cJSON_CreateNull());
+    } else {
+        cJSON_AddNullToObject(obj, "previousValue");
+    }
+
+    cJSON* previousQuality = buildQualityValueJson(point->hasPreviousQuality, &point->previousQuality);
+    cJSON_AddItemToObject(obj, "previousQuality", previousQuality ? previousQuality : cJSON_CreateNull());
+
+    if (point->hasLabel) cJSON_AddStringToObject(obj, "label", point->label);
+    else cJSON_AddNullToObject(obj, "label");
+
+    if (point->hasPreviousLabel) cJSON_AddStringToObject(obj, "previousLabel", point->previousLabel);
+    else cJSON_AddNullToObject(obj, "previousLabel");
 
     return obj;
 }

@@ -4,6 +4,7 @@
 #include "mms_value.h"
 #include "iec61850_common.h"
 #include "features/ipc_dispatcher/domain/ipc_dispatcher_types.h"
+#include "features/ied_model/service/ied_model_api.h"
 
 /*
  * MmsValue -> IpcScalarValue / IpcQuality decode. Lives in utils/ (not
@@ -50,6 +51,20 @@
  *                                       guess IEC 61850 semantics" rule - the
  *                                       raw bit pattern is always correct
  *                                       regardless of which CODEDENUM it is.
+ *                                       KNOWN CAVEAT for genuine Dbpos values
+ *                                       specifically: MmsValue_getBitStringAsInteger's
+ *                                       bit order does NOT match
+ *                                       Dbpos_fromMmsValue's own decode
+ *                                       (confirmed empirically - ordinals
+ *                                       DBPOS_OFF/DBPOS_ON come out swapped
+ *                                       between the two). Callers that also
+ *                                       call _decodeDbposLabel below and get
+ *                                       true back MUST override this raw
+ *                                       value with (uint64_t)
+ *                                       Dbpos_fromMmsValue(value) instead, so
+ *                                       the numeric value and the label never
+ *                                       contradict each other - see the mms/
+ *                                       goose adapters for the exact pattern.
  *   everything else (MMS_STRUCTURE/MMS_ARRAY/MMS_OCTET_STRING/
  *   MMS_GENERALIZED_TIME/MMS_BINARY_TIME/MMS_BCD/MMS_OBJ_ID/
  *   MMS_DATA_ACCESS_ERROR)          -> IPC_SCALAR_RAW, value.str = owned
@@ -84,5 +99,26 @@ IpcDispatcherValueCodec_freeScalar(IpcScalarValue* scalar);
  */
 bool
 IpcDispatcherValueCodec_decodeQuality(const MmsValue* value, IpcQuality* outQuality);
+
+/*
+ * Decodes a genuine Dbpos-typed value into its IEC 61850-7-3 label
+ * (0=intermediate-state, 1=off, 2=on, 3=bad-state) via libiec61850's
+ * Dbpos_fromMmsValue (iec61850_common.h). *outLabel is set to a pointer into
+ * static string-literal storage (never owned, never freed by the caller).
+ *
+ * Returns false (outLabel untouched) unless semantic ==
+ * IED_MODEL_DA_SEMANTIC_DBPOS AND value is non-NULL AND
+ * MmsValue_getType(value) == MMS_BIT_STRING - this is the only place in this
+ * codebase that decodes a CODEDENUM bitstring into a named label, and only
+ * because the caller has already verified (via ied_model's SCL-derived
+ * semantic hint, threaded through MmsReportEntry.semantic/
+ * GooseSubscriberEntry.semantic) that this specific bitstring genuinely IS a
+ * Dbpos, not a guess from the wire type alone (Tcmd shares the same wire
+ * representation but a different meaning - see IedModelUtils_mapBType's own
+ * doc comment). Does NOT replace the existing raw IPC_SCALAR_UINT64 value
+ * produced by _convert - both are always emitted side by side.
+ */
+bool
+IpcDispatcherValueCodec_decodeDbposLabel(IedModelDaSemantic semantic, const MmsValue* value, const char** outLabel);
 
 #endif /* IPC_DISPATCHER_VALUE_CODEC_H_ */

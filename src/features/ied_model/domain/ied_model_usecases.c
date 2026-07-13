@@ -355,6 +355,188 @@ IedModelUseCases_getDataSetMemberLeafReferences(IedModelHandle handle, const cha
     return result;
 }
 
+/* ---- Dbpos semantic lookup (see IedModelDaSemantic's own doc comment) ---- */
+
+static IedModelDaSemantic
+lookupDaSemantic(IedModelHandle handle, DataAttribute* da) {
+    if (!da) return IED_MODEL_DA_SEMANTIC_NONE;
+    for (int i = 0; i < handle->daSemanticCount; i++) {
+        if (handle->daSemantics[i].da == da) return handle->daSemantics[i].semantic;
+    }
+    return IED_MODEL_DA_SEMANTIC_NONE;
+}
+
+/*
+ * Resolves an already leaf-level FCDA's daToken down to its real terminal
+ * DataAttribute* node. daToken is the raw SCL @daName attribute value as
+ * embedded (unmodified) into the "$"-joined wire reference by
+ * IedModelUtils_buildFcdaVariableName - per IEC 61850-6, this can itself be
+ * a "."-separated path into nested BDA/SDO levels (e.g. "cVal.mag.f"), NOT
+ * "$"-separated (that convention is reserved for the top-level
+ * LN$FC$DO$daName segments elsewhere in this codebase - see
+ * collectLeafReferencesByFc's own comment on why decomposed leaves use "$"
+ * per level instead: that walk builds paths from the MODEL TREE structure,
+ * while this one is splitting one ALREADY-GIVEN SCL attribute string). Not
+ * currently exercised by any real fixture in this repo (a flat, undotted
+ * daName is the only case seen so far) but handled correctly regardless,
+ * rather than assuming daToken is always a single segment. Returns NULL on
+ * any resolution failure (unresolved LD/LN/DO/BDA segment, or the resolved
+ * node isn't actually a DataAttribute) - never guesses.
+ */
+static DataAttribute*
+resolveTerminalDataAttribute(IedModel* model, const char* ldName, const char* lnToken, const char* doToken,
+        const char* daToken) {
+    LogicalDevice* ld = IedModel_getDevice(model, ldName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* node = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+    if (!node || !daToken) return NULL;
+
+    char* daCopy = strdup(daToken);
+    if (!daCopy) return NULL;
+
+    char* seg = strtok(daCopy, ".");
+    while (seg && node) {
+        node = ModelNode_getChild(node, seg);
+        seg = strtok(NULL, ".");
+    }
+    free(daCopy);
+
+    if (!node || ModelNode_getType(node) != DataAttributeModelType) return NULL;
+    return (DataAttribute*) node;
+}
+
+/* Semantics-lookup sibling of collectLeafReferencesByFc - identical
+ * traversal (same FC filtering, same CONSTRUCTED-attribute recursion), but
+ * appends this handle's resolved IedModelDaSemantic for each genuinely
+ * terminal leaf instead of building a reference string. Order matches
+ * collectLeafReferencesByFc's own traversal exactly (same walk), so results
+ * stay index-aligned with IedModelUseCases_getDataSetMemberLeafReferences's
+ * own output for the same (datasetReference, memberIndex). */
+static void
+collectLeafSemanticsByFc(IedModelHandle handle, ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) return;
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            IedModelDaSemantic* boxed = malloc(sizeof(IedModelDaSemantic));
+            if (boxed) {
+                *boxed = lookupDaSemantic(handle, (DataAttribute*) node);
+                LinkedList_add(result, boxed);
+            }
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    for (DataSetEntry* entry = DataSet_getFirstEntry(dataSet); entry; entry = DataSetEntry_getNext(entry)) {
+        IedModelDaSemantic semantic = IED_MODEL_DA_SEMANTIC_NONE;
+
+        if (entry->logicalDeviceName && entry->variableName) {
+            char* copy = strdup(entry->variableName);
+            if (copy) {
+                char* lnToken = strtok(copy, "$");
+                char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+                char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+                char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+                if (doToken && daToken) {
+                    DataAttribute* da = resolveTerminalDataAttribute(handle->model, entry->logicalDeviceName,
+                            lnToken, doToken, daToken);
+                    semantic = lookupDaSemantic(handle, da);
+                }
+                free(copy);
+            }
+        }
+
+        IedModelDaSemantic* boxed = malloc(sizeof(IedModelDaSemantic));
+        if (boxed) {
+            *boxed = semantic;
+            LinkedList_add(result, boxed);
+        }
+    }
+    return result;
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
+        int memberIndex) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference || memberIndex < 0) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    DataSetEntry* entry = DataSet_getFirstEntry(dataSet);
+    for (int i = 0; entry && i < memberIndex; i++) entry = DataSetEntry_getNext(entry);
+    if (!entry || !entry->logicalDeviceName || !entry->variableName) return result;
+
+    char* variableNameCopy = strdup(entry->variableName);
+    if (!variableNameCopy) return result;
+
+    char* lnToken = strtok(variableNameCopy, "$");
+    char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+    char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+    char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+    if (!doToken || daToken) {
+        /* Already leaf-level, or an unexpectedly-shaped variableName -
+         * nothing to decompose either way (mirrors
+         * IedModelUseCases_getDataSetMemberLeafReferences's identical check). */
+        free(variableNameCopy);
+        return result;
+    }
+
+    FunctionalConstraint fc = FunctionalConstraint_fromString(fcToken);
+    LogicalDevice* ld = IedModel_getDevice(handle->model, entry->logicalDeviceName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* doNode = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+
+    if (doNode && ModelNode_getType(doNode) == DataObjectModelType) {
+        LinkedList doChildren = ModelNode_getChildren(doNode);
+        if (doChildren) {
+            LinkedList element = LinkedList_getNext(doChildren);
+            while (element) {
+                collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+                element = LinkedList_getNext(element);
+            }
+            LinkedList_destroyStatic(doChildren);
+        }
+    }
+
+    free(variableNameCopy);
+    return result;
+}
+
 /* Walks every direct child (Data Object) of `ln`, collecting "$"-joined leaf
  * references at functional constraint `fc` via collectLeafReferencesByFc -
  * same walk IedModelUseCases_getDataSetMemberLeafReferences uses per-DO, just

@@ -113,7 +113,8 @@ IpcMessage*
 IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sourceReference,
         bool hasBuffered, bool buffered, bool hasTimestamp, uint64_t timestampMs,
         const char* const* pointReferences, const IpcScalarValue* pointValues,
-        const bool* pointHasQuality, const IpcQuality* pointQuality, int pointCount) {
+        const bool* pointHasQuality, const IpcQuality* pointQuality,
+        const IpcDataPointExtras* extras, int pointCount) {
     IpcMessage* message = calloc(1, sizeof(IpcMessage));
     if (!message) return NULL;
 
@@ -137,6 +138,30 @@ IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sour
             message->dataPoints[i].value = cloneScalarValue(&pointValues[i]);
             message->dataPoints[i].hasQuality = pointHasQuality && pointHasQuality[i];
             if (message->dataPoints[i].hasQuality) message->dataPoints[i].quality = pointQuality[i];
+
+            message->dataPoints[i].hasPreviousValue = extras && extras->pointHasPreviousValue
+                    && extras->pointHasPreviousValue[i];
+            if (message->dataPoints[i].hasPreviousValue) {
+                message->dataPoints[i].previousValue = cloneScalarValue(&extras->pointPreviousValue[i]);
+            }
+
+            message->dataPoints[i].hasPreviousQuality = extras && extras->pointHasPreviousQuality
+                    && extras->pointHasPreviousQuality[i];
+            if (message->dataPoints[i].hasPreviousQuality) {
+                message->dataPoints[i].previousQuality = extras->pointPreviousQuality[i];
+            }
+
+            /* label/previousLabel are static string-literal pointers - copied
+             * by pointer, never dupString'd (see IpcDataPoint's own doc
+             * comment). */
+            message->dataPoints[i].hasLabel = extras && extras->pointHasLabel && extras->pointHasLabel[i];
+            if (message->dataPoints[i].hasLabel) message->dataPoints[i].label = extras->pointLabel[i];
+
+            message->dataPoints[i].hasPreviousLabel = extras && extras->pointHasPreviousLabel
+                    && extras->pointHasPreviousLabel[i];
+            if (message->dataPoints[i].hasPreviousLabel) {
+                message->dataPoints[i].previousLabel = extras->pointPreviousLabel[i];
+            }
         }
         message->dataPointCount = pointCount;
     }
@@ -153,6 +178,12 @@ IpcDispatcherUseCases_freeMessage(IpcMessage* message) {
         if (message->dataPoints[i].value.type == IPC_SCALAR_STRING || message->dataPoints[i].value.type == IPC_SCALAR_RAW) {
             free(message->dataPoints[i].value.value.str);
         }
+        if (message->dataPoints[i].hasPreviousValue
+                && (message->dataPoints[i].previousValue.type == IPC_SCALAR_STRING
+                        || message->dataPoints[i].previousValue.type == IPC_SCALAR_RAW)) {
+            free(message->dataPoints[i].previousValue.value.str);
+        }
+        /* label/previousLabel: static string-literal storage, never freed. */
     }
     free(message->dataPoints);
     free(message->sourceReference);

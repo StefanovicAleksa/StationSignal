@@ -36,6 +36,7 @@ freeTargetEntries(GooseSubscriberHandle handle) {
             }
             free(cache->lastForwardedValues);
         }
+        free(cache->leafSemantics);
     }
     free(handle->targetEntries);
     handle->targetEntries = NULL;
@@ -76,16 +77,50 @@ linkedListToStringArray(LinkedList list, int* outCount) {
     return array;
 }
 
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * IedModelDaSemantic* (see IedModel_getDataSetMemberSemantics/
+ * _getDataSetMemberLeafSemantics) - copies each boxed enum BY VALUE into the
+ * array and frees the boxed items. Mirrors mms_report_client_api.c's
+ * identical helper exactly. */
+static IedModelDaSemantic*
+linkedListToSemanticArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    IedModelDaSemantic* array = calloc((size_t) count, sizeof(IedModelDaSemantic));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        IedModelDaSemantic* boxed = (IedModelDaSemantic*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
+
+    *outCount = count;
+    return array;
+}
+
 /*
  * One-time, local resolution of a target's dataset member references (never
  * over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery" rule).
  * GOOSE has no server-supplied reference alternative (unlike MMS's optional
  * DataRef), so this is always attempted, not just a fallback. Also resolves
  * the Gap 4 structure-decomposition metadata (memberLeafReferences/
- * memberLeafCounts) and the value-diff cache (leafSlotOffsets/totalLeafSlots/
- * lastForwardedValues, all-NULL/never-forwarded-yet) at the same time - see
- * GooseSubscriberMemberRefCache's own doc comment. Same slot-offset-
- * accumulation approach as mms_report_client_api.c's buildMemberRefCache.
+ * memberLeafCounts), the value-diff cache (leafSlotOffsets/totalLeafSlots/
+ * lastForwardedValues, all-NULL/never-forwarded-yet), and the Dbpos semantics
+ * table (leafSemantics) at the same time - see GooseSubscriberMemberRefCache's
+ * own doc comment. Same slot-offset-accumulation approach as
+ * mms_report_client_api.c's buildMemberRefCache.
  */
 static void
 resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedModel) {
@@ -97,6 +132,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->leafSlotOffsets = NULL;
     cache->totalLeafSlots = 0;
     cache->lastForwardedValues = NULL;
+    cache->leafSemantics = NULL;
     if (!entry->target->datasetReference) return;
 
     int count = 0;
@@ -104,10 +140,16 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
             IedModel_getDataSetMemberReferences(iedModel, entry->target->datasetReference), &count);
     if (count == 0 || !array) return;
 
+    int rawSemCount = 0;
+    IedModelDaSemantic* rawSemantics = linkedListToSemanticArray(
+            IedModel_getDataSetMemberSemantics(iedModel, entry->target->datasetReference), &rawSemCount);
+
     char*** leafRefsArray = calloc((size_t) count, sizeof(char**));
     int* leafCounts = calloc((size_t) count, sizeof(int));
     int* leafOffsets = calloc((size_t) count, sizeof(int));
     int totalLeafSlots = 0;
+    IedModelDaSemantic** leafSemArray = calloc((size_t) count, sizeof(IedModelDaSemantic*));
+    int* leafSemCounts = calloc((size_t) count, sizeof(int));
 
     if (leafRefsArray && leafCounts && leafOffsets) {
         for (int m = 0; m < count; m++) {
@@ -117,6 +159,14 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
                     &leafCount);
             leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
             leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+            if (leafSemArray && leafSemCounts) {
+                int leafSemCount = 0;
+                leafSemArray[m] = linkedListToSemanticArray(
+                        IedModel_getDataSetMemberLeafSemantics(iedModel, entry->target->datasetReference, m),
+                        &leafSemCount);
+                leafSemCounts[m] = leafSemCount;
+            }
 
             /* Value-diff cache slot(s) for member m: leafCount consecutive
              * slots if decomposed, else exactly 1. */
@@ -136,6 +186,34 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     MmsValue** lastForwardedValues = (leafRefsArray && leafCounts && leafOffsets)
             ? calloc((size_t) totalLeafSlots, sizeof(MmsValue*)) : NULL;
 
+    /* Zero-initialized (IED_MODEL_DA_SEMANTIC_NONE == 0) so any member/leaf
+     * whose semantic couldn't be resolved degrades safely. Not gated on the
+     * same success condition as lastForwardedValues - a NULL leafSemantics
+     * just means no Dbpos labels for this target, not a broken cache. */
+    IedModelDaSemantic* leafSemantics = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(IedModelDaSemantic)) : NULL;
+    if (leafSemantics) {
+        for (int m = 0; m < count; m++) {
+            if (leafCounts[m] > 0) {
+                if (leafSemArray && leafSemArray[m] && leafSemCounts[m] == leafCounts[m]) {
+                    for (int k = 0; k < leafCounts[m]; k++) {
+                        leafSemantics[leafOffsets[m] + k] = leafSemArray[m][k];
+                    }
+                }
+            } else if (rawSemantics && m < rawSemCount) {
+                leafSemantics[leafOffsets[m]] = rawSemantics[m];
+            }
+        }
+    }
+
+    /* Temporaries only used to build the flattened leafSemantics above. */
+    free(rawSemantics);
+    if (leafSemArray) {
+        for (int m = 0; m < count; m++) free(leafSemArray[m]);
+        free(leafSemArray);
+    }
+    free(leafSemCounts);
+
     cache->memberReferences = array;
     cache->memberCount = count;
     cache->memberLeafReferences = leafRefsArray;
@@ -143,6 +221,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->leafSlotOffsets = leafOffsets;
     cache->totalLeafSlots = totalLeafSlots;
     cache->lastForwardedValues = lastForwardedValues;
+    cache->leafSemantics = leafSemantics;
 }
 
 void

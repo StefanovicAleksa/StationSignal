@@ -14,17 +14,49 @@ copyString(const char* s) {
     return copy;
 }
 
+/* Copies daSemanticsList (owned by the caller, freed here) into a flat,
+ * handle-owned array. Degrades to an empty array (never crashes) on
+ * allocation failure - same OOM posture as the rest of this feature. */
+static void
+adoptDaSemantics(IedModelHandle handle, LinkedList daSemanticsList) {
+    handle->daSemantics = NULL;
+    handle->daSemanticCount = 0;
+    if (!daSemanticsList) return;
+
+    int count = LinkedList_size(daSemanticsList);
+    if (count > 0) {
+        IedModelDaSemanticEntry* array = malloc(sizeof(IedModelDaSemanticEntry) * (size_t) count);
+        if (array) {
+            int i = 0;
+            for (LinkedList element = LinkedList_getNext(daSemanticsList); element;
+                    element = LinkedList_getNext(element)) {
+                IedModelDaSemanticEntry* boxed = (IedModelDaSemanticEntry*) LinkedList_getData(element);
+                array[i++] = *boxed;
+            }
+            handle->daSemantics = array;
+            handle->daSemanticCount = i;
+        }
+    }
+
+    LinkedList_destroyDeep(daSemanticsList, free);
+}
+
 IedModelHandle
 IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError) {
     IedModelLoadError localError;
-    IedModel* model = IedModelSclLoader_load(path, iedName, &localError);
+    LinkedList daSemanticsList = NULL;
+    IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList);
 
     if (outError) *outError = localError;
-    if (!model) return NULL;
+    if (!model) {
+        if (daSemanticsList) LinkedList_destroyDeep(daSemanticsList, free);
+        return NULL;
+    }
 
     IedModelHandle handle = malloc(sizeof(struct sIedModelHandle));
     if (!handle) {
         IedModel_destroy(model);
+        if (daSemanticsList) LinkedList_destroyDeep(daSemanticsList, free);
         if (outError) *outError = IED_MODEL_ERR_OUT_OF_MEMORY;
         return NULL;
     }
@@ -32,6 +64,7 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     handle->model = model;
     handle->accessMode = mode;
     handle->iedName = copyString(iedName);
+    adoptDaSemantics(handle, daSemanticsList);
 
     return handle;
 }
@@ -51,6 +84,11 @@ IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode)
     handle->model = model;
     handle->accessMode = mode;
     handle->iedName = copyString(iedName ? iedName : "");
+    /* No SCL bType is ever available over the wire for a dynamically-built
+     * (online-discovered) model - an already-accepted limitation, not a
+     * regression. Every accessor degrades to IED_MODEL_DA_SEMANTIC_NONE. */
+    handle->daSemantics = NULL;
+    handle->daSemanticCount = 0;
 
     return handle;
 }
@@ -60,6 +98,7 @@ IedModel_release(IedModelHandle handle) {
     if (!handle) return;
     IedModel_destroy(handle->model);
     free(handle->iedName);
+    free(handle->daSemantics);
     free(handle);
 }
 
@@ -81,6 +120,16 @@ IedModel_getDataSetMemberReferences(IedModelHandle handle, const char* datasetRe
 LinkedList
 IedModel_getDataSetMemberLeafReferences(IedModelHandle handle, const char* datasetReference, int memberIndex) {
     return IedModelUseCases_getDataSetMemberLeafReferences(handle, datasetReference, memberIndex);
+}
+
+LinkedList
+IedModel_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference) {
+    return IedModelUseCases_getDataSetMemberSemantics(handle, datasetReference);
+}
+
+LinkedList
+IedModel_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference, int memberIndex) {
+    return IedModelUseCases_getDataSetMemberLeafSemantics(handle, datasetReference, memberIndex);
 }
 
 LinkedList

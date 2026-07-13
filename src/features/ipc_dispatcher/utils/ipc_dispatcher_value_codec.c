@@ -82,6 +82,20 @@ IpcDispatcherValueCodec_freeScalar(IpcScalarValue* scalar) {
 }
 
 bool
+IpcDispatcherValueCodec_decodeDbposLabel(IedModelDaSemantic semantic, const MmsValue* value, const char** outLabel) {
+    if (semantic != IED_MODEL_DA_SEMANTIC_DBPOS) return false;
+    if (!value || MmsValue_getType(value) != MMS_BIT_STRING) return false;
+
+    switch (Dbpos_fromMmsValue(value)) {
+        case DBPOS_INTERMEDIATE_STATE: *outLabel = "intermediate-state"; return true;
+        case DBPOS_OFF: *outLabel = "off"; return true;
+        case DBPOS_ON: *outLabel = "on"; return true;
+        case DBPOS_BAD_STATE: *outLabel = "bad-state"; return true;
+        default: return false;
+    }
+}
+
+bool
 IpcDispatcherValueCodec_decodeQuality(const MmsValue* value, IpcQuality* outQuality) {
     if (!outQuality) return false;
     memset(outQuality, 0, sizeof(*outQuality));

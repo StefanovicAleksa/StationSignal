@@ -12,6 +12,7 @@ freeEntriesUpTo(GooseSubscriberEntry* entries, int builtCount) {
     for (int i = 0; i < builtCount; i++) {
         if (entries[i].value) MmsValue_delete(entries[i].value);
         free(entries[i].reference);
+        if (entries[i].previousValue) MmsValue_delete(entries[i].previousValue);
     }
     free(entries);
 }
@@ -52,19 +53,39 @@ GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* membe
  * value-diff cache index for this exact wire position, or -1 if no cache
  * slot is available for it (no memberRefCache at all, or this position isn't
  * in it) - in that case there's nothing to diff against, so it always
- * survives, matching the memberRefCache == NULL passthrough behavior.
+ * survives (and outPreviousValue is left NULL), matching the memberRefCache
+ * == NULL passthrough behavior.
+ *
+ * *outPreviousValue (if non-NULL) is set to an owned clone of whatever was
+ * cached for this slot BEFORE this call's own cache update - mirrors
+ * mms_report_client's identical out-parameter exactly (see that feature's
+ * own shouldForwardAndUpdateCache doc comment for the full rationale,
+ * including why this is captured regardless of this call's own forward/drop
+ * outcome).
  *
  * Unlike mms_report_client's equivalent, GOOSE has no ReasonForInclusion to
- * trust unconditionally - every candidate is diff-gated: forward only if the
- * value differs from the cache, or the cache slot is still NULL (nothing has
- * ever been forwarded for this position - the case that lets the first
- * frame ever, or the first frame after a recovery, deliver a full snapshot).
+ * trust unconditionally - every candidate is diff-gated: if nothing has ever
+ * been cached for this slot yet (cached == NULL), this is a bootstrap event
+ * (the first frame ever for this target, or the first frame after a
+ * STALE/INVALID_STATE -> VALID recovery, since GooseSubscriberUseCases_resetValueDiffCache
+ * clears this same cache on that transition) - the cache is silently seeded
+ * but this frame is NEVER forwarded itself, mirroring MMS's GI suppression
+ * exactly even though GOOSE has no GI concept of its own. Otherwise, forward
+ * only if the value genuinely differs from the cache.
  */
 static bool
-shouldForwardAndUpdateCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, const MmsValue* value) {
+shouldForwardAndUpdateCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, const MmsValue* value,
+        MmsValue** outPreviousValue) {
+    if (outPreviousValue) *outPreviousValue = NULL;
     if (slot < 0) return true;
 
     MmsValue* cached = memberRefCache->lastForwardedValues[slot];
+    if (outPreviousValue && cached) *outPreviousValue = MmsValue_clone(cached);
+
+    if (!cached) {
+        updateValueDiffCache(memberRefCache, slot, value);
+        return false;
+    }
     if (GooseSubscriberUseCases_isDuplicateValue(cached, value)) return false;
 
     updateValueDiffCache(memberRefCache, slot, value);
@@ -79,9 +100,11 @@ typedef struct {
 
 /* Appends one owned, cloned/duplicated entry. Returns false (entry NOT
  * appended) only on allocation failure, so the caller knows not to also
- * update the value-diff cache for it. */
+ * update the value-diff cache for it. Takes ownership of (moves, does not
+ * re-clone) previousValue - mirrors mms_report_client's appendEntry exactly. */
 static bool
-appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* reference) {
+appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* reference,
+        MmsValue* previousValue, IedModelDaSemantic semantic) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         GooseSubscriberEntry* grown = realloc(builder->entries, sizeof(GooseSubscriberEntry) * (size_t) newCapacity);
@@ -93,7 +116,19 @@ appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* 
     GooseSubscriberEntry* entry = &builder->entries[builder->count++];
     entry->value = value ? MmsValue_clone((MmsValue*) value) : NULL;
     entry->reference = reference ? GooseSubscriberUtils_safeStringDup(reference) : NULL;
+    entry->previousValue = previousValue;
+    entry->semantic = semantic;
     return true;
+}
+
+/* memberRefCache->leafSemantics is parallel to lastForwardedValues (same
+ * slot indexing) - NULL-safe/bounds-checked, degrading to NONE. Mirrors
+ * mms_report_client_usecases.c's identical helper exactly. */
+static IedModelDaSemantic
+lookupSemanticForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafSemantics) return IED_MODEL_DA_SEMANTIC_NONE;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return IED_MODEL_DA_SEMANTIC_NONE;
+    return memberRefCache->leafSemantics[slot];
 }
 
 /* One not-yet-filtered leaf, gathered by collectCandidates before any
@@ -101,11 +136,16 @@ appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* 
  * dataSetValues, a flattened array, or memberRefCache's own strings), never
  * cloned/duped here (appendGooseEntry does that only for leaves that
  * actually end up forwarded). slot mirrors shouldForwardAndUpdateCache's own
- * -1-means-"no cache slot" convention. */
+ * -1-means-"no cache slot" convention. previousValue is populated by
+ * shouldForwardAndUpdateCache itself in buildEntries' phase 2a, regardless of
+ * this candidate's own forward/drop outcome. semantic is resolved from
+ * memberRefCache->leafSemantics[slot] at collection time. */
 typedef struct {
     const MmsValue* value;
     const char* reference;
     int slot;
+    MmsValue* previousValue;
+    IedModelDaSemantic semantic;
 } EntryCandidate;
 
 typedef struct {
@@ -117,7 +157,8 @@ typedef struct {
 /* Same grow-or-skip-on-OOM posture as appendGooseEntry (a single allocation
  * failure drops one candidate rather than aborting the whole record). */
 static void
-appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* reference, int slot) {
+appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* reference, int slot,
+        IedModelDaSemantic semantic) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         EntryCandidate* grown = realloc(builder->items, sizeof(EntryCandidate) * (size_t) newCapacity);
@@ -129,6 +170,8 @@ appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* re
     c->value = value;
     c->reference = reference;
     c->slot = slot;
+    c->previousValue = NULL; /* set later, by shouldForwardAndUpdateCache in buildEntries' phase 2a */
+    c->semantic = semantic;
 }
 
 /* Tracks flattened-structure arrays (GooseSubscriberUtils_flattenStructure
@@ -193,7 +236,8 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
                 trackFlattenedArray(flattenedArrays, flattened);
                 for (int k = 0; k < flattenedCount; k++) {
                     int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
-                    appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k], slot);
+                    appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k], slot,
+                            lookupSemanticForSlot(memberRefCache, slot));
                 }
                 continue; /* raw position i fully handled via decomposition */
             }
@@ -206,7 +250,7 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
         const char* ref = (hasCacheEntry && memberRefCache->memberReferences) ? memberRefCache->memberReferences[i]
                 : NULL;
 
-        appendCandidate(candidates, rawValue, ref, slot);
+        appendCandidate(candidates, rawValue, ref, slot, lookupSemanticForSlot(memberRefCache, slot));
     }
 }
 
@@ -322,7 +366,7 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
     if (forward) {
         for (int i = 0; i < candidates.count; i++) {
             EntryCandidate* c = &candidates.items[i];
-            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value);
+            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, &c->previousValue);
         }
 
         if (groupAnchorIndex) {
@@ -345,11 +389,24 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
 
     GooseEntryBuilder builder = { NULL, 0, 0 };
     for (int i = 0; i < candidates.count; i++) {
-        if (!forward || !forward[i]) continue;
-
         EntryCandidate* c = &candidates.items[i];
+
+        if (!forward || !forward[i]) {
+            /* Not forwarded (bootstrap-suppressed, an unchanged duplicate, or
+             * never individually qualified and never dragged in by the
+             * group-extension pass) - previousValue was still cloned in
+             * phase 2a regardless of this outcome, so it must be freed here
+             * rather than leaked. */
+            if (c->previousValue) MmsValue_delete(c->previousValue);
+            continue;
+        }
+
         updateValueDiffCache(memberRefCache, c->slot, c->value);
-        appendGooseEntry(&builder, c->value, c->reference);
+        if (!appendGooseEntry(&builder, c->value, c->reference, c->previousValue, c->semantic)) {
+            /* appendGooseEntry failed to grow its array (OOM) - it never
+             * took ownership of previousValue in that case. */
+            if (c->previousValue) MmsValue_delete(c->previousValue);
+        }
     }
 
     free(forward);

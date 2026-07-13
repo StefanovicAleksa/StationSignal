@@ -44,6 +44,7 @@
 
 static volatile bool sawValidStatus;
 static volatile bool sawTrueValue;
+static volatile bool anyRecordReceived;
 static char lastGoCbRef[256];
 static int lastEntryCount;
 static char lastEntry0Reference[256];
@@ -60,6 +61,7 @@ onStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status, Goo
 static void
 onRecord(void* userParam, const GooseSubscriberRecord* record) {
     (void) userParam;
+    anyRecordReceived = true;
 
     strncpy(lastGoCbRef, record->goCbRef ? record->goCbRef : "", sizeof(lastGoCbRef) - 1);
     lastGoCbRef[sizeof(lastGoCbRef) - 1] = '\0';
@@ -87,18 +89,35 @@ onRecord(void* userParam, const GooseSubscriberRecord* record) {
 }
 
 static bool
-waitUntil(volatile bool* flag) {
-    for (int i = 0; i < POLL_MAX_ATTEMPTS; i++) {
+waitUntilOrTimeout(volatile bool* flag, int maxAttempts) {
+    for (int i = 0; i < maxAttempts; i++) {
         if (*flag) return true;
         Thread_sleep(POLL_INTERVAL_MS);
     }
     return false;
 }
 
+static bool
+waitUntil(volatile bool* flag) {
+    return waitUntilOrTimeout(flag, POLL_MAX_ATTEMPTS);
+}
+
+/* Bounded NEGATIVE wait - used only to assert something does NOT arrive
+ * (e.g. the very first frame for a target must never reach the record
+ * callback). Deliberately much shorter than POLL_MAX_ATTEMPTS's 10s - see
+ * the identical helper/rationale in e2e_test_mms_report_client.c. */
+#define NEGATIVE_POLL_MAX_ATTEMPTS 20
+
+static bool
+waitBriefly(volatile bool* flag) {
+    return waitUntilOrTimeout(flag, NEGATIVE_POLL_MAX_ATTEMPTS);
+}
+
 void
 setUp(void) {
     sawValidStatus = false;
     sawTrueValue = false;
+    anyRecordReceived = false;
     lastEntryCount = 0;
     lastGoCbRef[0] = '\0';
     lastEntry0Reference[0] = '\0';
@@ -157,6 +176,51 @@ test_dataChangeOnServer_triggersGooseRecordWithNewValue(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves the bootstrap-suppression mechanism end-to-end for GOOSE: the very
+ * first frame this subscriber ever receives for gcbInd - which the publisher
+ * sends immediately/repeatedly once SimServer_start runs, well before
+ * GGIO1.Ind1.stVal is ever flipped - must never reach the record callback at
+ * all (cache-seed only, GOOSE's equivalent of MMS's GI suppression, since
+ * GOOSE has no GI concept of its own). Only the genuine post-flip change
+ * (proven separately by test_dataChangeOnServer_triggersGooseRecordWithNewValue)
+ * ever reaches the callback.
+ */
+void
+test_firstFrameEverPerTarget_neverReachesCallback(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_TCP_PORT);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_REPORT_ONLY, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    GooseSubscriberError createError;
+    GooseSubscriberHandle handle = GooseSubscription_create(iedModel, TEST_INTERFACE, NULL, &createError);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(GOOSE_SUBSCRIBER_OK, createError);
+
+    GooseSubscription_setRecordCallback(handle, onRecord, NULL);
+    GooseSubscription_setStatusCallback(handle, onStatus, NULL);
+
+    GooseSubscriberError startError = GooseSubscription_start(handle);
+    TEST_ASSERT_EQUAL_MESSAGE(GOOSE_SUBSCRIBER_OK, startError,
+            "GooseSubscription_start failed - this test needs CAP_NET_RAW (run with sudo)");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&sawValidStatus),
+            "expected the frame adapter to observe a VALID GOOSE feed within the timeout");
+
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&anyRecordReceived),
+            "the very first frame for this target must never reach the record callback - it's "
+            "cache-seed only, even though the publisher has been retransmitting since SimServer_start");
+
+    GooseSubscription_destroy(handle);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 #define EXPECTED_GOCB_REF_DUP "Reporter1LD1/LLN0$GO$gcbDup"
 
 /*
@@ -192,9 +256,11 @@ onRecordForCrossTargetDedupTest(void* userParam, const GooseSubscriberRecord* re
         /* Only count a genuine value-change delivery (the initial state is
          * "false" and both publishers start retransmitting it immediately
          * on SimServer_start, before this subscriber even attaches - the
-         * per-position value-diff filter already collapses that startup
-         * burst down to one snapshot per target, which is not what this
-         * test is proving). */
+         * per-position bootstrap-suppression mechanism now drops that
+         * entire startup burst before it ever reaches this callback at all,
+         * not just collapses it to one snapshot per target - see
+         * test_firstFrameEverPerTarget_neverReachesCallback below for the
+         * dedicated proof of that). */
         if (record->entryCount > 0 && record->entries[0].value
                 && MmsValue_getType(record->entries[0].value) == MMS_BOOLEAN
                 && MmsValue_getBoolean(record->entries[0].value)) {
@@ -273,6 +339,7 @@ main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_dataChangeOnServer_triggersGooseRecordWithNewValue);
+    RUN_TEST(test_firstFrameEverPerTarget_neverReachesCallback);
     RUN_TEST(test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback);
 
     return UNITY_END();

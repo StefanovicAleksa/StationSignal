@@ -174,7 +174,7 @@ test_assembleMessage_deepCopiesEverything_notAliased(void) {
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
             IPC_SOURCE_MMS_REPORT, sourceRef,
             true, true, true, 123456789ULL,
-            pointRefs, &value, &hasQuality, &quality, 1);
+            pointRefs, &value, &hasQuality, &quality, NULL, 1);
 
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_EQUAL_INT(IPC_SOURCE_MMS_REPORT, message->sourceType);
@@ -208,7 +208,7 @@ test_assembleMessage_stringScalar_isDeepCopied(void) {
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
             IPC_SOURCE_GOOSE, NULL, false, false, true, 1,
-            (const char* const[]) { "ref" }, &value, NULL, NULL, 1);
+            (const char* const[]) { "ref" }, &value, NULL, NULL, NULL, 1);
 
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_EQUAL_STRING("hello", message->dataPoints[0].value.value.str);
@@ -223,7 +223,7 @@ test_assembleMessage_stringScalar_isDeepCopied(void) {
 void
 test_assembleMessage_nullSourceReference_copiedThroughAsNull(void) {
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
-            IPC_SOURCE_GOOSE, NULL, false, false, false, 0, NULL, NULL, NULL, NULL, 0);
+            IPC_SOURCE_GOOSE, NULL, false, false, false, 0, NULL, NULL, NULL, NULL, NULL, 0);
 
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_NULL(message->sourceReference);
@@ -242,10 +242,82 @@ test_assembleMessage_noQuality_hasQualityFalse(void) {
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
             IPC_SOURCE_MMS_REPORT, "rcb", true, false, false, 0,
-            pointRefs, &value, NULL, NULL, 1);
+            pointRefs, &value, NULL, NULL, NULL, 1);
 
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_FALSE(message->dataPoints[0].hasQuality);
+
+    IpcDispatcherUseCases_freeMessage(message);
+}
+
+void
+test_assembleMessage_extrasNull_everyHasFlagFalse(void) {
+    const char* pointRefs[1] = { "ref" };
+    IpcScalarValue value;
+    value.type = IPC_SCALAR_BOOL;
+    value.value.b = true;
+
+    IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
+            IPC_SOURCE_MMS_REPORT, "rcb", false, false, false, 0,
+            pointRefs, &value, NULL, NULL, NULL, 1);
+
+    TEST_ASSERT_NOT_NULL(message);
+    TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousValue);
+    TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousQuality);
+    TEST_ASSERT_FALSE(message->dataPoints[0].hasLabel);
+    TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousLabel);
+
+    IpcDispatcherUseCases_freeMessage(message);
+}
+
+void
+test_assembleMessage_extrasPopulated_roundTripsEveryField(void) {
+    const char* pointRefs[1] = { "ref" };
+    IpcScalarValue value;
+    value.type = IPC_SCALAR_BOOL;
+    value.value.b = true;
+
+    bool hasPreviousValue = true;
+    char prevText[] = "was-off";
+    IpcScalarValue previousValue;
+    previousValue.type = IPC_SCALAR_STRING;
+    previousValue.value.str = prevText;
+
+    bool hasPreviousQuality = true;
+    IpcQuality previousQuality = { IPC_QUALITY_INVALID, 7 };
+
+    bool hasLabel = true;
+    const char* label = "on";
+    bool hasPreviousLabel = true;
+    const char* previousLabel = "off";
+
+    IpcDataPointExtras extras = {
+        .pointHasPreviousValue = &hasPreviousValue,
+        .pointPreviousValue = &previousValue,
+        .pointHasPreviousQuality = &hasPreviousQuality,
+        .pointPreviousQuality = &previousQuality,
+        .pointHasLabel = &hasLabel,
+        .pointLabel = &label,
+        .pointHasPreviousLabel = &hasPreviousLabel,
+        .pointPreviousLabel = &previousLabel,
+    };
+
+    IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
+            IPC_SOURCE_MMS_REPORT, "rcb", false, false, false, 0,
+            pointRefs, &value, NULL, NULL, &extras, 1);
+
+    TEST_ASSERT_NOT_NULL(message);
+    TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousValue);
+    TEST_ASSERT_EQUAL_STRING("was-off", message->dataPoints[0].previousValue.value.str);
+    TEST_ASSERT_TRUE_MESSAGE(message->dataPoints[0].previousValue.value.str != prevText,
+            "previousValue string must be a deep copy, not aliased");
+    TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousQuality);
+    TEST_ASSERT_EQUAL_INT(IPC_QUALITY_INVALID, message->dataPoints[0].previousQuality.validity);
+    TEST_ASSERT_EQUAL_INT(7, message->dataPoints[0].previousQuality.detailFlags);
+    TEST_ASSERT_TRUE(message->dataPoints[0].hasLabel);
+    TEST_ASSERT_EQUAL_STRING("on", message->dataPoints[0].label);
+    TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousLabel);
+    TEST_ASSERT_EQUAL_STRING("off", message->dataPoints[0].previousLabel);
 
     IpcDispatcherUseCases_freeMessage(message);
 }
@@ -276,6 +348,8 @@ main(void) {
     RUN_TEST(test_assembleMessage_stringScalar_isDeepCopied);
     RUN_TEST(test_assembleMessage_nullSourceReference_copiedThroughAsNull);
     RUN_TEST(test_assembleMessage_noQuality_hasQualityFalse);
+    RUN_TEST(test_assembleMessage_extrasNull_everyHasFlagFalse);
+    RUN_TEST(test_assembleMessage_extrasPopulated_roundTripsEveryField);
     RUN_TEST(test_freeMessage_doesNotCrash_onNull);
 
     return UNITY_END();

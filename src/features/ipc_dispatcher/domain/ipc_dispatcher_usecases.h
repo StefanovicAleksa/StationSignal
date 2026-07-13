@@ -66,18 +66,23 @@ IpcDispatcherUseCases_pairQuality(const char* const* references, int count,
  * the caller runs IpcDispatcherUseCases_pairQuality itself first, converts
  * the relevant MmsValues via utils/ipc_dispatcher_value_codec, then calls
  * this (see data/ adapters). Every string is deep-copied (pointReferences[k],
- * and pointValues[k].value.str for STRING/RAW) - caller's own arrays/strings
- * may be freed immediately after this returns. sourceReference may be NULL
- * (copied through as NULL). Returns NULL only on the top-level allocation
- * failing; an individual string dup failing leaves that one field NULL
- * (matches this codebase's existing UseCases_buildRecord convention, e.g.
- * goose_subscriber_usecases.c).
+ * and pointValues[k]/extras->pointPreviousValue[k].value.str for STRING/RAW)
+ * - caller's own arrays/strings may be freed immediately after this returns.
+ * sourceReference may be NULL (copied through as NULL). extras may be NULL
+ * (or any individual array within it may be NULL) - see IpcDataPointExtras'
+ * own doc comment; label/previousLabel strings are copied BY POINTER, not
+ * duplicated (static string-literal storage - see IpcDataPoint's own doc
+ * comment), unlike every other string field here. Returns NULL only on the
+ * top-level allocation failing; an individual string dup failing leaves that
+ * one field NULL (matches this codebase's existing UseCases_buildRecord
+ * convention, e.g. goose_subscriber_usecases.c).
  */
 IpcMessage*
 IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sourceReference,
         bool hasBuffered, bool buffered, bool hasTimestamp, uint64_t timestampMs,
         const char* const* pointReferences, const IpcScalarValue* pointValues,
-        const bool* pointHasQuality, const IpcQuality* pointQuality, int pointCount);
+        const bool* pointHasQuality, const IpcQuality* pointQuality,
+        const IpcDataPointExtras* extras, int pointCount);
 
 /* Frees an IpcMessage built above, including every data point's owned
  * reference/value string and the array itself. NULL-safe. */

@@ -81,7 +81,59 @@ typedef struct {
     IpcScalarValue value;
     bool hasQuality;
     IpcQuality quality; /* valid only if hasQuality */
+
+    /* Previous value/quality for this same reference - lets the frontend
+     * show what changed FROM, not just the new value. Sourced from
+     * MmsReportEntry.previousValue/GooseSubscriberEntry.previousValue (the
+     * value-diff cache's pre-update snapshot) via the same value/quality
+     * codec used for the current value - see the mms/goose adapters. Absent
+     * only in the narrow, pre-existing structural case where the source
+     * entry had no cache slot to diff against at all (see
+     * MmsReportEntry.previousValue's own doc comment) - NOT a routine
+     * outcome, since GI/bootstrap seeding means a previous value is present
+     * in essentially every real case once a device has been reporting for
+     * any length of time. */
+    bool hasPreviousValue;
+    IpcScalarValue previousValue; /* valid only if hasPreviousValue */
+    bool hasPreviousQuality;
+    IpcQuality previousQuality; /* valid only if hasPreviousQuality */
+
+    /* Descriptive label for a genuine Dbpos-typed value (IEC 61850-7-3:
+     * "intermediate-state"/"off"/"on"/"bad-state"), additive alongside the
+     * existing raw numeric `value` - never replaces it. Present only when
+     * ied_model's SCL-derived semantics table confirmed the source DA's real
+     * bType was "Dbpos" (see IedModelDaSemantic) - never guessed from the
+     * wire bitstring alone. previousLabel mirrors this for previousValue,
+     * when both a previous value and the Dbpos semantic are present. Both
+     * are non-owned pointers into static string-literal storage - never
+     * freed. */
+    bool hasLabel;
+    const char* label; /* valid only if hasLabel - NOT owned, never freed */
+    bool hasPreviousLabel;
+    const char* previousLabel; /* valid only if hasPreviousLabel - NOT owned, never freed */
 } IpcDataPoint;
+
+/*
+ * Optional, bundled "extra" per-data-point arrays for
+ * IpcDispatcherUseCases_assembleMessage - kept as a separate struct rather
+ * than doubling that function's own already-long parameter list further.
+ * Every array (if the struct itself is non-NULL) must have room for
+ * `pointCount` elements, index-aligned with pointReferences/pointValues/
+ * pointHasQuality/pointQuality. Passing NULL for the whole struct (or for
+ * any one array within it) means "no data for this field on any point" -
+ * every hasPreviousValue/hasPreviousQuality/hasLabel/hasPreviousLabel in the
+ * resulting IpcMessage stays false.
+ */
+typedef struct {
+    const bool* pointHasPreviousValue;
+    const IpcScalarValue* pointPreviousValue;
+    const bool* pointHasPreviousQuality;
+    const IpcQuality* pointPreviousQuality;
+    const bool* pointHasLabel;
+    const char* const* pointLabel;
+    const bool* pointHasPreviousLabel;
+    const char* const* pointPreviousLabel;
+} IpcDataPointExtras;
 
 typedef struct {
     IpcSourceType sourceType;

@@ -66,12 +66,17 @@ GooseSubscriberUseCases_freeRecord(GooseSubscriberRecord* record);
 
 /*
  * Value-diff check for the group-aware filter's diff-gate. cached is the
- * last value actually forwarded for this exact wire position (NULL means
- * nothing has ever been forwarded yet). Returns true (duplicate, should be
+ * last value actually cached for this exact wire position (NULL means
+ * nothing has ever been cached yet). Returns true (duplicate, should be
  * dropped) only when cached is non-NULL AND bit-for-bit equal
  * (MmsValue_equals) to newValue - identical semantics to
- * MmsReportClientUseCases_isDuplicateValue. Exposed for direct unit testing,
- * mirroring that function's own precedent.
+ * MmsReportClientUseCases_isDuplicateValue. A NULL cached value always
+ * returns false (not a duplicate), but the caller (shouldForwardAndUpdateCache,
+ * goose_subscriber_usecases.c) treats a NULL cache as a bootstrap event and
+ * seeds it WITHOUT forwarding - so the first frame ever for a target, or the
+ * first frame after a recovery, never itself reaches the caller's record
+ * callback, only the first genuine change afterward does. Exposed for direct
+ * unit testing, mirroring that function's own precedent.
  */
 bool
 GooseSubscriberUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue);
@@ -82,8 +87,9 @@ GooseSubscriberUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue*
  * to NULL, mirroring MmsReportClientUseCases_resetValueDiffCache. Called by
  * the frame adapter on every STALE/INVALID_STATE -> VALID transition,
  * alongside the existing hasForwardedStNum reset, so the first frame after a
- * recovery always delivers a full snapshot rather than being diff-filtered
- * against stale pre-outage values. NULL-safe.
+ * recovery is treated as a fresh bootstrap event (cache-seed only, never
+ * forwarded) rather than being diff-filtered against stale pre-outage
+ * values. NULL-safe.
  */
 void
 GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache);

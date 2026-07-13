@@ -73,6 +73,9 @@ LinkedList IedModelUseCases_getControlTargets(IedModelHandle handle);
 LinkedList IedModelUseCases_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference);
 LinkedList IedModelUseCases_getDataSetMemberLeafReferences(IedModelHandle handle, const char* datasetReference,
         int memberIndex);
+LinkedList IedModelUseCases_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference);
+LinkedList IedModelUseCases_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
+        int memberIndex);
 LinkedList IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle,
         const char* lnReference);
 

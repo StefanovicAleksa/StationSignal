@@ -52,6 +52,19 @@ typedef struct {
                          ALWAYS attempted (unlike MMS, GOOSE has no
                          server-supplied alternative), NULL only if
                          resolution failed (e.g. dataset lookup miss). */
+
+    /* Owned clone of whatever was cached for this exact wire position
+     * immediately BEFORE this frame overwrote it (see
+     * GooseSubscriberMemberRefCache.lastForwardedValues) - mirrors
+     * MmsReportEntry.previousValue exactly. NULL only in the narrow,
+     * pre-existing structural case where this position has no cache slot at
+     * all (slot < 0). */
+    MmsValue* previousValue;
+
+    /* IED_MODEL_DA_SEMANTIC_DBPOS if this leaf's real SCL bType was
+     * genuinely "Dbpos", else IED_MODEL_DA_SEMANTIC_NONE - mirrors
+     * MmsReportEntry.semantic exactly. */
+    IedModelDaSemantic semantic;
 } GooseSubscriberEntry;
 
 /*
@@ -148,11 +161,21 @@ typedef struct {
      * did), the same noise problem mms_report_client's hybrid filter solves
      * on the MMS side. Reset (not just Gap 2's hasForwardedStNum) on a
      * STALE/INVALID_STATE -> VALID transition - see the frame adapter - so a
-     * recovery redelivers a full snapshot instead of diffing against stale
-     * pre-outage values. */
+     * recovery is treated as a fresh bootstrap event (cache-seed only, never
+     * forwarded - see shouldForwardAndUpdateCache) rather than diffing
+     * against stale pre-outage values. */
     int* leafSlotOffsets;
     int totalLeafSlots;
     MmsValue** lastForwardedValues;
+
+    /* Parallel to lastForwardedValues (size totalLeafSlots) - slot i's
+     * Dbpos-ness, resolved once at GooseSubscription_start time via
+     * IedModel_getDataSetMemberSemantics/_getDataSetMemberLeafSemantics.
+     * Unlike lastForwardedValues, never reset on a liveness recovery (a DA's
+     * real SCL type doesn't change). May be NULL (degrades to
+     * IED_MODEL_DA_SEMANTIC_NONE everywhere) if allocation failed at build
+     * time. */
+    IedModelDaSemantic* leafSemantics;
 } GooseSubscriberMemberRefCache;
 
 /*

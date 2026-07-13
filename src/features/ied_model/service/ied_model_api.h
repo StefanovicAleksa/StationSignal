@@ -92,6 +92,34 @@ LinkedList IedModel_getDataSetMemberLeafReferences(IedModelHandle handle, const 
         int memberIndex);
 
 /*
+ * Index-aligned with IedModel_getDataSetMemberReferences's own result list
+ * for the same datasetReference - element i is IED_MODEL_DA_SEMANTIC_NONE
+ * unless raw dataset member i is already leaf-level (has an explicit
+ * trailing daName in its FCDA) AND that terminal DataAttribute's real SCL
+ * bType was genuinely "Dbpos" (see IedModelDaSemantic's own doc comment in
+ * ied_model_types.h). Members that decompose (Gap 4 - a DO-level FCDA with
+ * no daName) always report NONE here - use
+ * IedModel_getDataSetMemberLeafSemantics for those instead, mirroring how
+ * IedModel_getDataSetMemberLeafReferences is the decomposed-member
+ * counterpart of getDataSetMemberReferences. Purely local (no over-the-wire
+ * discovery), same as every other ied_model accessor. Always empty for a
+ * model built via IedModel_wrapDynamicModel (no SCL bType available on that
+ * path). Caller owns the list and its elements (heap-boxed
+ * IedModelDaSemantic*): LinkedList_destroyDeep(list, free).
+ */
+LinkedList IedModel_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference);
+
+/*
+ * Index-aligned with IedModel_getDataSetMemberLeafReferences's own result
+ * list for the same (datasetReference, memberIndex) - same decomposition
+ * rules, same "empty list if not decomposed" convention. Caller owns the
+ * list and its elements (heap-boxed IedModelDaSemantic*):
+ * LinkedList_destroyDeep(list, free).
+ */
+LinkedList IedModel_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
+        int memberIndex);
+
+/*
  * For one LN (given its own "LD/LN" object reference, e.g.
  * ReportControlBlockTarget.lnReference): returns every leaf Data Attribute at
  * FC=ST (status) or FC=MX (measurand) reachable under it, in the same

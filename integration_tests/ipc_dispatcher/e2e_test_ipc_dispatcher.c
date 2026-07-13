@@ -200,10 +200,14 @@ test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
     record->entries = calloc(2, sizeof(MmsReportEntry));
     record->entries[0].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$stVal");
     record->entries[0].value = MmsValue_newBoolean(true);
+    record->entries[0].previousValue = MmsValue_newBoolean(false);
     record->entries[1].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$q");
     MmsValue* quality = MmsValue_newBitString(13);
     MmsValue_setBitStringFromInteger(quality, QUALITY_VALIDITY_GOOD);
     record->entries[1].value = quality;
+    MmsValue* previousQuality = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(previousQuality, QUALITY_VALIDITY_INVALID);
+    record->entries[1].previousValue = previousQuality;
 
     IpcDispatcher_onMmsReport(fixtureHandle, record); /* ownership transferred */
 
@@ -230,6 +234,98 @@ test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
     cJSON* qualityJson = cJSON_GetObjectItem(point, "quality");
     TEST_ASSERT_FALSE(cJSON_IsNull(qualityJson));
     TEST_ASSERT_EQUAL_STRING("GOOD", cJSON_GetObjectItem(qualityJson, "validity")->valuestring);
+
+    cJSON* previousValueJson = cJSON_GetObjectItem(point, "previousValue");
+    TEST_ASSERT_FALSE(cJSON_IsNull(previousValueJson));
+    TEST_ASSERT_FALSE(cJSON_IsTrue(previousValueJson));
+
+    cJSON* previousQualityJson = cJSON_GetObjectItem(point, "previousQuality");
+    TEST_ASSERT_FALSE(cJSON_IsNull(previousQualityJson));
+    TEST_ASSERT_EQUAL_STRING("INVALID", cJSON_GetObjectItem(previousQualityJson, "validity")->valuestring);
+
+    cJSON_Delete(parsed);
+    free(json);
+}
+
+/*
+ * Proves the full Dbpos-label pipeline end-to-end: a report entry whose
+ * `semantic` field is IED_MODEL_DA_SEMANTIC_DBPOS (as mms_report_client
+ * would set it, via ied_model's SCL-derived semantics table) must produce
+ * BOTH the raw numeric value AND a descriptive "label"/"previousLabel" in
+ * the real JSON received over the real websocket - proving
+ * IpcDispatcherValueCodec_decodeDbposLabel is actually wired into the mms
+ * adapter, not just unit-tested in isolation.
+ */
+void
+test_mmsReport_dbposSemantic_arrivesWithLabelAndPreviousLabel(void) {
+    IpcDispatcherConfig config;
+    IpcDispatcherConfig_defaults(&config);
+    config.port = TEST_PORT + 2;
+
+    fixtureHandle = IpcDispatcher_create(&config, NULL);
+    TEST_ASSERT_NOT_NULL(fixtureHandle);
+    TEST_ASSERT_EQUAL(IPC_DISPATCHER_OK, IpcDispatcher_start(fixtureHandle));
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(sock >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(TEST_PORT + 2);
+    inet_pton(AF_INET, TEST_HOST, &addr.sin_addr);
+    TEST_ASSERT_EQUAL_INT(0, connect(sock, (struct sockaddr*) &addr, sizeof(addr)));
+
+    const char* request =
+        "GET / HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n";
+    send(sock, request, strlen(request), 0);
+
+    char buf[1024];
+    size_t total = 0;
+    while (total < sizeof(buf) - 1) {
+        ssize_t n = recv(sock, buf + total, sizeof(buf) - 1 - total, 0);
+        TEST_ASSERT_TRUE(n > 0);
+        total += (size_t) n;
+        buf[total] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break;
+    }
+    TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
+    fixtureSocket = sock;
+
+    MmsReportRecord* record = calloc(1, sizeof(MmsReportRecord));
+    record->rcbReference = strdup("Reporter1LD1/LLN0.BR.brcbMain");
+    record->buffered = true;
+    record->rptId = strdup("rpt1");
+    record->entryCount = 1;
+    record->entries = calloc(1, sizeof(MmsReportEntry));
+    record->entries[0].reference = strdup("Reporter1LD1/XCBR1$ST$Pos$stVal");
+    record->entries[0].value = Dbpos_toMmsValue(NULL, DBPOS_ON);
+    record->entries[0].previousValue = Dbpos_toMmsValue(NULL, DBPOS_OFF);
+    record->entries[0].semantic = IED_MODEL_DA_SEMANTIC_DBPOS;
+
+    IpcDispatcher_onMmsReport(fixtureHandle, record); /* ownership transferred */
+
+    TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived within timeout");
+    char* json = readOneTextFrame(fixtureSocket);
+    TEST_ASSERT_NOT_NULL(json);
+
+    cJSON* parsed = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(parsed);
+
+    cJSON* dataPoints = cJSON_GetObjectItem(parsed, "dataPoints");
+    TEST_ASSERT_EQUAL_INT(1, cJSON_GetArraySize(dataPoints));
+    cJSON* point = cJSON_GetArrayItem(dataPoints, 0);
+
+    /* Raw numeric value must still be present, unchanged - label is additive. */
+    TEST_ASSERT_TRUE(cJSON_GetObjectItem(point, "value")->valuedouble == (double) DBPOS_ON);
+    TEST_ASSERT_EQUAL_STRING("on", cJSON_GetObjectItem(point, "label")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_GetObjectItem(point, "previousValue")->valuedouble == (double) DBPOS_OFF);
+    TEST_ASSERT_EQUAL_STRING("off", cJSON_GetObjectItem(point, "previousLabel")->valuestring);
 
     cJSON_Delete(parsed);
     free(json);
@@ -316,6 +412,7 @@ main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint);
+    RUN_TEST(test_mmsReport_dbposSemantic_arrivesWithLabelAndPreviousLabel);
     RUN_TEST(test_gooseRecord_arrivesWithGoCbRefSource);
 
     return UNITY_END();
