@@ -8,6 +8,7 @@
 #include "stdbool_compat.h"
 #include "features/control_dispatcher/service/control_dispatcher_api.h"
 #include "device_manager/service/device_manager_api.h"
+#include "scan_orchestration/service/scan_orchestration_api.h"
 #include "hal_thread.h"
 #include "cJSON.h"
 #include "sim_types.h"
@@ -215,6 +216,7 @@ waitForResponse(int sock, const char* expectedRequestId) {
 }
 
 static DeviceManagerHandle fixtureDeviceManager;
+static ScanOrchestrationHandle fixtureScanOrchestration;
 static ControlDispatcherHandle fixtureControlDispatcher;
 static SimServer fixtureSim;
 
@@ -226,10 +228,13 @@ setUp(void) {
     dmConfig.wsPortRangeEnd = DM_WS_PORT_RANGE_END;
     fixtureDeviceManager = DeviceManager_create(&dmConfig, NULL);
 
+    fixtureScanOrchestration = ScanOrchestration_create(NULL, NULL);
+
     ControlDispatcherConfig cdConfig;
     ControlDispatcherConfig_defaults(&cdConfig);
     cdConfig.port = TEST_PORT;
-    fixtureControlDispatcher = ControlDispatcher_create(&cdConfig, fixtureDeviceManager, NULL);
+    fixtureControlDispatcher = ControlDispatcher_create(&cdConfig, fixtureDeviceManager, fixtureScanOrchestration,
+            NULL);
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_OK, ControlDispatcher_start(fixtureControlDispatcher));
 
     fixtureSim = NULL;
@@ -240,6 +245,10 @@ tearDown(void) {
     if (fixtureControlDispatcher) {
         ControlDispatcher_destroy(fixtureControlDispatcher);
         fixtureControlDispatcher = NULL;
+    }
+    if (fixtureScanOrchestration) {
+        ScanOrchestration_destroy(fixtureScanOrchestration);
+        fixtureScanOrchestration = NULL;
     }
     if (fixtureDeviceManager) {
         DeviceManager_destroy(fixtureDeviceManager);
@@ -366,6 +375,45 @@ test_startReporting_thenStopReporting_realRoundTrip(void) {
     close(ws);
 }
 
+void
+test_startScan_thenStopScan_realRoundTrip(void) {
+    /* No sudo needed - a scan sweep is TCP-only (see CLAUDE.md's
+     * ied_discovery/scan_orchestration Architecture bullets); "lo" is
+     * expected to fail its background sweep (netmask too large) but that's
+     * tolerated gracefully by the worker thread, not a synchronous failure
+     * of START_SCAN itself - this proves the control-plane round trip, not
+     * sweep success (same reasoning integration_tests/scan_orchestration/'s
+     * own E2E test already documents). */
+    int ws = connectAndUpgrade(TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to control_dispatcher failed");
+
+    TEST_ASSERT_TRUE(sendTextFrame(ws,
+            "{\"requestId\":\"req-scan-start\",\"action\":\"START_SCAN\","
+            "\"params\":{\"interfaceId\":\"lo\"}}"));
+
+    cJSON* startResponse = waitForResponse(ws, "req-scan-start");
+    TEST_ASSERT_NOT_NULL_MESSAGE(startResponse, "expected a START_SCAN response");
+    TEST_ASSERT_TRUE_MESSAGE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(startResponse, "success")),
+            "START_SCAN itself must succeed even though the lo sweep is expected to fail later");
+
+    cJSON* result = cJSON_GetObjectItemCaseSensitive(startResponse, "result");
+    TEST_ASSERT_NOT_NULL(result);
+    double scanId = cJSON_GetObjectItemCaseSensitive(result, "scanId")->valuedouble;
+    cJSON_Delete(startResponse);
+
+    char stopCommand[128];
+    snprintf(stopCommand, sizeof(stopCommand),
+            "{\"requestId\":\"req-scan-stop\",\"action\":\"STOP_SCAN\",\"params\":{\"scanId\":%.0f}}", scanId);
+    TEST_ASSERT_TRUE(sendTextFrame(ws, stopCommand));
+
+    cJSON* stopResponse = waitForResponse(ws, "req-scan-stop");
+    TEST_ASSERT_NOT_NULL_MESSAGE(stopResponse, "expected a STOP_SCAN response");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(stopResponse, "success")));
+    cJSON_Delete(stopResponse);
+
+    close(ws);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -373,6 +421,7 @@ main(void) {
     RUN_TEST(test_malformedJson_returnsMalformedRequestError);
     RUN_TEST(test_unknownAction_returnsUnknownActionError);
     RUN_TEST(test_startReporting_thenStopReporting_realRoundTrip);
+    RUN_TEST(test_startScan_thenStopScan_realRoundTrip);
 
     return UNITY_END();
 }

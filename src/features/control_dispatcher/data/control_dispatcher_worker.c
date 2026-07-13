@@ -8,6 +8,7 @@ struct sControlDispatcherWorker {
     ControlDispatcherRingBuffer ringBuffer; /* borrowed */
     ControlDispatcherWsServer wsServer;     /* borrowed */
     DeviceManagerHandle deviceManager;      /* borrowed */
+    ScanOrchestrationHandle scanOrchestration; /* borrowed */
 
     Semaphore wakeSignal; /* Semaphore_create(0) - posted once per queued request, plus once
                               more on stop to guarantee a prompt exit even if idle */
@@ -28,8 +29,10 @@ workerLoop(void* parameter) {
         if (!request) continue; /* spurious wake (or a racing stop) - tolerated */
 
         /* THE SLOW PART - the only place in this feature that may block for
-         * seconds (SCL bootstrap over the network, MMS connect). */
-        char* json = ControlDispatcherUseCases_processRequest(request, worker->deviceManager);
+         * seconds (SCL bootstrap over the network, MMS connect, or a scan's
+         * own synchronous first-sweep dispatch). */
+        char* json = ControlDispatcherUseCases_processRequest(request, worker->deviceManager,
+                worker->scanOrchestration);
         ControlDispatcherRequest_destroy(request);
 
         if (json) {
@@ -44,8 +47,9 @@ workerLoop(void* parameter) {
 
 ControlDispatcherWorker
 ControlDispatcherWorker_create(ControlDispatcherRequestQueue queue, ControlDispatcherRingBuffer ringBuffer,
-        ControlDispatcherWsServer wsServer, DeviceManagerHandle deviceManager, ControlDispatcherError* outError) {
-    if (!queue || !ringBuffer || !wsServer || !deviceManager) {
+        ControlDispatcherWsServer wsServer, DeviceManagerHandle deviceManager,
+        ScanOrchestrationHandle scanOrchestration, ControlDispatcherError* outError) {
+    if (!queue || !ringBuffer || !wsServer || !deviceManager || !scanOrchestration) {
         if (outError) *outError = CONTROL_DISPATCHER_ERR_INVALID_ARGUMENT;
         return NULL;
     }
@@ -67,6 +71,7 @@ ControlDispatcherWorker_create(ControlDispatcherRequestQueue queue, ControlDispa
     worker->ringBuffer = ringBuffer;
     worker->wsServer = wsServer;
     worker->deviceManager = deviceManager;
+    worker->scanOrchestration = scanOrchestration;
 
     if (outError) *outError = CONTROL_DISPATCHER_OK;
     return worker;

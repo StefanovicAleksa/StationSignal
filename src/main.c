@@ -23,6 +23,12 @@
  * the old single-device-per-process model, where main.c built exactly one
  * OrchestrationHandle from argv and blocked until SIGINT.
  *
+ * control_dispatcher ALSO now accepts START_SCAN/STOP_SCAN commands (a
+ * client-supplied interfaceId/mmsPort, no argv involved) at any time,
+ * independent of the boot-time scan flow below - both share one
+ * process-lifetime ScanOrchestrationHandle, created here alongside
+ * deviceManager rather than scoped to the one boot-time interactive prompt.
+ *
  * No config-file system exists yet, so an OPTIONAL boot-time device still
  * comes from argv: [host] [mmsPort] [iedName] [interface] [acseAuthPassword]
  * [sclFilePath] - mmsPort/interface fall back to 102/"eth0" if omitted. This
@@ -123,10 +129,29 @@ main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    /* Process-lifetime now (used to be scoped to the host-omitted block
+     * below) - so control_dispatcher's own START_SCAN/STOP_SCAN actions can
+     * drive scans at any time, independent of (and concurrently with) the
+     * one boot-time interactive-picker flow below, which now just reuses
+     * this same handle instead of creating/destroying its own. */
+    ScanOrchestrationConfig scanConfig;
+    ScanOrchestrationConfig_defaults(&scanConfig);
+
+    ScanOrchestrationError scanCreateErr;
+    ScanOrchestrationHandle scanOrchestration = ScanOrchestration_create(&scanConfig, &scanCreateErr);
+    if (!scanOrchestration) {
+        fprintf(stderr, "[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
+        DeviceManager_destroy(deviceManager);
+        return EXIT_FAILURE;
+    }
+    ScanOrchestration_setDeviceFoundCallback(scanOrchestration, onDeviceFound, NULL);
+
     ControlDispatcherError cdCreateErr;
-    ControlDispatcherHandle controlDispatcher = ControlDispatcher_create(NULL, deviceManager, &cdCreateErr);
+    ControlDispatcherHandle controlDispatcher = ControlDispatcher_create(NULL, deviceManager, scanOrchestration,
+            &cdCreateErr);
     if (!controlDispatcher) {
         fprintf(stderr, "[CORE] ControlDispatcher_create failed (error %d)\n", (int) cdCreateErr);
+        ScanOrchestration_destroy(scanOrchestration);
         DeviceManager_destroy(deviceManager);
         return EXIT_FAILURE;
     }
@@ -135,38 +160,26 @@ main(int argc, char** argv) {
     if (cdStartErr != CONTROL_DISPATCHER_OK) {
         fprintf(stderr, "[CORE] ControlDispatcher_start failed (error %d)\n", (int) cdStartErr);
         ControlDispatcher_destroy(controlDispatcher);
+        ScanOrchestration_destroy(scanOrchestration);
         DeviceManager_destroy(deviceManager);
         return EXIT_FAILURE;
     }
 
     ControlDispatcherConfig cdConfig;
     ControlDispatcherConfig_defaults(&cdConfig);
-    printf("[CORE] control_dispatcher listening on 127.0.0.1:%u - send START_REPORTING/STOP_REPORTING "
-            "JSON commands here.\n", (unsigned) cdConfig.port);
+    printf("[CORE] control_dispatcher listening on 127.0.0.1:%u - send START_REPORTING/STOP_REPORTING/"
+            "START_SCAN/STOP_SCAN JSON commands here.\n", (unsigned) cdConfig.port);
 
-    /* host omitted/empty: start the continuous background scan
-     * (scan_orchestration) and let the operator pick a device from its live,
-     * growing list (or type a manual IP, still verified via ied_discovery
-     * directly) while the scan keeps running concurrently - unchanged in
-     * spirit from before this file's device_manager rewrite (see this file's
-     * own top comment). */
+    /* host omitted/empty: start the continuous background scan on the
+     * process-lifetime scanOrchestration handle above and let the operator
+     * pick a device from its live, growing list (or type a manual IP, still
+     * verified via ied_discovery directly) while the scan keeps running
+     * concurrently - unchanged in spirit from before this file's
+     * device_manager rewrite (see this file's own top comment), except the
+     * handle itself now outlives this block instead of being torn down here. */
     char* discoveredHost = NULL;
     const char* host = hostArg;
     if (!host) {
-        ScanOrchestrationConfig scanConfig;
-        ScanOrchestrationConfig_defaults(&scanConfig);
-
-        ScanOrchestrationError scanCreateErr;
-        ScanOrchestrationHandle scanHandle = ScanOrchestration_create(&scanConfig, &scanCreateErr);
-        if (!scanHandle) {
-            fprintf(stderr, "[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
-            ControlDispatcher_destroy(controlDispatcher);
-            DeviceManager_destroy(deviceManager);
-            return EXIT_FAILURE;
-        }
-
-        ScanOrchestration_setDeviceFoundCallback(scanHandle, onDeviceFound, NULL);
-
         ScanRequest scanRequest = {
             .interfaceId = interfaceId,
             .mmsPort = mmsPort,
@@ -174,11 +187,11 @@ main(int argc, char** argv) {
             .acseAuthPassword = acseAuthPassword
         };
         uint64_t scanId;
-        ScanOrchestrationError scanStartErr = ScanOrchestration_startScan(scanHandle, &scanRequest, &scanId);
+        ScanOrchestrationError scanStartErr = ScanOrchestration_startScan(scanOrchestration, &scanRequest, &scanId);
         if (scanStartErr != SCAN_ORCHESTRATION_OK) {
             fprintf(stderr, "[CORE] ScanOrchestration_startScan failed (error %d)\n", (int) scanStartErr);
-            ScanOrchestration_destroy(scanHandle);
             ControlDispatcher_destroy(controlDispatcher);
+            ScanOrchestration_destroy(scanOrchestration);
             DeviceManager_destroy(deviceManager);
             return EXIT_FAILURE;
         }
@@ -199,18 +212,21 @@ main(int argc, char** argv) {
         IedDiscoveryHandle manualVerifyHandle = IedDiscovery_create(&manualVerifyConfig, &discoveryError);
         if (!manualVerifyHandle) {
             fprintf(stderr, "[CORE] IedDiscovery_create failed (error %d)\n", (int) discoveryError);
-            ScanOrchestration_destroy(scanHandle);
+            ScanOrchestration_stopScan(scanOrchestration, scanId);
             ControlDispatcher_destroy(controlDispatcher);
+            ScanOrchestration_destroy(scanOrchestration);
             DeviceManager_destroy(deviceManager);
             return EXIT_FAILURE;
         }
 
-        discoveredHost = MainDiscoveryPrompt_run(scanHandle, scanId, manualVerifyHandle, mmsPort);
+        discoveredHost = MainDiscoveryPrompt_run(scanOrchestration, scanId, manualVerifyHandle, mmsPort);
         IedDiscovery_destroy(manualVerifyHandle);
 
         printf("[CORE] Stopping scan #%llu...\n", (unsigned long long) scanId);
-        ScanOrchestration_stopScan(scanHandle, scanId); /* may block - see its own doc comment */
-        ScanOrchestration_destroy(scanHandle); /* also tears down scan_dispatcher if this was the last scan */
+        /* Only stop THIS scan - scanOrchestration itself stays alive for the
+         * whole process now, so control_dispatcher can still serve
+         * START_SCAN/STOP_SCAN for other scans afterward. */
+        ScanOrchestration_stopScan(scanOrchestration, scanId); /* may block - see its own doc comment */
 
         if (!discoveredHost) {
             fprintf(stderr, "[CORE] No host picked - control_dispatcher stays up, waiting for commands.\n");
@@ -248,7 +264,8 @@ main(int argc, char** argv) {
     }
 
     printf("[CORE] Shutdown requested, stopping...\n");
-    ControlDispatcher_destroy(controlDispatcher); /* stop accepting new commands first */
-    DeviceManager_destroy(deviceManager);         /* drains + tears down every still-running device */
+    ControlDispatcher_destroy(controlDispatcher);   /* stop accepting new commands first */
+    ScanOrchestration_destroy(scanOrchestration);   /* stops any still-active scans */
+    DeviceManager_destroy(deviceManager);           /* drains + tears down every still-running device */
     return EXIT_SUCCESS;
 }

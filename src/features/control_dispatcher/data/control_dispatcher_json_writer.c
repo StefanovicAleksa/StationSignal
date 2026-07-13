@@ -54,6 +54,30 @@ ControlDispatcherJsonWriter_writeStopSuccess(const char* requestId, uint64_t dev
 }
 
 char*
+ControlDispatcherJsonWriter_writeScanStartSuccess(const char* requestId, uint64_t scanId) {
+    cJSON* root = newEnvelope(requestId, "START_SCAN", true);
+    if (!root) return NULL;
+
+    cJSON* result = cJSON_AddObjectToObject(root, "result");
+    if (result) cJSON_AddNumberToObject(result, "scanId", (double) scanId);
+    cJSON_AddNullToObject(root, "error");
+
+    return finish(root);
+}
+
+char*
+ControlDispatcherJsonWriter_writeScanStopSuccess(const char* requestId, uint64_t scanId) {
+    cJSON* root = newEnvelope(requestId, "STOP_SCAN", true);
+    if (!root) return NULL;
+
+    cJSON* result = cJSON_AddObjectToObject(root, "result");
+    if (result) cJSON_AddNumberToObject(result, "scanId", (double) scanId);
+    cJSON_AddNullToObject(root, "error");
+
+    return finish(root);
+}
+
+char*
 ControlDispatcherJsonWriter_writeError(const char* requestId, const char* action, const char* errorCode,
         const char* message, const char* stage, const char* detail) {
     cJSON* root = newEnvelope(requestId, action, false);

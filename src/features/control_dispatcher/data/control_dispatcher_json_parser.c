@@ -97,6 +97,35 @@ parseStopReportingParams(const cJSON* params, ControlRequest* request) {
     return CONTROL_PARSE_OK;
 }
 
+static ControlParseError
+parseStartScanParams(const cJSON* params, ControlRequest* request) {
+    const cJSON* interfaceItem = cJSON_GetObjectItemCaseSensitive(params, "interfaceId");
+    if (!isNonEmptyString(interfaceItem)) return CONTROL_PARSE_ERR_INVALID_PARAMS;
+    request->interfaceId = OrchestrationUtils_safeStringDup(interfaceItem->valuestring);
+
+    request->mmsPort = 102;
+    tryGetInt(params, "mmsPort", &request->mmsPort);
+
+    int sweepIntervalMs = 0;
+    tryGetInt(params, "sweepIntervalMs", &sweepIntervalMs);
+    request->sweepIntervalMs = (sweepIntervalMs > 0) ? (uint32_t) sweepIntervalMs : 0;
+
+    if (!request->interfaceId) return CONTROL_PARSE_ERR_INVALID_PARAMS; /* OOM */
+
+    return CONTROL_PARSE_OK;
+}
+
+static ControlParseError
+parseStopScanParams(const cJSON* params, ControlRequest* request) {
+    const cJSON* scanIdItem = cJSON_GetObjectItemCaseSensitive(params, "scanId");
+    if (!scanIdItem || !cJSON_IsNumber(scanIdItem) || scanIdItem->valuedouble < 0) {
+        return CONTROL_PARSE_ERR_INVALID_PARAMS;
+    }
+    request->scanId = (uint64_t) scanIdItem->valuedouble;
+
+    return CONTROL_PARSE_OK;
+}
+
 ControlParseError
 ControlDispatcherJsonParser_parse(const char* rawJson, size_t len, char** outRecoveredRequestId,
         char** outRecoveredAction, ControlRequest** outRequest) {
@@ -126,10 +155,15 @@ ControlDispatcherJsonParser_parse(const char* rawJson, size_t len, char** outRec
     }
 
     ControlRequestType type;
-    if (cJSON_IsString(actionItem) && actionItem->valuestring && strcmp(actionItem->valuestring, "START_REPORTING") == 0) {
+    const char* actionStr = (cJSON_IsString(actionItem) && actionItem->valuestring) ? actionItem->valuestring : NULL;
+    if (actionStr && strcmp(actionStr, "START_REPORTING") == 0) {
         type = CONTROL_REQ_START_REPORTING;
-    } else if (cJSON_IsString(actionItem) && actionItem->valuestring && strcmp(actionItem->valuestring, "STOP_REPORTING") == 0) {
+    } else if (actionStr && strcmp(actionStr, "STOP_REPORTING") == 0) {
         type = CONTROL_REQ_STOP_REPORTING;
+    } else if (actionStr && strcmp(actionStr, "START_SCAN") == 0) {
+        type = CONTROL_REQ_START_SCAN;
+    } else if (actionStr && strcmp(actionStr, "STOP_SCAN") == 0) {
+        type = CONTROL_REQ_STOP_SCAN;
     } else {
         cJSON_Delete(root);
         return CONTROL_PARSE_ERR_UNKNOWN_ACTION;
@@ -149,9 +183,13 @@ ControlDispatcherJsonParser_parse(const char* rawJson, size_t len, char** outRec
     request->requestId = OrchestrationUtils_safeStringDup(requestIdItem->valuestring);
     request->type = type;
 
-    ControlParseError paramsErr = (type == CONTROL_REQ_START_REPORTING)
-            ? parseStartReportingParams(params, request)
-            : parseStopReportingParams(params, request);
+    ControlParseError paramsErr;
+    switch (type) {
+        case CONTROL_REQ_START_REPORTING: paramsErr = parseStartReportingParams(params, request); break;
+        case CONTROL_REQ_STOP_REPORTING: paramsErr = parseStopReportingParams(params, request); break;
+        case CONTROL_REQ_START_SCAN: paramsErr = parseStartScanParams(params, request); break;
+        default: paramsErr = parseStopScanParams(params, request); break; /* CONTROL_REQ_STOP_SCAN */
+    }
 
     cJSON_Delete(root);
 

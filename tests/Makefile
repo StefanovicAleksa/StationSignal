@@ -461,9 +461,12 @@ test_control_dispatcher_json_parser: control_dispatcher/test_control_dispatcher_
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lcjson -lpthread
 
 # usecases.c pulls in device_manager's own full stack plus orchestration's
-# entire stack (same reasoning as test_device_manager_api's own build rule) -
-# dispatch/error-mapping tests only, driven against a real DeviceManagerHandle
-# in deliberately-failing, no-network cases.
+# entire stack (same reasoning as test_device_manager_api's own build rule),
+# plus scan_orchestration's own stack (+ scan_dispatcher + ied_discovery, its
+# own dependencies) now that this feature also dispatches START_SCAN/
+# STOP_SCAN - dispatch/error-mapping tests only, driven against a real
+# DeviceManagerHandle/ScanOrchestrationHandle in deliberately-failing,
+# no-network cases.
 test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_usecases.c \
 		$(CONTROL_DISPATCHER)/domain/control_dispatcher_usecases.c \
 		$(CONTROL_DISPATCHER)/data/control_dispatcher_json_writer.c \
@@ -475,6 +478,22 @@ test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_use
 		$(ORCHESTRATION)/domain/orchestration_usecases.c \
 		$(ORCHESTRATION)/data/orchestration_staging.c \
 		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCAN_ORCHESTRATION)/domain/scan_orchestration_usecases.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_worker.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_registry.c \
+		$(SCAN_ORCHESTRATION)/service/scan_orchestration_api.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ws_server.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_adapter.c \
+		$(SCAN_DISPATCHER)/service/scan_dispatcher_api.c \
+		$(IED_DISCOVERY)/service/ied_discovery_api.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_mms_probe.c \
+		$(IED_DISCOVERY)/data/ied_discovery_auth.c \
+		$(IED_DISCOVERY)/utils/ied_discovery_utils.c \
 		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \
@@ -535,6 +554,22 @@ test_control_dispatcher_api: control_dispatcher/test_control_dispatcher_api.c \
 		$(ORCHESTRATION)/domain/orchestration_usecases.c \
 		$(ORCHESTRATION)/data/orchestration_staging.c \
 		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCAN_ORCHESTRATION)/domain/scan_orchestration_usecases.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_worker.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_registry.c \
+		$(SCAN_ORCHESTRATION)/service/scan_orchestration_api.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ws_server.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_adapter.c \
+		$(SCAN_DISPATCHER)/service/scan_dispatcher_api.c \
+		$(IED_DISCOVERY)/service/ied_discovery_api.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_mms_probe.c \
+		$(IED_DISCOVERY)/data/ied_discovery_auth.c \
+		$(IED_DISCOVERY)/utils/ied_discovery_utils.c \
 		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \

@@ -27,11 +27,12 @@
 typedef struct sControlDispatcherWorker* ControlDispatcherWorker;
 
 /* Allocates + creates the wake semaphore only - no thread yet. queue/
- * ringBuffer/wsServer/deviceManager are all borrowed (owned/destroyed by
- * service/control_dispatcher_api.c). */
+ * ringBuffer/wsServer/deviceManager/scanOrchestration are all borrowed
+ * (owned/destroyed by service/control_dispatcher_api.c). */
 ControlDispatcherWorker
 ControlDispatcherWorker_create(ControlDispatcherRequestQueue queue, ControlDispatcherRingBuffer ringBuffer,
-        ControlDispatcherWsServer wsServer, DeviceManagerHandle deviceManager, ControlDispatcherError* outError);
+        ControlDispatcherWsServer wsServer, DeviceManagerHandle deviceManager,
+        ScanOrchestrationHandle scanOrchestration, ControlDispatcherError* outError);
 
 /* Starts the dedicated worker thread. Non-blocking. Returns an error only on
  * Thread_create failure. */

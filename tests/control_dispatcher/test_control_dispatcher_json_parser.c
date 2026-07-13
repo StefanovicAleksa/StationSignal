@@ -174,6 +174,70 @@ test_stopReporting_valid(void) {
     TEST_ASSERT_EQUAL_UINT64(3, fixtureRequest->deviceId);
 }
 
+/* ---- START_SCAN params ---- */
+
+void
+test_startScan_missingInterfaceId_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_SCAN\",\"params\":{}}"));
+}
+
+void
+test_startScan_emptyInterfaceId_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_SCAN\",\"params\":{\"interfaceId\":\"\"}}"));
+}
+
+void
+test_startScan_minimalValid_appliesDefaults(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"START_SCAN\","
+            "\"params\":{\"interfaceId\":\"lo\"}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_NOT_NULL(fixtureRequest);
+    TEST_ASSERT_EQUAL(CONTROL_REQ_START_SCAN, fixtureRequest->type);
+    TEST_ASSERT_EQUAL_STRING("lo", fixtureRequest->interfaceId);
+    TEST_ASSERT_EQUAL_INT(102, fixtureRequest->mmsPort); /* default */
+    TEST_ASSERT_EQUAL_UINT32(0, fixtureRequest->sweepIntervalMs); /* default = scan_orchestration's own */
+}
+
+void
+test_startScan_fullyPopulated(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-2\",\"action\":\"START_SCAN\","
+            "\"params\":{\"interfaceId\":\"eth0\",\"mmsPort\":103,\"sweepIntervalMs\":5000}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_NOT_NULL(fixtureRequest);
+    TEST_ASSERT_EQUAL_STRING("eth0", fixtureRequest->interfaceId);
+    TEST_ASSERT_EQUAL_INT(103, fixtureRequest->mmsPort);
+    TEST_ASSERT_EQUAL_UINT32(5000, fixtureRequest->sweepIntervalMs);
+}
+
+/* ---- STOP_SCAN params ---- */
+
+void
+test_stopScan_missingScanId_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"STOP_SCAN\",\"params\":{}}"));
+}
+
+void
+test_stopScan_negativeScanId_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"STOP_SCAN\",\"params\":{\"scanId\":-1}}"));
+}
+
+void
+test_stopScan_valid(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"STOP_SCAN\","
+            "\"params\":{\"scanId\":7}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_NOT_NULL(fixtureRequest);
+    TEST_ASSERT_EQUAL(CONTROL_REQ_STOP_SCAN, fixtureRequest->type);
+    TEST_ASSERT_EQUAL_UINT64(7, fixtureRequest->scanId);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -196,6 +260,15 @@ main(void) {
     RUN_TEST(test_stopReporting_missingDeviceId_returnsInvalidParams);
     RUN_TEST(test_stopReporting_negativeDeviceId_returnsInvalidParams);
     RUN_TEST(test_stopReporting_valid);
+
+    RUN_TEST(test_startScan_missingInterfaceId_returnsInvalidParams);
+    RUN_TEST(test_startScan_emptyInterfaceId_returnsInvalidParams);
+    RUN_TEST(test_startScan_minimalValid_appliesDefaults);
+    RUN_TEST(test_startScan_fullyPopulated);
+
+    RUN_TEST(test_stopScan_missingScanId_returnsInvalidParams);
+    RUN_TEST(test_stopScan_negativeScanId_returnsInvalidParams);
+    RUN_TEST(test_stopScan_valid);
 
     return UNITY_END();
 }

@@ -5,12 +5,13 @@
 
 /*
  * Dispatches one already-parsed ControlRequest to device_manager
- * (StartReporting/StopReporting per request->type) and serializes the
- * resulting success/error envelope via control_dispatcher_json_writer - the
- * one function the worker thread (data/control_dispatcher_worker.c) calls
- * per request. This is the only place in this feature that maps
- * DeviceManagerError to this feature's own stable JSON error codes (see
- * CLAUDE.md's control_dispatcher Architecture bullet for the full list).
+ * (StartReporting/StopReporting) or scan_orchestration (StartScan/StopScan)
+ * per request->type, and serializes the resulting success/error envelope via
+ * control_dispatcher_json_writer - the one function the worker thread
+ * (data/control_dispatcher_worker.c) calls per request. This is the only
+ * place in this feature that maps DeviceManagerError/ScanOrchestrationError
+ * to this feature's own stable JSON error codes (see CLAUDE.md's
+ * control_dispatcher Architecture bullet for the full list).
  *
  * Returns an owned, heap-allocated JSON string (caller pushes it onto the
  * ring buffer, transferring ownership), or NULL only on cJSON allocation
@@ -18,6 +19,7 @@
  * no queue to retry onto).
  */
 char*
-ControlDispatcherUseCases_processRequest(const ControlRequest* request, DeviceManagerHandle deviceManager);
+ControlDispatcherUseCases_processRequest(const ControlRequest* request, DeviceManagerHandle deviceManager,
+        ScanOrchestrationHandle scanOrchestration);
 
 #endif /* CONTROL_DISPATCHER_USECASES_H_ */

@@ -3,6 +3,7 @@
 #include "stdbool_compat.h"
 #include "features/control_dispatcher/service/control_dispatcher_api.h"
 #include "device_manager/service/device_manager_api.h"
+#include "scan_orchestration/service/scan_orchestration_api.h"
 
 /*
  * Real bind on loopback for real - no external IED dependency to avoid here,
@@ -17,11 +18,13 @@
 
 static ControlDispatcherHandle fixtureHandle;
 static DeviceManagerHandle fixtureDeviceManager;
+static ScanOrchestrationHandle fixtureScanOrchestration;
 
 void
 setUp(void) {
     fixtureHandle = NULL;
     fixtureDeviceManager = DeviceManager_create(NULL, NULL);
+    fixtureScanOrchestration = ScanOrchestration_create(NULL, NULL);
 }
 
 void
@@ -33,6 +36,10 @@ tearDown(void) {
     if (fixtureDeviceManager) {
         DeviceManager_destroy(fixtureDeviceManager);
         fixtureDeviceManager = NULL;
+    }
+    if (fixtureScanOrchestration) {
+        ScanOrchestration_destroy(fixtureScanOrchestration);
+        fixtureScanOrchestration = NULL;
     }
 }
 
@@ -59,7 +66,7 @@ test_configDefaults_doesNotCrash_onNull(void) {
 void
 test_create_appliesDefaults_whenConfigIsNull(void) {
     ControlDispatcherError error;
-    fixtureHandle = ControlDispatcher_create(NULL, fixtureDeviceManager, &error);
+    fixtureHandle = ControlDispatcher_create(NULL, fixtureDeviceManager, fixtureScanOrchestration, &error);
 
     TEST_ASSERT_NOT_NULL(fixtureHandle);
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_OK, error);
@@ -68,7 +75,16 @@ test_create_appliesDefaults_whenConfigIsNull(void) {
 void
 test_create_rejectsNullDeviceManager(void) {
     ControlDispatcherError error;
-    ControlDispatcherHandle handle = ControlDispatcher_create(NULL, NULL, &error);
+    ControlDispatcherHandle handle = ControlDispatcher_create(NULL, NULL, fixtureScanOrchestration, &error);
+
+    TEST_ASSERT_NULL(handle);
+    TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_ERR_INVALID_ARGUMENT, error);
+}
+
+void
+test_create_rejectsNullScanOrchestration(void) {
+    ControlDispatcherError error;
+    ControlDispatcherHandle handle = ControlDispatcher_create(NULL, fixtureDeviceManager, NULL, &error);
 
     TEST_ASSERT_NULL(handle);
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_ERR_INVALID_ARGUMENT, error);
@@ -81,7 +97,7 @@ test_create_rejectsInvalidCapacities(void) {
     config.ringBufferCapacity = 0;
 
     ControlDispatcherError error;
-    ControlDispatcherHandle handle = ControlDispatcher_create(&config, fixtureDeviceManager, &error);
+    ControlDispatcherHandle handle = ControlDispatcher_create(&config, fixtureDeviceManager, fixtureScanOrchestration, &error);
 
     TEST_ASSERT_NULL(handle);
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_ERR_INVALID_ARGUMENT, error);
@@ -95,7 +111,7 @@ test_stop_beforeStart_isNoOp(void) {
     ControlDispatcherConfig_defaults(&config);
     config.port = TEST_PORT;
 
-    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, NULL);
+    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, fixtureScanOrchestration, NULL);
     TEST_ASSERT_NOT_NULL(fixtureHandle);
 
     ControlDispatcher_stop(fixtureHandle); /* never started - must not crash */
@@ -107,7 +123,7 @@ test_start_thenDoubleStart_returnsAlreadyRunning(void) {
     ControlDispatcherConfig_defaults(&config);
     config.port = TEST_PORT + 1;
 
-    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, NULL);
+    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, fixtureScanOrchestration, NULL);
     TEST_ASSERT_NOT_NULL(fixtureHandle);
 
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_OK, ControlDispatcher_start(fixtureHandle));
@@ -122,7 +138,7 @@ test_startStopStart_reusesPortCleanly(void) {
     ControlDispatcherConfig_defaults(&config);
     config.port = TEST_PORT + 2;
 
-    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, NULL);
+    fixtureHandle = ControlDispatcher_create(&config, fixtureDeviceManager, fixtureScanOrchestration, NULL);
     TEST_ASSERT_NOT_NULL(fixtureHandle);
 
     TEST_ASSERT_EQUAL(CONTROL_DISPATCHER_OK, ControlDispatcher_start(fixtureHandle));
@@ -156,6 +172,7 @@ main(void) {
 
     RUN_TEST(test_create_appliesDefaults_whenConfigIsNull);
     RUN_TEST(test_create_rejectsNullDeviceManager);
+    RUN_TEST(test_create_rejectsNullScanOrchestration);
     RUN_TEST(test_create_rejectsInvalidCapacities);
 
     RUN_TEST(test_stop_beforeStart_isNoOp);

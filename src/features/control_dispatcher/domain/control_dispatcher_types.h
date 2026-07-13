@@ -4,18 +4,20 @@
 #include <stdint.h>
 #include "stdbool_compat.h"
 #include "device_manager/service/device_manager_api.h"
+#include "scan_orchestration/service/scan_orchestration_api.h"
 
 /*
  * Domain vocabulary for this feature is its own JSON-command contract
- * (ControlRequest) plus device_manager's public API (this feature's whole
- * job is relaying StartReporting/StopReporting calls over a websocket, so
- * depending on device_manager - a top-level sibling, not another
- * src/features/ peer - is the point, not a layering violation). The two
- * third-party outputs (cJSON parse AND serialize) are touched nowhere in
- * this file - see data/control_dispatcher_json_parser.h/
- * data/control_dispatcher_json_writer.h for the only two places cJSON.h is
- * included, and data/control_dispatcher_ws_server.h for the one place
- * libwebsockets.h is included.
+ * (ControlRequest) plus device_manager's and scan_orchestration's public
+ * APIs (this feature's whole job is relaying StartReporting/StopReporting
+ * and StartScan/StopScan calls over a websocket, so depending on both -
+ * top-level siblings, not src/features/ peers - is the point, not a
+ * layering violation). The two third-party outputs (cJSON parse AND
+ * serialize) are touched nowhere in this file - see
+ * data/control_dispatcher_json_parser.h/data/control_dispatcher_json_writer.h
+ * for the only two places cJSON.h is included, and
+ * data/control_dispatcher_ws_server.h for the one place libwebsockets.h is
+ * included.
  *
  * Unlike ipc_dispatcher/scan_dispatcher (push-only transports), this feature
  * is bidirectional: it RECEIVES JSON commands over its one well-known
@@ -46,7 +48,9 @@ typedef struct {
 
 typedef enum {
     CONTROL_REQ_START_REPORTING,
-    CONTROL_REQ_STOP_REPORTING
+    CONTROL_REQ_STOP_REPORTING,
+    CONTROL_REQ_START_SCAN,
+    CONTROL_REQ_STOP_SCAN
 } ControlRequestType;
 
 /*
@@ -60,7 +64,10 @@ typedef struct {
                                      verbatim in every response derived from this request */
     ControlRequestType type;
 
-    /* CONTROL_REQ_START_REPORTING fields - unused/zero for STOP_REPORTING */
+    /* CONTROL_REQ_START_REPORTING fields - unused/zero for other types.
+     * interfaceId/mmsPort are ALSO reused by CONTROL_REQ_START_SCAN (see
+     * below) - the two request types are mutually exclusive per message, so
+     * sharing these two fields avoids a redundant near-duplicate pair. */
     char* host;                  /* owned */
     int mmsPort;
     char* iedName;                /* owned, may be NULL (auto-detect) */
@@ -69,8 +76,15 @@ typedef struct {
     char* acseAuthPassword;        /* owned, may be NULL */
     AccessMode accessMode;
 
-    /* CONTROL_REQ_STOP_REPORTING fields - unused/zero for START_REPORTING */
+    /* CONTROL_REQ_STOP_REPORTING fields - unused/zero for other types */
     uint64_t deviceId;
+
+    /* CONTROL_REQ_START_SCAN fields - unused/zero for other types (plus
+     * interfaceId/mmsPort above) */
+    uint32_t sweepIntervalMs;     /* optional, 0 = ScanOrchestration's own default */
+
+    /* CONTROL_REQ_STOP_SCAN fields - unused/zero for other types */
+    uint64_t scanId;
 } ControlRequest;
 
 /*
@@ -95,6 +109,8 @@ struct sControlDispatcherHandle {
                                                              NULL when not running */
     DeviceManagerHandle deviceManager;                   /* borrowed - caller (main.c) owns its
                                                              lifetime, must outlive this handle */
+    ScanOrchestrationHandle scanOrchestration;            /* borrowed - same lifetime contract as
+                                                             deviceManager above */
     volatile bool running;
 };
 typedef struct sControlDispatcherHandle* ControlDispatcherHandle;

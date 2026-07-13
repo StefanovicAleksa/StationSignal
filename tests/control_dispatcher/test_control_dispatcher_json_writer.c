@@ -109,6 +109,40 @@ test_writeError_nullRequestIdAndAction_writeJsonNull(void) {
     TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(fixtureParsed, "action")));
 }
 
+void
+test_writeScanStartSuccess_hasExpectedShape(void) {
+    fixtureJson = ControlDispatcherJsonWriter_writeScanStartSuccess("req-5", 42);
+    TEST_ASSERT_NOT_NULL(fixtureJson);
+
+    fixtureParsed = cJSON_Parse(fixtureJson);
+    TEST_ASSERT_NOT_NULL(fixtureParsed);
+
+    TEST_ASSERT_EQUAL_STRING("req-5", cJSON_GetObjectItemCaseSensitive(fixtureParsed, "requestId")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("START_SCAN", cJSON_GetObjectItemCaseSensitive(fixtureParsed, "action")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(fixtureParsed, "success")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(fixtureParsed, "error")));
+
+    cJSON* result = cJSON_GetObjectItemCaseSensitive(fixtureParsed, "result");
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(42 == cJSON_GetObjectItemCaseSensitive(result, "scanId")->valuedouble);
+}
+
+void
+test_writeScanStopSuccess_hasExpectedShape(void) {
+    fixtureJson = ControlDispatcherJsonWriter_writeScanStopSuccess("req-6", 42);
+    TEST_ASSERT_NOT_NULL(fixtureJson);
+
+    fixtureParsed = cJSON_Parse(fixtureJson);
+    TEST_ASSERT_NOT_NULL(fixtureParsed);
+
+    TEST_ASSERT_EQUAL_STRING("STOP_SCAN", cJSON_GetObjectItemCaseSensitive(fixtureParsed, "action")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(fixtureParsed, "success")));
+
+    cJSON* result = cJSON_GetObjectItemCaseSensitive(fixtureParsed, "result");
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(42 == cJSON_GetObjectItemCaseSensitive(result, "scanId")->valuedouble);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -118,6 +152,8 @@ main(void) {
     RUN_TEST(test_writeError_hasExpectedShape_withStageAndDetail);
     RUN_TEST(test_writeError_omitsStageAndDetail_whenNull);
     RUN_TEST(test_writeError_nullRequestIdAndAction_writeJsonNull);
+    RUN_TEST(test_writeScanStartSuccess_hasExpectedShape);
+    RUN_TEST(test_writeScanStopSuccess_hasExpectedShape);
 
     return UNITY_END();
 }

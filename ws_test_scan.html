@@ -1,103 +1,326 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>frontend prototype: scan -> click -> report</title></head>
-<body style="font-family: monospace; background:#111; color:#0f0; padding:1em;">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frontend prototype: scan -> click -> report</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    background: #111;
+    color: #0f0;
+    padding: 1em;
+    margin: 0;
+    max-width: 100%;
+  }
+  h2 { margin: 0 0 0.4em; font-size: 1.05em; }
+  .status { font-weight: bold; }
+  .columns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1em;
+    align-items: flex-start;
+  }
+  .panel {
+    flex: 1 1 420px;
+    min-width: 0;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 0.75em;
+    background: #161616;
+  }
+  .controlsRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    align-items: center;
+    margin: 0.5em 0;
+  }
+  .controlsRow label { white-space: nowrap; font-size: 0.9em; }
+  input[type="text"], input[type="number"] {
+    background: #000;
+    color: #0f0;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 0.25em 0.4em;
+    font-family: inherit;
+    width: 7em;
+  }
+  button {
+    background: #1a1a1a;
+    color: #0f0;
+    border: 1px solid #0a0;
+    border-radius: 3px;
+    padding: 0.3em 0.7em;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #0a2a0a; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .scrollList {
+    max-height: 40vh;
+    overflow-y: auto;
+    overflow-x: auto;
+    margin-top: 0.5em;
+    border-top: 1px solid #222;
+    padding-top: 0.25em;
+  }
+  .deviceRow {
+    cursor: pointer;
+    padding: 0.4em 0.6em;
+    margin: 0.25em 0;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
+  .deviceRow:hover { background: #222; }
+  .logEntry {
+    border-left: 4px solid #0f0;
+    margin: 0.5em 0;
+    padding-left: 0.5em;
+  }
+  .logEntry pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0.2em 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .reportCard {
+    margin: 0.75em 0;
+    padding: 0.5em;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
+  .hint { color: #888; font-size: 0.85em; }
+</style>
+</head>
+<body>
 
-<h2 style="margin-top:0;">Scanning (scan_dispatcher, ws://127.0.0.1:8766)</h2>
-<div id="scanStatus">connecting...</div>
-<div style="margin: 0.5em 0;">
-  interfaceId used to start reporting: <input id="f_interfaceId" value="lo" size="10">
+<div class="columns">
+
+  <div class="panel">
+    <h2>Scanning (scan_dispatcher, ws://127.0.0.1:8766)</h2>
+    <div id="scanWsStatus" class="status">not connected (starts once a scan runs)</div>
+
+    <div class="controlsRow">
+      <label>interface <input type="text" id="f_scanInterfaceId" value="lo" size="8"></label>
+      <label>mmsPort <input type="number" id="f_scanMmsPort" value="102"></label>
+      <label>sweepIntervalMs <input type="number" id="f_sweepIntervalMs" value="0" title="0 = server default"></label>
+      <button id="btnStartScan">Start Scan</button>
+      <button id="btnStopScan" disabled>Stop Scan</button>
+    </div>
+    <div class="hint">note: scanning "lo" will never list any devices (loopback's real netmask is /8 -
+      always fails fast with SUBNET_TOO_LARGE, tolerated silently) - point this at a real LAN
+      interface to actually discover something, or test the bundled simulator directly via
+      <code>startReporting("127.0.0.1", 10202, {style:{}})</code> in the console instead.</div>
+    <div id="scanControlStatus" class="hint">control_dispatcher: connecting...</div>
+    <div id="activeScanInfo" class="hint"></div>
+
+    <div class="controlsRow">
+      <label>interfaceId used to start reporting: <input type="text" id="f_interfaceId" value="lo" size="8"></label>
+    </div>
+
+    <div id="devices" class="scrollList"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Now Reporting (control_dispatcher, ws://127.0.0.1:8767)</h2>
+    <div id="controlStatus" class="status">connecting...</div>
+    <div id="reporting" class="scrollList" style="max-height: 70vh;"></div>
+  </div>
+
 </div>
-<div id="devices" style="margin-top:0.5em;"></div>
-
-<h2>Now Reporting (control_dispatcher, ws://127.0.0.1:8767)</h2>
-<div id="controlStatus">connecting...</div>
-<div id="reporting"></div>
 
 <script>
-  const scanStatusEl = document.getElementById("scanStatus");
+  const scanWsStatusEl = document.getElementById("scanWsStatus");
   const devicesEl = document.getElementById("devices");
   const controlStatusEl = document.getElementById("controlStatus");
+  const scanControlStatusEl = document.getElementById("scanControlStatus");
+  const activeScanInfoEl = document.getElementById("activeScanInfo");
   const reportingEl = document.getElementById("reporting");
+  const btnStartScan = document.getElementById("btnStartScan");
+  const btnStopScan = document.getElementById("btnStopScan");
 
   // key = "host:mmsPort" -> { host, mmsPort, el }
   const discovered = new Map();
-  // key = "host:mmsPort" -> { deviceId, wsPort, ws, mmsCount, gooseCount, otherCount, el, ... }
+  // key = "host:mmsPort" -> { deviceId, wsPort, ws, mmsCount, gooseCount, otherCount, el }
   const reporting = new Map();
   let requestSeq = 0;
-  // requestId -> key ("host:mmsPort") of the device that START_REPORTING was sent for
-  const pendingStarts = new Map();
+  // requestId -> { kind: "startReporting"|"startScan"|"stopScan", key? }
+  const pendingRequests = new Map();
+  let activeScanId = null;
+
+  function nextRequestId() {
+    requestSeq += 1;
+    return `req-${Date.now()}-${requestSeq}`;
+  }
 
   function prependEntry(container, color, label, bodyText) {
     const ts = new Date().toLocaleTimeString();
     const entry = document.createElement("div");
-    entry.style.borderLeft = `4px solid ${color}`;
-    entry.style.margin = "0.5em 0";
-    entry.style.paddingLeft = "0.5em";
+    entry.className = "logEntry";
+    entry.style.borderLeftColor = color;
     entry.innerHTML =
       `<div style="color:${color}; font-weight:bold;">[${ts}] ${label}</div>` +
-      `<pre style="white-space: pre-wrap; margin: 0.2em 0;"></pre>`;
+      `<pre></pre>`;
     entry.querySelector("pre").textContent = bodyText;
     container.insertBefore(entry, container.firstChild);
   }
 
   // ---- scan_dispatcher (8766): render discovered devices as a clickable list ----
+  // Only binds once a scan is actually running (see control_dispatcher's
+  // START_SCAN action below), so this connects lazily with retry rather than
+  // assuming the port is already up at page load.
 
-  const scanWs = new WebSocket("ws://127.0.0.1:8766");
+  let scanWs = null;
 
-  scanWs.onopen = () => { scanStatusEl.textContent = "CONNECTED"; scanStatusEl.style.color = "#0f0"; };
-  scanWs.onerror = () => { scanStatusEl.textContent = "ERROR"; scanStatusEl.style.color = "#f00"; };
-  scanWs.onclose = () => { scanStatusEl.textContent = "CLOSED"; scanStatusEl.style.color = "#f80"; };
+  // Keeps the "active scan #N - ..." line in sync with scanWs's actual
+  // connection state, instead of freezing on whatever text startScan's
+  // response handler wrote once and never touching it again (the bug that
+  // made this line permanently say "waiting for scan_dispatcher to bind..."
+  // even after scan_dispatcher was already connected and streaming).
+  function updateActiveScanInfo() {
+    if (activeScanId === null) return; // stopScan's own handler owns the text once stopped
+    if (scanWs && scanWs.readyState === WebSocket.OPEN) {
+      activeScanInfoEl.textContent = `active scan #${activeScanId} - scan_dispatcher connected, listening for devices...`;
+    } else {
+      activeScanInfoEl.textContent = `active scan #${activeScanId} - waiting for scan_dispatcher to (re)connect...`;
+    }
+  }
 
-  scanWs.onmessage = (e) => {
-    let parsed;
-    try { parsed = JSON.parse(e.data); } catch (err) { return; }
-    if (!parsed || parsed.type !== "SCAN_RESULT") return;
+  function connectScanWs() {
+    if (scanWs && (scanWs.readyState === WebSocket.OPEN || scanWs.readyState === WebSocket.CONNECTING)) return;
 
-    const key = `${parsed.host}:${parsed.mmsPort}`;
-    if (discovered.has(key)) return; // already listed
+    scanWs = new WebSocket("ws://127.0.0.1:8766");
+    scanWsStatusEl.textContent = "connecting...";
+    scanWsStatusEl.style.color = "#0af";
 
-    const row = document.createElement("div");
-    row.style.cursor = "pointer";
-    row.style.padding = "0.4em 0.6em";
-    row.style.margin = "0.25em 0";
-    row.style.border = "1px solid #333";
-    row.textContent = `${parsed.host}:${parsed.mmsPort}  (found ${new Date(parsed.discoveredAtMs).toLocaleTimeString()})`;
-    row.onmouseenter = () => { row.style.background = "#222"; };
-    row.onmouseleave = () => { row.style.background = ""; };
-    row.onclick = () => startReporting(parsed.host, parsed.mmsPort, row);
+    scanWs.onopen = () => {
+      scanWsStatusEl.textContent = "CONNECTED";
+      scanWsStatusEl.style.color = "#0f0";
+      updateActiveScanInfo();
+    };
+    scanWs.onerror = () => {
+      scanWsStatusEl.textContent = "ERROR (retrying)";
+      scanWsStatusEl.style.color = "#f00";
+      updateActiveScanInfo();
+    };
+    scanWs.onclose = () => {
+      scanWsStatusEl.textContent = "not connected (retrying...)";
+      scanWsStatusEl.style.color = "#f80";
+      updateActiveScanInfo();
+      setTimeout(connectScanWs, 2000);
+    };
 
-    devicesEl.appendChild(row);
-    discovered.set(key, { host: parsed.host, mmsPort: parsed.mmsPort, el: row });
-  };
+    scanWs.onmessage = (e) => {
+      let parsed;
+      try { parsed = JSON.parse(e.data); } catch (err) { return; }
+      if (!parsed || parsed.type !== "SCAN_RESULT") return;
 
-  // ---- control_dispatcher (8767): click a device -> START_REPORTING ----
+      const key = `${parsed.host}:${parsed.mmsPort}`;
+      if (discovered.has(key)) return; // already listed
+
+      const row = document.createElement("div");
+      row.className = "deviceRow";
+      row.textContent = `${parsed.host}:${parsed.mmsPort}  (found ${new Date(parsed.discoveredAtMs).toLocaleTimeString()})`;
+      row.onclick = () => startReporting(parsed.host, parsed.mmsPort, row);
+
+      devicesEl.appendChild(row);
+      discovered.set(key, { host: parsed.host, mmsPort: parsed.mmsPort, el: row });
+    };
+  }
+  connectScanWs();
+
+  // ---- control_dispatcher (8767): START_REPORTING/STOP_REPORTING/START_SCAN/STOP_SCAN ----
 
   const controlWs = new WebSocket("ws://127.0.0.1:8767");
 
-  controlWs.onopen = () => { controlStatusEl.textContent = "CONNECTED"; controlStatusEl.style.color = "#0f0"; };
-  controlWs.onerror = () => { controlStatusEl.textContent = "ERROR"; controlStatusEl.style.color = "#f00"; };
-  controlWs.onclose = () => { controlStatusEl.textContent = "CLOSED"; controlStatusEl.style.color = "#f80"; };
+  controlWs.onopen = () => {
+    controlStatusEl.textContent = "CONNECTED";
+    controlStatusEl.style.color = "#0f0";
+    scanControlStatusEl.textContent = "control_dispatcher: connected";
+  };
+  controlWs.onerror = () => {
+    controlStatusEl.textContent = "ERROR";
+    controlStatusEl.style.color = "#f00";
+    scanControlStatusEl.textContent = "control_dispatcher: error";
+  };
+  controlWs.onclose = () => {
+    controlStatusEl.textContent = "CLOSED";
+    controlStatusEl.style.color = "#f80";
+    scanControlStatusEl.textContent = "control_dispatcher: closed";
+  };
 
   controlWs.onmessage = (e) => {
     let parsed;
     try { parsed = JSON.parse(e.data); } catch (err) { return; }
     if (!parsed) return;
 
-    const key = pendingStarts.get(parsed.requestId);
-    pendingStarts.delete(parsed.requestId);
+    const pending = pendingRequests.get(parsed.requestId);
+    pendingRequests.delete(parsed.requestId);
+    if (!pending) return;
 
-    if (parsed.action === "START_REPORTING" && key) {
+    if (pending.kind === "startReporting") {
       if (parsed.success && parsed.result) {
-        beginStreaming(key, parsed.result.deviceId, parsed.result.wsPort);
+        beginStreaming(pending.key, parsed.result.deviceId, parsed.result.wsPort);
       } else {
-        const dev = discovered.get(key);
+        const dev = discovered.get(pending.key);
         if (dev) {
           dev.el.style.borderColor = "#f00";
           dev.el.title = parsed.error ? parsed.error.message : "start failed";
         }
       }
+    } else if (pending.kind === "startScan") {
+      if (parsed.success && parsed.result) {
+        activeScanId = parsed.result.scanId;
+        updateActiveScanInfo();
+        btnStartScan.disabled = true;
+        btnStopScan.disabled = false;
+        connectScanWs();
+      } else {
+        activeScanInfoEl.textContent = `START_SCAN failed: ${parsed.error ? parsed.error.message : "unknown error"}`;
+      }
+    } else if (pending.kind === "stopScan") {
+      if (parsed.success) {
+        activeScanInfoEl.textContent = activeScanId !== null ? `scan #${activeScanId} stopped` : "";
+      } else {
+        activeScanInfoEl.textContent = `STOP_SCAN failed: ${parsed.error ? parsed.error.message : "unknown error"}`;
+      }
+      activeScanId = null;
+      btnStartScan.disabled = false;
+      btnStopScan.disabled = true;
     }
+  };
+
+  btnStartScan.onclick = () => {
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "startScan" });
+
+    controlWs.send(JSON.stringify({
+      requestId,
+      action: "START_SCAN",
+      params: {
+        interfaceId: document.getElementById("f_scanInterfaceId").value,
+        mmsPort: parseInt(document.getElementById("f_scanMmsPort").value, 10) || 102,
+        sweepIntervalMs: parseInt(document.getElementById("f_sweepIntervalMs").value, 10) || 0,
+      },
+    }));
+    activeScanInfoEl.textContent = "starting scan...";
+  };
+
+  btnStopScan.onclick = () => {
+    if (activeScanId === null) return;
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "stopScan" });
+
+    controlWs.send(JSON.stringify({
+      requestId,
+      action: "STOP_SCAN",
+      params: { scanId: activeScanId },
+    }));
+    activeScanInfoEl.textContent = `stopping scan #${activeScanId}...`;
   };
 
   function startReporting(host, mmsPort, rowEl) {
@@ -107,9 +330,8 @@
     rowEl.style.borderColor = "#0af";
     rowEl.style.opacity = "0.6";
 
-    requestSeq += 1;
-    const requestId = `req-${Date.now()}-${requestSeq}`;
-    pendingStarts.set(requestId, key);
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "startReporting", key });
 
     const message = {
       requestId,
@@ -135,9 +357,7 @@
     if (dev) dev.el.style.borderColor = "#0f0";
 
     const container = document.createElement("div");
-    container.style.margin = "0.75em 0";
-    container.style.padding = "0.5em";
-    container.style.border = "1px solid #333";
+    container.className = "reportCard";
     container.innerHTML = `
       <div style="color:#ff0; font-weight:bold;">${key} — device ${deviceId} — ws://127.0.0.1:${wsPort}</div>
       <div class="rStatus" style="color:#0af;">connecting...</div>

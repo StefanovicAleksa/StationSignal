@@ -8,13 +8,14 @@
  * ever include this header - never reach into domain/data directly.
  *
  * Unlike ipc_dispatcher/scan_dispatcher (push-only transports), this
- * feature RECEIVES JSON commands (START_REPORTING/STOP_REPORTING) over its
- * one well-known websocket port and pushes back JSON acks/errors, relaying
- * them to device_manager - see CLAUDE.md's control_dispatcher Architecture
- * bullet for the full envelope shape, threading design, and error-code
- * table. deviceManager is BORROWED at _create time - caller (main.c) owns
- * its lifetime and must keep it alive for at least this handle's own
- * lifetime (create..destroy).
+ * feature RECEIVES JSON commands (START_REPORTING/STOP_REPORTING/
+ * START_SCAN/STOP_SCAN) over its one well-known websocket port and pushes
+ * back JSON acks/errors, relaying them to device_manager/scan_orchestration
+ * - see CLAUDE.md's control_dispatcher Architecture bullet for the full
+ * envelope shape, threading design, and error-code table. deviceManager and
+ * scanOrchestration are both BORROWED at _create time - caller (main.c)
+ * owns their lifetime and must keep them alive for at least this handle's
+ * own lifetime (create..destroy).
  */
 
 /* Fills config with recommended defaults: port=8767 (next after
@@ -32,7 +33,7 @@ ControlDispatcherConfig_defaults(ControlDispatcherConfig* config);
  */
 ControlDispatcherHandle
 ControlDispatcher_create(const ControlDispatcherConfig* config, DeviceManagerHandle deviceManager,
-        ControlDispatcherError* outError);
+        ScanOrchestrationHandle scanOrchestration, ControlDispatcherError* outError);
 
 /*
  * Binds 127.0.0.1:config.port, starts the libwebsockets service thread AND

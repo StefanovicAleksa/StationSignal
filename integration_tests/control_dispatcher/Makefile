@@ -2,14 +2,17 @@
 # traffic: a hand-rolled RFC6455 client (first in this repo to also SEND
 # frames, not just receive - see e2e_test_control_dispatcher.c's own header
 # comment) drives START_REPORTING/STOP_REPORTING against a real
-# DeviceManagerHandle wired to a real "Reporter1" IED simulator instance.
+# DeviceManagerHandle wired to a real "Reporter1" IED simulator instance, and
+# START_SCAN/STOP_SCAN against a real ScanOrchestrationHandle (over "lo",
+# needs no sudo - see that test case's own comment).
 # Scoped to this directory only - does not imply or replace a root daemon
 # build command. Unity is vendored as a prebuilt static lib in third_party/,
 # same as libiec61850/libmxml - linked via -lunity.
 #
 # Union of control_dispatcher's own full stack, device_manager's full stack,
-# and orchestration's entire stack (same as integration_tests/device_manager/'s
-# own Makefile).
+# scan_orchestration's full stack (+ scan_dispatcher + ied_discovery, its own
+# dependencies), and orchestration's entire stack (same as
+# integration_tests/device_manager/'s own Makefile).
 #
 # Links ied_simulator/src/sim_server.c directly (server and client both run
 # in the same test process, over loopback/"lo") - sim_server.c itself has
@@ -29,6 +32,9 @@ THIRD_PARTY_LIB      := $(ROOT)/third_party/lib
 CONTROL_DISPATCHER := $(SRC)/features/control_dispatcher
 DEVICE_MANAGER := $(SRC)/device_manager
 ORCHESTRATION := $(SRC)/orchestration
+SCAN_ORCHESTRATION := $(SRC)/scan_orchestration
+SCAN_DISPATCHER := $(SRC)/features/scan_dispatcher
+IED_DISCOVERY := $(SRC)/features/ied_discovery
 SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
 IED_MODEL   := $(SRC)/features/ied_model
 IED_MODEL_ONLINE_LOADER := $(SRC)/features/ied_model_online_loader
@@ -64,6 +70,22 @@ $(BIN): e2e_test_control_dispatcher.c \
 		$(ORCHESTRATION)/domain/orchestration_usecases.c \
 		$(ORCHESTRATION)/data/orchestration_staging.c \
 		$(ORCHESTRATION)/utils/orchestration_utils.c \
+		$(SCAN_ORCHESTRATION)/domain/scan_orchestration_usecases.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_worker.c \
+		$(SCAN_ORCHESTRATION)/data/scan_orchestration_registry.c \
+		$(SCAN_ORCHESTRATION)/service/scan_orchestration_api.c \
+		$(SCAN_DISPATCHER)/domain/scan_dispatcher_usecases.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ring_buffer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_ws_server.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_json_writer.c \
+		$(SCAN_DISPATCHER)/data/scan_dispatcher_adapter.c \
+		$(SCAN_DISPATCHER)/service/scan_dispatcher_api.c \
+		$(IED_DISCOVERY)/service/ied_discovery_api.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c \
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/data/ied_discovery_mms_probe.c \
+		$(IED_DISCOVERY)/data/ied_discovery_auth.c \
+		$(IED_DISCOVERY)/utils/ied_discovery_utils.c \
 		$(SCL_BOOTSTRAP)/service/scl_bootstrap_api.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_tcp_probe.c \
 		$(SCL_BOOTSTRAP)/data/scl_bootstrap_mms_session.c \

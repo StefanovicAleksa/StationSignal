@@ -17,8 +17,8 @@ ControlDispatcherConfig_defaults(ControlDispatcherConfig* config) {
 
 ControlDispatcherHandle
 ControlDispatcher_create(const ControlDispatcherConfig* config, DeviceManagerHandle deviceManager,
-        ControlDispatcherError* outError) {
-    if (!deviceManager) {
+        ScanOrchestrationHandle scanOrchestration, ControlDispatcherError* outError) {
+    if (!deviceManager || !scanOrchestration) {
         if (outError) *outError = CONTROL_DISPATCHER_ERR_INVALID_ARGUMENT;
         return NULL;
     }
@@ -43,6 +43,7 @@ ControlDispatcher_create(const ControlDispatcherConfig* config, DeviceManagerHan
     }
 
     handle->deviceManager = deviceManager;
+    handle->scanOrchestration = scanOrchestration;
 
     handle->ringBuffer = (struct sControlDispatcherRingBuffer*)
             ControlDispatcherRingBuffer_create(handle->config.ringBufferCapacity);
@@ -87,7 +88,8 @@ ControlDispatcher_start(ControlDispatcherHandle handle) {
     if (!wsServer) return err;
 
     ControlDispatcherWorker worker = ControlDispatcherWorker_create((ControlDispatcherRequestQueue) handle->requestQueue,
-            (ControlDispatcherRingBuffer) handle->ringBuffer, wsServer, handle->deviceManager, &err);
+            (ControlDispatcherRingBuffer) handle->ringBuffer, wsServer, handle->deviceManager,
+            handle->scanOrchestration, &err);
     if (!worker) {
         ControlDispatcherWsServer_destroy(wsServer);
         return err;

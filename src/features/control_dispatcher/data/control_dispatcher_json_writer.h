@@ -20,6 +20,12 @@ ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t de
 char*
 ControlDispatcherJsonWriter_writeStopSuccess(const char* requestId, uint64_t deviceId);
 
+char*
+ControlDispatcherJsonWriter_writeScanStartSuccess(const char* requestId, uint64_t scanId);
+
+char*
+ControlDispatcherJsonWriter_writeScanStopSuccess(const char* requestId, uint64_t scanId);
+
 /*
  * errorCode is a stable string (e.g. "INVALID_ARGUMENT", "HOST_ALREADY_RUNNING",
  * "ORCHESTRATION_FAILED", "DEVICE_NOT_FOUND", "START_IN_PROGRESS",
