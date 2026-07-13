@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
@@ -44,13 +43,6 @@ void
 MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     MmsReportClientHandle handle = (MmsReportClientHandle) parameter;
 
-    /* Debug trace: confirms whether the server-pushed report is actually
-     * arriving at this callback at all, before anything downstream
-     * (record building, the reportCallback -> ipc_dispatcher -> websocket
-     * chain) has a chance to swallow or drop it silently. */
-    fprintf(stderr, "[mms_report_client] onReport fired: handle=%p reportCallback=%p report=%p\n",
-            (void*) handle, handle ? (void*) handle->reportCallback : NULL, (void*) report);
-
     if (!handle || !handle->reportCallback || !report) return;
 
     char* rcbReference = ClientReport_getRcbReference(report);
@@ -60,9 +52,6 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
 
     MmsValue* dataSetValues = ClientReport_getDataSetValues(report);
     int entryCount = dataSetValues ? MmsValue_getArraySize(dataSetValues) : 0;
-
-    fprintf(stderr, "[mms_report_client] onReport: rcbReference=%s entryCount=%d\n",
-            rcbReference ? rcbReference : "(null)", entryCount);
 
     ReasonForInclusion* reasons = NULL;
     const char** dataReferences = NULL;
@@ -82,6 +71,13 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     bool hasTimestamp = ClientReport_hasTimestamp(report);
     bool hasSeqNum = ClientReport_hasSeqNum(report);
 
+    /* Guarded by memberRefCacheLock - buildReportRecord reads/mutates
+     * fallback->lastForwardedValues (the value-diff cache), which the
+     * supervisor thread can concurrently reset in enableOneTarget
+     * (mms_report_client_connection.c) on a (re-)enable. Without this lock
+     * the two threads race on the same MmsValue* slots - see that field's
+     * own doc comment in mms_report_client_types.h. */
+    Semaphore_wait(handle->memberRefCacheLock);
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             rcbReference, buffered, rptId,
             entryId != NULL, entryId,
@@ -90,6 +86,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
             dataSetValues, reasons, dataReferences,
             fallback,
             entryCount);
+    Semaphore_post(handle->memberRefCacheLock);
 
     free(reasons);
     free(dataReferences);

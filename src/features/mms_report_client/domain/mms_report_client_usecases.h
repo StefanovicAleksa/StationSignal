@@ -51,29 +51,17 @@ void
 MmsReportClientUseCases_freeReportRecord(MmsReportRecord* record);
 
 /*
- * reason is a genuine bitmask - ClientReport_getReasonForInclusion can OR
- * multiple bits together (e.g. DATA_CHANGE|INTEGRITY if a value happens to
- * change exactly when an integrity scan fires), so this must never be an
- * equality check. Returns true iff reason carries any real-change bit
- * (DATA_CHANGE/QUALITY_CHANGE/DATA_UPDATE), regardless of any periodic bit
- * (INTEGRITY/GI) also present - the server is vouching for a genuine change,
- * so buildEntries trusts it unconditionally rather than running the
- * value-diff check. False for INTEGRITY/GI-only entries and for
- * UNKNOWN/NOT_INCLUDED (servers that omit reason-for-inclusion entirely) -
- * both fall through to the value-diff cache instead of being trusted or
- * dropped outright.
- */
-bool
-MmsReportClientUseCases_hasRealChangeReason(ReasonForInclusion reason);
-
-/*
- * Value-diff check for the hybrid filter's non-real-change branch. cached is
- * the last value actually forwarded for this exact wire position (NULL means
- * nothing has ever been forwarded yet). Returns true (duplicate, should be
- * dropped) only when cached is non-NULL AND bit-for-bit equal
- * (MmsValue_equals) to newValue - a NULL cached value always returns false,
- * which is what lets the first-ever report for a position (typically the
- * startup GI snapshot) survive and seed the cache.
+ * Value-diff check for the event filter. cached is the last value actually
+ * cached for this exact wire position (NULL means nothing has ever been
+ * cached yet). Returns true (duplicate, should be dropped) only when cached
+ * is non-NULL AND bit-for-bit equal (MmsValue_equals) to newValue - a NULL
+ * cached value always returns false (not a duplicate), but that alone does
+ * NOT mean "forward it": the caller (shouldForwardAndUpdateCache,
+ * mms_report_client_usecases.c) treats a NULL cache as a bootstrap event and
+ * seeds the cache WITHOUT forwarding, so the startup/reconnect GI snapshot
+ * never reaches the caller's report callback, only the first genuine change
+ * afterward does (with a real previous value
+ * to report, since the cache is now seeded).
  */
 bool
 MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue);

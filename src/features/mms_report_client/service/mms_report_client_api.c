@@ -8,7 +8,6 @@ void
 MmsReportClientConfig_defaults(MmsReportClientConfig* config) {
     if (!config) return;
 
-    config->generalInterrogationOnEnable = true;
     config->connectTimeoutMs = 0;
     config->requestTimeoutMs = 0;
     config->reconnectInitialDelayMs = 1000;
@@ -119,6 +118,41 @@ linkedListToStringArray(LinkedList list, int* outCount) {
     return array;
 }
 
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * IedModelDaSemantic* (see IedModel_getDataSetMemberSemantics/
+ * _getDataSetMemberLeafSemantics) - copies each boxed enum BY VALUE into the
+ * array and frees the boxed items (unlike linkedListToStringArray, which
+ * transfers string ownership - an enum has nothing to transfer). Returns NULL
+ * and leaves *outCount at 0 on empty/NULL input or allocation failure (list
+ * fully destroyed either way). */
+static IedModelDaSemantic*
+linkedListToSemanticArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    IedModelDaSemantic* array = calloc((size_t) count, sizeof(IedModelDaSemantic));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        IedModelDaSemantic* boxed = (IedModelDaSemantic*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
+
+    *outCount = count;
+    return array;
+}
+
 /*
  * One-time, local resolution of each target's dataset member references
  * (never over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery"
@@ -170,6 +204,24 @@ buildMemberRefCache(MmsReportClientHandle client) {
             int* leafOffsets = calloc((size_t) count, sizeof(int));
             int totalLeafSlots = 0;
 
+            /* Per-raw-member Dbpos semantics (count-aligned with `array`
+             * itself) plus, for decomposed members, per-leaf semantics
+             * (mirrors leafRefsArray/leafCounts' own shape exactly, since
+             * IedModel_getDataSetMemberLeafSemantics is the semantics
+             * counterpart of IedModel_getDataSetMemberLeafReferences and
+             * walks the identical tree in the identical order). Both are
+             * NULL for the "Dyn" (no datasetReference) case - a known,
+             * accepted v1 gap, see IedModel's own doc comment on
+             * getDataSetMemberSemantics. */
+            int rawSemCount = 0;
+            IedModelDaSemantic* rawSemantics = target->datasetReference
+                    ? linkedListToSemanticArray(
+                            IedModel_getDataSetMemberSemantics(client->iedModel, target->datasetReference),
+                            &rawSemCount)
+                    : NULL;
+            IedModelDaSemantic** leafSemArray = calloc((size_t) count, sizeof(IedModelDaSemantic*));
+            int* leafSemCounts = calloc((size_t) count, sizeof(int));
+
             if (leafRefsArray && leafCounts && leafOffsets) {
                 for (int m = 0; m < count; m++) {
                     int leafCount = 0;
@@ -180,6 +232,15 @@ buildMemberRefCache(MmsReportClientHandle client) {
 
                     leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
                     leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+                    if (leafSemArray && leafSemCounts && target->datasetReference) {
+                        int leafSemCount = 0;
+                        leafSemArray[m] = linkedListToSemanticArray(
+                                IedModel_getDataSetMemberLeafSemantics(client->iedModel,
+                                        target->datasetReference, m),
+                                &leafSemCount);
+                        leafSemCounts[m] = leafSemCount;
+                    }
 
                     /* Value-diff cache slot(s) for member m: leafCount
                      * consecutive slots if decomposed, else exactly 1. */
@@ -193,6 +254,39 @@ buildMemberRefCache(MmsReportClientHandle client) {
             MmsValue** lastForwardedValues = (leafRefsArray && leafCounts && leafOffsets)
                     ? calloc((size_t) totalLeafSlots, sizeof(MmsValue*)) : NULL;
 
+            /* Zero-initialized (IED_MODEL_DA_SEMANTIC_NONE == 0) so any
+             * member/leaf whose semantic couldn't be resolved degrades
+             * safely rather than crashing - flattened from
+             * rawSemantics/leafSemArray below. Deliberately NOT part of this
+             * cacheEntry's own success/failure gate (unlike
+             * lastForwardedValues, which the hybrid filter itself depends
+             * on) - a NULL leafSemantics just means no Dbpos labels for this
+             * RCB, not a broken cache. */
+            IedModelDaSemantic* leafSemantics = (leafRefsArray && leafCounts && leafOffsets)
+                    ? calloc((size_t) totalLeafSlots, sizeof(IedModelDaSemantic)) : NULL;
+            if (leafSemantics) {
+                for (int m = 0; m < count; m++) {
+                    if (leafCounts[m] > 0) {
+                        if (leafSemArray && leafSemArray[m] && leafSemCounts[m] == leafCounts[m]) {
+                            for (int k = 0; k < leafCounts[m]; k++) {
+                                leafSemantics[leafOffsets[m] + k] = leafSemArray[m][k];
+                            }
+                        }
+                    } else if (rawSemantics && m < rawSemCount) {
+                        leafSemantics[leafOffsets[m]] = rawSemantics[m];
+                    }
+                }
+            }
+
+            /* Temporaries only used to build the flattened arrays above -
+             * always freed here, regardless of the cacheEntry outcome below. */
+            free(rawSemantics);
+            if (leafSemArray) {
+                for (int m = 0; m < count; m++) free(leafSemArray[m]);
+                free(leafSemArray);
+            }
+            free(leafSemCounts);
+
             MmsReportClientMemberRefCacheEntry* cacheEntry = malloc(sizeof(MmsReportClientMemberRefCacheEntry));
             if (cacheEntry && leafRefsArray && leafCounts && leafOffsets && lastForwardedValues) {
                 cacheEntry->rcbReference = MmsReportClientUtils_safeStringDup(target->objectReference);
@@ -203,6 +297,7 @@ buildMemberRefCache(MmsReportClientHandle client) {
                 cacheEntry->leafSlotOffsets = leafOffsets;
                 cacheEntry->totalLeafSlots = totalLeafSlots;
                 cacheEntry->lastForwardedValues = lastForwardedValues;
+                cacheEntry->leafSemantics = leafSemantics;
                 LinkedList_add(cache, cacheEntry);
             } else {
                 free(cacheEntry);
@@ -219,6 +314,7 @@ buildMemberRefCache(MmsReportClientHandle client) {
                 free(leafCounts);
                 free(leafOffsets);
                 free(lastForwardedValues);
+                free(leafSemantics);
             }
         }
         element = LinkedList_getNext(element);

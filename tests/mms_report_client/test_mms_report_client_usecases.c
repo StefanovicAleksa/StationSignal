@@ -189,14 +189,14 @@ test_freeReportRecord_doesNotCrash_onNull(void) {
  * buildMemberRefCache constructs at MmsReportClient_start. */
 
 void
-test_buildReportRecord_giReason_firstEverValue_isForwarded_andSeedsCache(void) {
+test_buildReportRecord_giReason_firstEverValue_isSuppressed_andSeedsCache(void) {
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
     ReasonForInclusion reasons[1] = { IEC61850_REASON_GI };
 
     int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[1] = { NULL }; /* never forwarded yet */
+    MmsValue* lastForwardedValues[1] = { NULL }; /* never cached yet */
     MmsReportClientMemberRefCacheEntry cache = { 0 };
     cache.memberCount = 1;
     cache.leafSlotOffsets = leafSlotOffsets;
@@ -209,11 +209,14 @@ test_buildReportRecord_giReason_firstEverValue_isForwarded_andSeedsCache(void) {
             dataSetValues, reasons, NULL, &cache, 1);
 
     TEST_ASSERT_NOT_NULL(record);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
-            "the very first report for a position must survive even with a purely periodic (GI) "
-            "reason - it's the only chance to deliver that position's initial value");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a GI-reasoned report (this client never requests GI itself, but must still handle "
+            "one arriving - e.g. from a foreign client's own interrogation) must never reach the "
+            "websocket when it's the very first report for this position - it's cache-seed-only");
+    TEST_ASSERT_NULL(record->entries);
     TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0],
-            "the cache slot must be seeded after the first forward");
+            "the cache slot must still be silently seeded, so the first GENUINE change afterward "
+            "has a real previous value to report");
     TEST_ASSERT_TRUE(MmsValue_getBoolean(cache.lastForwardedValues[0]));
 
     MmsValue_delete(cache.lastForwardedValues[0]);
@@ -284,7 +287,13 @@ test_buildReportRecord_integrityReason_changedValue_isForwarded(void) {
 }
 
 void
-test_buildReportRecord_dataChangeReason_sameValueAsCache_isStillForwarded(void) {
+test_buildReportRecord_dataChangeReason_sameValueAsCache_isDropped(void) {
+    /* Regression test for a real-hardware finding: a live IED was observed
+     * tagging hundreds of consecutive, byte-identical reports as DATA_CHANGE
+     * even though the value never actually changed (confirmed via
+     * previousValue == value on every one of them). The reason bit is no
+     * longer trusted as a bypass of the value-diff check - see
+     * shouldForwardAndUpdateCache's own doc comment for the full story. */
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
@@ -305,9 +314,135 @@ test_buildReportRecord_dataChangeReason_sameValueAsCache_isStillForwarded(void) 
             dataSetValues, reasons, NULL, &cache, 1);
 
     TEST_ASSERT_NOT_NULL(record);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
-            "a genuine DATA_CHANGE reason must always be trusted and forwarded, "
-            "even if the value happens to equal the cache");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a DATA_CHANGE reason must NOT bypass the value-diff check - a real device has "
+            "been observed to tag unchanged resends as DATA_CHANGE, and this must still be "
+            "dropped like any other unchanged duplicate");
+    TEST_ASSERT_NULL(record->entries);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_realChangeReason_previousValueEqualsPriorCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) }; /* prior cache */
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_NOT_NULL_MESSAGE(record->entries[0].previousValue,
+            "a real DATA_CHANGE report must carry the prior cached value as its previousValue");
+    TEST_ASSERT_FALSE_MESSAGE(MmsValue_getBoolean(record->entries[0].previousValue),
+            "previousValue must be the OLD cached value, not the new one");
+    TEST_ASSERT_TRUE_MESSAGE(MmsValue_getBoolean(record->entries[0].value), "value itself must be the new one");
+    TEST_ASSERT_TRUE_MESSAGE(record->entries[0].previousValue != cache.lastForwardedValues[0],
+            "previousValue must be an independent clone, not aliased to the live cache slot");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_firstEverRealChange_noPriorBootstrap_previousValueIsNull(void) {
+    /* slot < 0 (no memberRefCache at all) - the one accepted structural case
+     * where previousValue can never be known. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, NULL, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_NULL(record->entries[0].previousValue);
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_dbposSemantic_threadedOntoEntry_fromLeafSemantics(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    /* Non-NULL and genuinely different from the new value (true) - this test
+     * is about semantic threading, not bootstrap suppression, so it must not
+     * rely on the (now-removed) reason-trust bypass to survive an empty
+     * cache; a real value-diff is what makes this entry forward. */
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    IedModelDaSemantic leafSemantics[1] = { IED_MODEL_DA_SEMANTIC_DBPOS };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafSemantics = leafSemantics;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_DBPOS, record->entries[0].semantic);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_semantic_defaultsNone_whenLeafSemanticsIsNull(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    /* Non-NULL and genuinely different, same reasoning as the sibling test
+     * above - this test is about semantic defaulting, not bootstrap. */
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafSemantics = NULL; /* mirrors an OOM-degraded or online-discovery-model build */
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
+    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, record->entries[0].semantic);
 
     MmsValue_delete(cache.lastForwardedValues[0]);
     MmsValue_delete(dataSetValues);
@@ -329,14 +464,15 @@ test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice
 
     ReasonForInclusion reasons[1] = { IEC61850_REASON_UNKNOWN };
 
-    /* Call 1: first-ever value survives. */
+    /* Call 1: first-ever value is bootstrap-suppressed (cache-seed only). */
     MmsValue* dataSetValues1 = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues1, 0, MmsValue_newBoolean(true));
     MmsReportRecord* record1 = MmsReportClientUseCases_buildReportRecord(
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
             dataSetValues1, reasons, NULL, &cache, 1);
-    TEST_ASSERT_EQUAL_INT(1, record1->entryCount);
+    TEST_ASSERT_EQUAL_INT(0, record1->entryCount);
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "call 1 must still silently seed the cache");
     MmsValue_delete(dataSetValues1);
     MmsReportClientUseCases_freeReportRecord(record1);
 
@@ -351,7 +487,8 @@ test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice
     MmsValue_delete(dataSetValues2);
     MmsReportClientUseCases_freeReportRecord(record2);
 
-    /* Call 3: genuinely different value - must survive. */
+    /* Call 3: genuinely different value - must survive, with call 1/2's
+     * bootstrap-seeded value as its previousValue. */
     MmsValue* dataSetValues3 = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues3, 0, MmsValue_newBoolean(false));
     MmsReportRecord* record3 = MmsReportClientUseCases_buildReportRecord(
@@ -359,6 +496,9 @@ test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice
             false, NULL, false, 0, false, 0,
             dataSetValues3, reasons, NULL, &cache, 1);
     TEST_ASSERT_EQUAL_INT(1, record3->entryCount);
+    TEST_ASSERT_NOT_NULL_MESSAGE(record3->entries[0].previousValue,
+            "the bootstrap-seeded value must surface as the previous value on the first genuine change");
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(record3->entries[0].previousValue));
     MmsValue_delete(dataSetValues3);
     MmsReportClientUseCases_freeReportRecord(record3);
 
@@ -445,7 +585,7 @@ test_buildReportRecord_decomposition_countMismatch_fallsBackToRawEntry(void) {
 }
 
 void
-test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped(void) {
+test_buildReportRecord_decomposedGiEntry_isSuppressed_seedsCache_thenDuplicateDropped(void) {
     char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
     char** memberLeafReferences[1] = { leafRefs0 };
     int memberLeafCounts[1] = { 2 };
@@ -463,7 +603,7 @@ test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped(void) {
     ReasonForInclusion giReasons[1] = { IEC61850_REASON_GI };
     ReasonForInclusion integrityReasons[1] = { IEC61850_REASON_INTEGRITY };
 
-    /* Call 1 (GI, first ever): both leaves survive and seed the cache. */
+    /* Call 1 (GI, first ever): both leaves are suppressed but seed the cache. */
     MmsValue* structVal1 = MmsValue_createEmptyStructure(2);
     MmsValue_setElement(structVal1, 0, MmsValue_newBoolean(true));
     MmsValue_setElement(structVal1, 1, MmsValue_newBitString(13));
@@ -474,8 +614,10 @@ test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped(void) {
             "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
             false, NULL, false, 0, false, 0,
             dataSetValues1, giReasons, NULL, &cache, 1);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record1->entryCount,
-            "the first-ever GI report must deliver both decomposed leaves");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record1->entryCount,
+            "the first-ever GI report must never deliver either decomposed leaf to the websocket");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "both leaf slots must still be seeded");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[1], "both leaf slots must still be seeded");
     MmsValue_delete(dataSetValues1);
     MmsReportClientUseCases_freeReportRecord(record1);
 
@@ -564,6 +706,50 @@ test_buildReportRecord_qualityForwarded_dragsUnchangedValueSibling(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
             "a genuine quality-only change must not be dropped as a lone entry - its unchanged "
             "value sibling must be dragged along too, matching what ipc_dispatcher needs to pair them");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_draggedAlongSibling_previousValueEqualsOwnCurrentValue(void) {
+    /* Same scenario as test_buildReportRecord_valueForwarded_dragsUnchangedQualitySibling
+     * (quality's own diff-check says unchanged, dragged in by its changed
+     * value sibling) - here asserting the dragged-along quality's own
+     * previousValue: since it didn't itself change, previousValue must equal
+     * its own current value (that's exactly why it needed dragging in - see
+     * this repo's own documented judgment call on "changed" being judged at
+     * the pair level, not the raw scalar level). */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(2, record->entryCount);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+    TEST_ASSERT_NOT_NULL(record->entries[1].previousValue);
+    TEST_ASSERT_EQUAL_MESSAGE(MmsValue_getBoolean(record->entries[1].value),
+            MmsValue_getBoolean(record->entries[1].previousValue),
+            "the dragged-along quality entry didn't itself change, so previousValue must equal value");
 
     MmsValue_delete(cache.lastForwardedValues[0]);
     MmsValue_delete(cache.lastForwardedValues[1]);
@@ -805,20 +991,23 @@ test_resetValueDiffCache_isNoOp_whenEntryIsNull(void) {
 }
 
 void
-test_buildReportRecord_afterResetValueDiffCache_unchangedValueForwardedAgain(void) {
-    /* Simulates a reconnect: the same value was already forwarded once
-     * before (seeded below), then the connection drops and reconnects -
-     * enableOneTarget resets the cache, and the reconnect's GI-triggered
-     * report carries the exact same, unchanged value. It must still be
-     * forwarded (the whole point of resetting on reconnect), proving the
-     * fix for the "reconnect's GI snapshot silently dropped" regression. */
+test_buildReportRecord_afterResetValueDiffCache_giReasonIsSuppressed_reseedsCache(void) {
+    /* Simulates a reconnect: a value was already cached before (seeded
+     * below), then the connection drops and reconnects - enableOneTarget
+     * resets the cache (now before the enable write is even sent, see its
+     * own comment), and the reconnect's first report happens to carry a
+     * GI reason (this client never requests GI itself, but must still
+     * handle one arriving) with the exact same, unchanged value. This must
+     * NOT reach the websocket (bootstrap-only, exactly like the initial
+     * startup case), but must silently reseed the cache so a genuine change
+     * after the reconnect has a real previous value to report. */
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
     ReasonForInclusion reasons[1] = { IEC61850_REASON_GI };
 
     int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* forwarded before the "disconnect" */
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* cached before the "disconnect" */
     MmsReportClientMemberRefCacheEntry cache = { 0 };
     cache.memberCount = 1;
     cache.leafSlotOffsets = leafSlotOffsets;
@@ -834,10 +1023,10 @@ test_buildReportRecord_afterResetValueDiffCache_unchangedValueForwardedAgain(voi
             dataSetValues, reasons, NULL, &cache, 1);
 
     TEST_ASSERT_NOT_NULL(record);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
-            "a value identical to what was forwarded before a reconnect must still be delivered "
-            "once the cache has been reset");
-    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a reconnect's GI-triggered snapshot must never reach the websocket, same as the "
+            "initial startup GI snapshot");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "the cache must still be reseeded after reconnect");
 
     MmsValue_delete(cache.lastForwardedValues[0]);
     MmsValue_delete(dataSetValues);
@@ -973,37 +1162,6 @@ test_destroyCrossRcbDedupCache_doesNotCrash_onNull(void) {
     MmsReportClientUseCases_destroyCrossRcbDedupCache(NULL);
 }
 
-/* ---- hasRealChangeReason ---- */
-
-void
-test_hasRealChangeReason_trueForEachRealBitAlone(void) {
-    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_DATA_CHANGE));
-    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_QUALITY_CHANGE));
-    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_DATA_UPDATE));
-}
-
-void
-test_hasRealChangeReason_falseForIntegrityOrGiAlone(void) {
-    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_INTEGRITY));
-    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_GI));
-    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(
-            IEC61850_REASON_INTEGRITY | IEC61850_REASON_GI));
-}
-
-void
-test_hasRealChangeReason_trueWhenCombinedWithPeriodicBit(void) {
-    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(
-            IEC61850_REASON_DATA_CHANGE | IEC61850_REASON_INTEGRITY));
-    TEST_ASSERT_TRUE(MmsReportClientUseCases_hasRealChangeReason(
-            IEC61850_REASON_QUALITY_CHANGE | IEC61850_REASON_GI));
-}
-
-void
-test_hasRealChangeReason_falseForUnknownAndNotIncluded(void) {
-    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_UNKNOWN));
-    TEST_ASSERT_FALSE(MmsReportClientUseCases_hasRealChangeReason(IEC61850_REASON_NOT_INCLUDED));
-}
-
 /* ---- buildWireMemberReferences (dynamic-dataset wire-format conversion) ---- */
 
 void
@@ -1125,17 +1283,22 @@ main(void) {
     RUN_TEST(test_buildReportRecord_fallbackOutOfRange_leavesReferenceNull);
     RUN_TEST(test_buildReportRecord_copiesEntryId_whenPresent);
     RUN_TEST(test_freeReportRecord_doesNotCrash_onNull);
-    RUN_TEST(test_buildReportRecord_giReason_firstEverValue_isForwarded_andSeedsCache);
+    RUN_TEST(test_buildReportRecord_giReason_firstEverValue_isSuppressed_andSeedsCache);
     RUN_TEST(test_buildReportRecord_integrityReason_unchangedValue_isDroppedAfterSeed);
     RUN_TEST(test_buildReportRecord_integrityReason_changedValue_isForwarded);
-    RUN_TEST(test_buildReportRecord_dataChangeReason_sameValueAsCache_isStillForwarded);
+    RUN_TEST(test_buildReportRecord_dataChangeReason_sameValueAsCache_isDropped);
+    RUN_TEST(test_buildReportRecord_realChangeReason_previousValueEqualsPriorCache);
+    RUN_TEST(test_buildReportRecord_firstEverRealChange_noPriorBootstrap_previousValueIsNull);
+    RUN_TEST(test_buildReportRecord_dbposSemantic_threadedOntoEntry_fromLeafSemantics);
+    RUN_TEST(test_buildReportRecord_semantic_defaultsNone_whenLeafSemanticsIsNull);
     RUN_TEST(test_buildReportRecord_unknownReason_threeCallSequence_matchesNoReasonCodeDevice);
     RUN_TEST(test_buildReportRecord_decomposesStructuredEntry_intoFlatLeaves);
     RUN_TEST(test_buildReportRecord_decomposition_countMismatch_fallsBackToRawEntry);
-    RUN_TEST(test_buildReportRecord_decomposedGiEntry_seedsCache_thenDuplicateDropped);
+    RUN_TEST(test_buildReportRecord_decomposedGiEntry_isSuppressed_seedsCache_thenDuplicateDropped);
 
     RUN_TEST(test_buildReportRecord_valueForwarded_dragsUnchangedQualitySibling);
     RUN_TEST(test_buildReportRecord_qualityForwarded_dragsUnchangedValueSibling);
+    RUN_TEST(test_buildReportRecord_draggedAlongSibling_previousValueEqualsOwnCurrentValue);
     RUN_TEST(test_buildReportRecord_bothSiblingsUnchanged_neitherForwarded);
     RUN_TEST(test_buildReportRecord_ungroupableEntry_fallsBackToSoloDiffCheck);
     RUN_TEST(test_buildReportRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf);
@@ -1146,7 +1309,7 @@ main(void) {
     RUN_TEST(test_resetValueDiffCache_leavesAlreadyNullSlotsUntouched);
     RUN_TEST(test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull);
     RUN_TEST(test_resetValueDiffCache_isNoOp_whenEntryIsNull);
-    RUN_TEST(test_buildReportRecord_afterResetValueDiffCache_unchangedValueForwardedAgain);
+    RUN_TEST(test_buildReportRecord_afterResetValueDiffCache_giReasonIsSuppressed_reseedsCache);
 
     RUN_TEST(test_shouldForwardAcrossRcb_firstEverContent_isForwarded_andSeedsCache);
     RUN_TEST(test_shouldForwardAcrossRcb_sameRcbIdenticalContent_isStillForwarded);
@@ -1155,11 +1318,6 @@ main(void) {
     RUN_TEST(test_shouldForwardAcrossRcb_suppressionDoesNotDisturbEstablishedBaseline);
     RUN_TEST(test_shouldForwardAcrossRcb_isNoOp_whenCacheIsNull);
     RUN_TEST(test_destroyCrossRcbDedupCache_doesNotCrash_onNull);
-
-    RUN_TEST(test_hasRealChangeReason_trueForEachRealBitAlone);
-    RUN_TEST(test_hasRealChangeReason_falseForIntegrityOrGiAlone);
-    RUN_TEST(test_hasRealChangeReason_trueWhenCombinedWithPeriodicBit);
-    RUN_TEST(test_hasRealChangeReason_falseForUnknownAndNotIncluded);
 
     RUN_TEST(test_buildWireMemberReferences_convertsDollarJoinedToDotBracketForm);
     RUN_TEST(test_buildWireMemberReferences_joinsNestedSegmentsWithDots);

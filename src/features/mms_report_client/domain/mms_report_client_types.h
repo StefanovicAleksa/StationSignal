@@ -40,6 +40,28 @@ typedef struct {
     char* reference;      /* owned copy, or NULL if the server omitted data-references */
     MmsValue* value;      /* owned deep copy (MmsValue_clone) */
     ReasonForInclusion reason;
+
+    /* Owned clone of whatever was cached for this exact wire position
+     * immediately BEFORE this report overwrote it (see
+     * MmsReportClientMemberRefCacheEntry.lastForwardedValues) - lets
+     * ipc_dispatcher report what a changed point changed FROM, not just its
+     * new value. Populated once a position has seen its first observation
+     * after an enable (whatever naturally triggers it - this client never
+     * requests GI, see enableOneTarget's own comment - that first observation
+     * silently seeds the cache before any real change can be reported; see
+     * shouldForwardAndUpdateCache's own doc comment in
+     * mms_report_client_usecases.c). NULL only in the narrow, pre-existing
+     * structural case where this position has no cache slot at all
+     * (memberRefCache == NULL or this position isn't covered by it - see
+     * that same function's slot < 0 branch), never as a routine outcome. */
+    MmsValue* previousValue;
+
+    /* IED_MODEL_DA_SEMANTIC_DBPOS if this leaf's real SCL bType was
+     * genuinely "Dbpos" (see IedModelDaSemantic's own doc comment in
+     * ied_model_types.h), else IED_MODEL_DA_SEMANTIC_NONE - lets
+     * ipc_dispatcher attach a descriptive label without guessing from the
+     * wire type alone. */
+    IedModelDaSemantic semantic;
 } MmsReportEntry;
 
 /*
@@ -52,17 +74,37 @@ typedef struct {
  * same time - see mms_report_client_report_adapter.c's onReport for how
  * these are used together.
  *
- * Event filtering is a hybrid: an entry whose ReasonForInclusion carries a
- * real-change bit (DATA_CHANGE/QUALITY_CHANGE/DATA_UPDATE) is always
- * forwarded, trusting the server's own word. An entry with no such bit
- * (INTEGRITY/GI-only, or UNKNOWN/NOT_INCLUDED on servers that never populate
- * reason-for-inclusion at all) is instead gated by the per-position
- * lastForwardedValues cache below - forwarded only if its value differs from
- * the last one actually sent for that exact wire position, or if nothing has
- * ever been forwarded for it yet (a NULL slot always survives). That NULL-
- * survives rule is what lets the one-time startup GI snapshot deliver each
- * position's initial value to the caller, while still catching a real
- * device's periodic/unflagged re-sends of an unchanged value.
+ * Event filtering ALWAYS diff-checks against the per-position
+ * lastForwardedValues cache below, regardless of the server's own
+ * ReasonForInclusion - forwarded only if its value differs from the last one
+ * actually sent for that exact wire position. A NULL slot (nothing has ever
+ * been cached for this position yet) is the bootstrap case - the cache is
+ * silently seeded from it, but it is NEVER forwarded itself (see
+ * shouldForwardAndUpdateCache in mms_report_client_usecases.c). This client
+ * never requests GI on enable (see enableOneTarget's own comment - GI proved
+ * unreliable on real hardware, so this feature no longer relies on it at
+ * all, matching goose_subscriber's own GI-less design exactly) - the
+ * suppressed "bootstrap" observation is simply whichever report happens to
+ * be the first one for a given position after an enable (a foreign client's
+ * own GI request, a buffered redelivery, or an ordinary spontaneous change -
+ * this code can't tell and doesn't need to). Since
+ * MmsReportClientUseCases_resetValueDiffCache clears this same cache on
+ * every (re-)enable, this is what keeps a reconnect's first/redelivered
+ * report from ever reaching the websocket too, while still giving the first
+ * GENUINE change afterward a real previous value to report, and still
+ * catching a real device's periodic/unflagged re-sends of an unchanged
+ * value. **A ReasonForInclusion real-change bit (DATA_CHANGE/QUALITY_CHANGE/
+ * DATA_UPDATE) is deliberately NOT trusted as an unconditional bypass of this
+ * check** - an earlier version of this code did trust it, but real-hardware
+ * testing against a live IED proved that unsafe: the device repeatedly
+ * tagged reports as DATA_CHANGE for a value that provably never changed
+ * (confirmed via MmsReportEntry.previousValue itself showing
+ * previousValue == value on hundreds of consecutive forwards), including on
+ * GI-triggered snapshots (GI and DATA_CHANGE are independent, combinable
+ * ReasonForInclusion bits, so a server can and did set both at once,
+ * bypassing bootstrap-suppression the same way). `reason` is still carried
+ * on MmsReportEntry as informational metadata, just never consulted for the
+ * forward/drop decision.
  */
 typedef struct {
     char* rcbReference;      /* owned copy, matches ReportControlBlockTarget.objectReference - lookup key */
@@ -80,8 +122,8 @@ typedef struct {
     char*** memberLeafReferences;
     int* memberLeafCounts;
 
-    /* Value-diff cache (the hybrid gate's non-real-change branch - see this
-     * struct's own doc comment above). One slot per *expanded leaf* position:
+    /* Value-diff cache (see this struct's own doc comment above - always
+     * consulted, regardless of reason). One slot per *expanded leaf* position:
      * a non-decomposed member i occupies exactly 1 slot at
      * leafSlotOffsets[i]; a decomposed member i occupies memberLeafCounts[i]
      * consecutive slots starting at leafSlotOffsets[i]. totalLeafSlots is the
@@ -92,6 +134,16 @@ typedef struct {
     int* leafSlotOffsets;
     int totalLeafSlots;
     MmsValue** lastForwardedValues;
+
+    /* Parallel to lastForwardedValues (size totalLeafSlots) - slot i's
+     * Dbpos-ness, resolved once at buildMemberRefCache time via
+     * IedModel_getDataSetMemberSemantics/_getDataSetMemberLeafSemantics.
+     * Unlike lastForwardedValues, never reset on reconnect (a DA's real SCL
+     * type doesn't change across reconnects) - only
+     * MmsReportClientUseCases_destroyMemberRefCacheEntry frees this. May be
+     * NULL (degrades to IED_MODEL_DA_SEMANTIC_NONE everywhere) if allocation
+     * failed at build time - same OOM posture as every other field here. */
+    IedModelDaSemantic* leafSemantics;
 } MmsReportClientMemberRefCacheEntry;
 
 /*
@@ -161,7 +213,6 @@ typedef void (*MmsReportClientRcbStatusCallback)(void* userParam, const char* rc
         bool enabled, IedClientError lastError);
 
 typedef struct {
-    bool generalInterrogationOnEnable; /* default true - see MmsReportClientConfig_defaults() */
     uint32_t connectTimeoutMs;         /* 0 = library default */
     uint32_t requestTimeoutMs;         /* 0 = library default */
     uint32_t reconnectInitialDelayMs;  /* default 1000 */
@@ -203,10 +254,13 @@ struct sMmsReportClientHandle {
                                    datasetReference - same lifetime as `targets`
                                    (survives reconnects, not rebuilt per-report). Each
                                    entry's own lastForwardedValues IS explicitly reset
-                                   on every successful (re-)enable though - see
+                                   on every (re-)enable attempt though, BEFORE the RCB
+                                   write that could trigger a report is even sent - see
                                    MmsReportClientUseCases_resetValueDiffCache, called
-                                   from enableOneTarget - so a reconnect's GI snapshot
-                                   is never diffed against stale pre-disconnect values. */
+                                   from enableOneTarget - so a reconnect's first/
+                                   redelivered report is never diffed against stale
+                                   pre-disconnect values, regardless of how quickly it
+                                   arrives relative to the enable call returning. */
     MmsReportClientCrossRcbDedupCache crossRcbDedupCache; /* zero-initialized by calloc in
                                    MmsReportClient_create (NULL rcbReference means "nothing
                                    forwarded yet") - see its own doc comment above */
@@ -225,6 +279,34 @@ struct sMmsReportClientHandle {
     Semaphore wakeSignal;
     Thread supervisorThread;
     uint32_t currentBackoffMs;
+
+    /* Binary mutex (Semaphore_create(1)) guarding every memberRefCache
+     * entry's lastForwardedValues slots against concurrent access between
+     * the report-adapter thread (libiec61850's internal report-reader
+     * thread, via onReport -> MmsReportClientUseCases_buildReportRecord)
+     * and the reconnect-supervisor thread (enableOneTarget ->
+     * MmsReportClientUseCases_resetValueDiffCache on every (re-)enable
+     * attempt). Created/destroyed alongside wakeSignal. Without this, a
+     * reconnect's cache reset can race a concurrently-processing report and
+     * corrupt a lastForwardedValues[] slot out from under the other thread -
+     * confirmed as a real root cause (combined with a since-fixed reconnect
+     * "storm" in supervisorLoop) of a real-hardware flood of forwarded
+     * MMS_REPORT messages with previousValue == value after a device
+     * reconnect. Beyond mutual exclusion, enableOneTarget also now performs
+     * the reset itself BEFORE issuing the RCB write that could trigger any
+     * report at all (rather than after, as an earlier version of this code
+     * did) - closing the race window structurally instead of only guarding
+     * against corruption within it: no report for this RCB can be dispatched
+     * before this reset has already run, so there's no window left where a
+     * report could be diffed against a stale, pre-reset cache. GOOSE never
+     * needs an equivalent lock: its own reset-then-process happens
+     * synchronously in one function call on one thread (see
+     * GooseSubscriberFrameAdapter_onGooseReceived) - MMS can't match that
+     * structurally since the reset is tied to an async RCB write while
+     * reports arrive on a separate library-owned thread, so this lock is
+     * what achieves the same mutual-exclusion guarantee GOOSE gets for
+     * free. */
+    Semaphore memberRefCacheLock;
 };
 
 typedef struct sMmsReportClientHandle* MmsReportClientHandle;

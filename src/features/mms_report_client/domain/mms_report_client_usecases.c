@@ -9,15 +9,9 @@ freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
     for (int i = 0; i < builtCount; i++) {
         free(entries[i].reference);
         if (entries[i].value) MmsValue_delete(entries[i].value);
+        if (entries[i].previousValue) MmsValue_delete(entries[i].previousValue);
     }
     free(entries);
-}
-
-bool
-MmsReportClientUseCases_hasRealChangeReason(ReasonForInclusion reason) {
-    const int realEventBits = IEC61850_REASON_DATA_CHANGE | IEC61850_REASON_QUALITY_CHANGE
-            | IEC61850_REASON_DATA_UPDATE;
-    return (reason & realEventBits) != 0;
 }
 
 bool
@@ -41,30 +35,64 @@ updateValueDiffCache(MmsReportClientMemberRefCacheEntry* memberRefCache, int slo
 }
 
 /*
- * The hybrid event filter's single decision point, applied once per
- * (possibly decomposed-leaf) value. slot is the value-diff cache index for
- * this exact wire position, or -1 if no cache slot is available for it (no
+ * The event filter's single decision point, applied once per (possibly
+ * decomposed-leaf) value. slot is the value-diff cache index for this exact
+ * wire position, or -1 if no cache slot is available for it (no
  * memberRefCache at all, or this position isn't in it) - in that case there's
- * nothing to diff against, so it always survives, matching the old
+ * nothing to diff against, so it always survives (and outPreviousValue is
+ * left NULL - nothing to report as "previous" either), matching the old
  * memberRefCache == NULL passthrough behavior.
  *
- * If reason carries a real-change bit, the server is trusted unconditionally
- * (always forward) - the cache is still updated so a later periodic re-send
- * of this same value is recognized as unchanged. Otherwise (periodic-only or
- * unknown/no-reason), forward only if the value differs from the cache (or
- * the cache slot is still NULL, i.e. nothing has ever been forwarded for this
- * position - the case that lets the startup GI snapshot deliver an initial
- * value once).
+ * *outPreviousValue (if non-NULL) is set to an owned clone of whatever was
+ * cached for this slot BEFORE this call's own cache update - the caller
+ * reports this as the point's previous value/quality, regardless of whether
+ * this call ends up returning true or false (a non-forwarded candidate that
+ * later gets dragged into the output by buildEntries' group-extension pass
+ * still needs its own previousValue).
+ *
+ * Always diff-checks against the cache, REGARDLESS of the server's own
+ * ReasonForInclusion: if nothing has ever been cached for this slot yet
+ * (cached == NULL), this is a bootstrap event - whatever the first report
+ * for this position happens to be after an enable (this client never
+ * requests GI itself, see enableOneTarget's own comment, but a foreign
+ * client's own GI, a buffered redelivery, or an ordinary first spontaneous
+ * send are all indistinguishable from here and treated identically) - the
+ * cache is silently seeded but this first report is NEVER forwarded itself.
+ * Otherwise, forward only if the value genuinely differs from the cache.
+ *
+ * DELIBERATELY does not trust a DATA_CHANGE/QUALITY_CHANGE/DATA_UPDATE
+ * reason bit as an unconditional "skip the diff-check" signal, unlike an
+ * earlier version of this function. Real-hardware testing against a live IED
+ * proved that trust unsafe: the device repeatedly tagged reports as
+ * DATA_CHANGE for a value that provably never changed (confirmed via this
+ * function's own previousValue output showing previousValue == value on
+ * hundreds of consecutive forwarded reports, including - since GI and
+ * DATA_CHANGE are independent, combinable ReasonForInclusion bits per
+ * third_party/include/iec61850_client.h - GI-triggered snapshots that also
+ * carried a real-change bit, bypassing bootstrap-suppression the same way).
+ * goose_subscriber's equivalent function has never had this bypass (GOOSE
+ * has no ReasonForInclusion concept at all) and was unaffected by this bug,
+ * which is what first narrowed it down to this function specifically. Losing
+ * the ability to detect a transient A-changes-then-changes-back-to-A
+ * round-trip within one buffer interval (the original rationale for trusting
+ * the reason bit) is an accepted tradeoff - this codebase now treats a
+ * report's "reason" as informational metadata only (still carried on
+ * MmsReportEntry.reason), never as a filtering signal.
  */
 static bool
 shouldForwardAndUpdateCache(MmsReportClientMemberRefCacheEntry* memberRefCache, int slot,
-        ReasonForInclusion reason, const MmsValue* value) {
+        const MmsValue* value, MmsValue** outPreviousValue) {
+    if (outPreviousValue) *outPreviousValue = NULL;
     if (slot < 0) return true;
 
-    if (!MmsReportClientUseCases_hasRealChangeReason(reason)) {
-        MmsValue* cached = memberRefCache->lastForwardedValues[slot];
-        if (MmsReportClientUseCases_isDuplicateValue(cached, value)) return false;
+    MmsValue* cached = memberRefCache->lastForwardedValues[slot];
+    if (outPreviousValue && cached) *outPreviousValue = MmsValue_clone(cached);
+
+    if (!cached) {
+        updateValueDiffCache(memberRefCache, slot, value);
+        return false;
     }
+    if (MmsReportClientUseCases_isDuplicateValue(cached, value)) return false;
 
     updateValueDiffCache(memberRefCache, slot, value);
     return true;
@@ -78,9 +106,13 @@ typedef struct {
 
 /* Appends one owned, cloned/duplicated entry. Returns false (entry NOT
  * appended) only on allocation failure, so the caller knows not to also
- * update the value-diff cache for it. */
+ * update the value-diff cache for it. Takes ownership of (moves, does not
+ * re-clone) previousValue - the caller already cloned it once in
+ * shouldForwardAndUpdateCache; on the false-return/OOM path the caller is
+ * still responsible for freeing previousValue itself. */
 static bool
-appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference, ReasonForInclusion reason) {
+appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference, ReasonForInclusion reason,
+        MmsValue* previousValue, IedModelDaSemantic semantic) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         MmsReportEntry* grown = realloc(builder->entries, sizeof(MmsReportEntry) * (size_t) newCapacity);
@@ -93,6 +125,8 @@ appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference,
     entry->value = value ? MmsValue_clone((MmsValue*) value) : NULL;
     entry->reference = reference ? MmsReportClientUtils_safeStringDup(reference) : NULL;
     entry->reason = reason;
+    entry->previousValue = previousValue;
+    entry->semantic = semantic;
     return true;
 }
 
@@ -101,12 +135,18 @@ appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference,
  * dataSetValues, a flattened array, or memberRefCache's own strings), never
  * cloned/duped here (appendEntry does that only for leaves that actually end
  * up forwarded). slot mirrors shouldForwardAndUpdateCache's own -1-means-
- * "no cache slot" convention. */
+ * "no cache slot" convention. previousValue is populated by
+ * shouldForwardAndUpdateCache itself (an owned clone, regardless of this
+ * candidate's own forward/drop outcome - see buildEntries' cleanup for why).
+ * semantic is resolved from memberRefCache->leafSemantics[slot] at collection
+ * time (IED_MODEL_DA_SEMANTIC_NONE if unavailable). */
 typedef struct {
     const MmsValue* value;
     const char* reference;
     ReasonForInclusion reason;
     int slot;
+    MmsValue* previousValue;
+    IedModelDaSemantic semantic;
 } EntryCandidate;
 
 typedef struct {
@@ -115,11 +155,22 @@ typedef struct {
     int capacity;
 } CandidateBuilder;
 
+/* memberRefCache->leafSemantics is parallel to lastForwardedValues (same
+ * slot indexing) - NULL-safe/bounds-checked, degrading to NONE exactly like
+ * every other "semantics table unavailable" case (see IedModelDaSemantic's
+ * own doc comment). */
+static IedModelDaSemantic
+lookupSemanticForSlot(MmsReportClientMemberRefCacheEntry* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafSemantics) return IED_MODEL_DA_SEMANTIC_NONE;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return IED_MODEL_DA_SEMANTIC_NONE;
+    return memberRefCache->leafSemantics[slot];
+}
+
 /* Same grow-or-skip-on-OOM posture as appendEntry (a single allocation
  * failure drops one candidate rather than aborting the whole report). */
 static void
 appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* reference,
-        ReasonForInclusion reason, int slot) {
+        ReasonForInclusion reason, int slot, IedModelDaSemantic semantic) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         EntryCandidate* grown = realloc(builder->items, sizeof(EntryCandidate) * (size_t) newCapacity);
@@ -132,6 +183,8 @@ appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* re
     c->reference = reference;
     c->reason = reason;
     c->slot = slot;
+    c->previousValue = NULL; /* set later, by shouldForwardAndUpdateCache in buildEntries' phase 2a */
+    c->semantic = semantic;
 }
 
 /* Tracks flattened-structure arrays (MmsReportClientUtils_flattenStructure
@@ -195,7 +248,7 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
                 for (int k = 0; k < flattenedCount; k++) {
                     int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
                     appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k],
-                            reason, slot);
+                            reason, slot, lookupSemanticForSlot(memberRefCache, slot));
                 }
                 continue; /* raw position i fully handled via decomposition */
             }
@@ -208,7 +261,7 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
         const char* ref = (dataReferences && dataReferences[i]) ? dataReferences[i]
                 : (hasCacheEntry && memberRefCache->memberReferences) ? memberRefCache->memberReferences[i] : NULL;
 
-        appendCandidate(candidates, rawValue, ref, reason, slot);
+        appendCandidate(candidates, rawValue, ref, reason, slot, lookupSemanticForSlot(memberRefCache, slot));
     }
 }
 
@@ -281,8 +334,10 @@ resolveGroupAnchor(const char* reference, const GroupAnchor* anchors, int anchor
  * Builds the final, flat entry list for one report in three phases:
  *   1. collectCandidates - every (possibly Gap-4-decomposed) leaf across
  *      every raw dataset position, undecided.
- *   2. Per-candidate hybrid filter (shouldForwardAndUpdateCache, unchanged),
- *      then a group-aware pass: every "q" candidate's reference anchors a
+ *   2. Per-candidate value-diff filter (shouldForwardAndUpdateCache - always
+ *      diff-checks against the cache now, never trusts a reason bit
+ *      unconditionally, see that function's own doc comment), then a
+ *      group-aware pass: every "q" candidate's reference anchors a
  *      group scope (its own "$"-prefix); every candidate (including "q"
  *      itself) resolves to the LONGEST anchor it's nested under
  *      (resolveGroupAnchor) - a flat attribute resolves to its DO's own "q"
@@ -344,7 +399,7 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
     if (forward) {
         for (int i = 0; i < candidates.count; i++) {
             EntryCandidate* c = &candidates.items[i];
-            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->reason, c->value);
+            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, &c->previousValue);
         }
 
         if (groupAnchorIndex) {
@@ -368,11 +423,24 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
 
     EntryBuilder builder = { NULL, 0, 0 };
     for (int i = 0; i < candidates.count; i++) {
-        if (!forward || !forward[i]) continue;
-
         EntryCandidate* c = &candidates.items[i];
+
+        if (!forward || !forward[i]) {
+            /* Not forwarded (bootstrap-suppressed, an unchanged duplicate, or
+             * never individually qualified and never dragged in by the group-
+             * extension pass) - previousValue was still cloned in phase 2a
+             * regardless of this outcome (see shouldForwardAndUpdateCache's
+             * own doc comment), so it must be freed here rather than leaked. */
+            if (c->previousValue) MmsValue_delete(c->previousValue);
+            continue;
+        }
+
         updateValueDiffCache(memberRefCache, c->slot, c->value);
-        appendEntry(&builder, c->value, c->reference, c->reason);
+        if (!appendEntry(&builder, c->value, c->reference, c->reason, c->previousValue, c->semantic)) {
+            /* appendEntry failed to grow its array (OOM) - it never took
+             * ownership of previousValue in that case, so free it ourselves. */
+            if (c->previousValue) MmsValue_delete(c->previousValue);
+        }
     }
 
     free(forward);
@@ -471,6 +539,7 @@ MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
         }
         free(e->lastForwardedValues);
     }
+    free(e->leafSemantics);
 
     free(e->rcbReference);
     free(e);

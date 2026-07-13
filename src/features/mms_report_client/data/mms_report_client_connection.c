@@ -212,13 +212,43 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     IedConnection_installReportHandler(handle->connection, target->objectReference,
             ClientReportControlBlock_getRptId(rcb), MmsReportClientReportAdapter_onReport, handle);
 
+    /* Reset this RCB's value-diff cache BEFORE issuing the write below that
+     * enables reporting - first connect included (harmless there, the cache
+     * is already all-NULL). This must happen before, not after, the write:
+     * the write can trigger a report (this client's own enable, a foreign
+     * client's concurrent GI, a buffered redelivery, ...) that libiec61850
+     * dispatches on its own report-reader thread, entirely independent of
+     * this supervisor thread's own progress. Resetting only after
+     * setRCBValues returned left a real race window - the report-reader
+     * thread could process that first report before this thread got back
+     * around to resetting a few lines later, diffing it against a STALE
+     * (pre-disconnect, on reconnect) cache instead of a cleared one, which
+     * on real hardware could surface as a burst of "everything changed"
+     * right after enabling. Resetting first closes the window structurally:
+     * no report for this RCB can be dispatched before the reset has already
+     * run. See MmsReportClientUseCases_resetValueDiffCache's own doc
+     * comment. Guarded by memberRefCacheLock - onReport
+     * (mms_report_client_report_adapter.c) can concurrently be reading/
+     * mutating the exact same lastForwardedValues slots on libiec61850's own
+     * report-reader thread; see that field's own doc comment in
+     * mms_report_client_types.h. Resetting even if the write below ends up
+     * failing is harmless - nothing can report for a not-yet-enabled RCB
+     * either way, and a later successful enable attempt re-resets it
+     * again regardless. */
+    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (cacheEntry) {
+        Semaphore_wait(handle->memberRefCacheLock);
+        MmsReportClientUseCases_resetValueDiffCache(cacheEntry);
+        Semaphore_post(handle->memberRefCacheLock);
+    }
+
     uint32_t mask = RCB_ELEMENT_RPT_ENA;
 
     /* DatSet must be (re-)set explicitly on enable - relying on a
      * server-side default dataset (configured only via ReportControlBlock_create's
      * dataSetName at server build time) is fragile: libiec61850's own
      * reference client example (client_example_no_thread.c) always sets
-     * RCB_ELEMENT_DATSET alongside RPT_ENA/GI too, using the same "$"-joined
+     * RCB_ELEMENT_DATSET alongside RPT_ENA too, using the same "$"-joined
      * reference format ied_model already hands us in datasetReference.
      *
      * If neither SCL nor a prior client has assigned this RCB a dataset, this
@@ -240,12 +270,14 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     }
 
     ClientReportControlBlock_setRptEna(rcb, true);
-    if (handle->config.generalInterrogationOnEnable) {
-        ClientReportControlBlock_setGI(rcb, true);
-        mask |= RCB_ELEMENT_GI;
-    }
-    /* Deliberately never touches TRG_OPS/BUF_TM/INTG_PD/CONF_REV - those stay
-     * exactly as the IED's own SCL config already has them. */
+    /* Deliberately never requests GI (unreliable on real hardware - a device
+     * has been observed tagging a GI-triggered snapshot as DATA_CHANGE too,
+     * see shouldForwardAndUpdateCache's own doc comment) and never touches
+     * TRG_OPS/BUF_TM/INTG_PD/CONF_REV - those stay exactly as the IED's own
+     * SCL config already has them. Matches goose_subscriber exactly: no
+     * artificial snapshot is ever requested, the first real observation for
+     * a position (whatever naturally produces it) silently seeds the cache
+     * instead. */
 
     IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
     if (err != IED_ERROR_OK) {
@@ -262,14 +294,6 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     if (handle->rcbStatusCallback) {
         handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, true, IED_ERROR_OK);
     }
-
-    /* Every successful (re-)enable forgets whatever was cached before -
-     * first connect included (harmless there, the cache is already all-NULL)
-     * - so the GI snapshot this enable just requested is never diffed
-     * against stale pre-disconnect values and silently dropped. See
-     * MmsReportClientUseCases_resetValueDiffCache's own doc comment. */
-    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
-    if (cacheEntry) MmsReportClientUseCases_resetValueDiffCache(cacheEntry);
 
     ClientReportControlBlock_destroy(rcb);
 }
@@ -333,15 +357,37 @@ supervisorLoop(void* parameter) {
             handle->currentBackoffMs = 0;
             enableAllTargets(handle);
 
-            /* Block until onStateChanged signals an unexpected loss, or
-             * stop() posts to unblock us. */
-            Semaphore_wait(handle->wakeSignal);
-
-            if (handle->stopRequested) break;
-            if (!handle->connectionLostSignal) continue; /* spurious wake guard */
-            handle->connectionLostSignal = false;
-            /* fall through to backoff + retry - a fresh association means
-             * the server forgot our prior RptEna/report-handler registration. */
+            /* Stay in this connected phase, consuming every wake, until a
+             * genuine connection-lost signal (or stop) arrives - do NOT loop
+             * back to IedConnection_connect()/enableAllTargets() on every
+             * wake. onStateChanged posts wakeSignal on EVERY state
+             * transition, not just loss (see its own comment) -
+             * IedConnection_connect() itself drives CONNECTING then
+             * CONNECTED, each posting once, so by the time this thread first
+             * reaches the wait below there are already pending posts left
+             * over from the connect that just succeeded. Treating any single
+             * wake as "go reconnect" (the old bare `continue` here) re-ran
+             * enableAllTargets() - a second, entirely redundant RptEna
+             * (enable) cycle per RCB - for one real connect, with no connection
+             * having actually been lost, racing report delivery against
+             * MmsReportClientUseCases_resetValueDiffCache. Confirmed as a
+             * real-hardware root cause (see CLAUDE.md) of a duplicate-report
+             * flood after reconnect. */
+            for (;;) {
+                Semaphore_wait(handle->wakeSignal);
+                if (handle->stopRequested) break;
+                if (handle->connectionLostSignal) {
+                    handle->connectionLostSignal = false;
+                    break;
+                }
+                /* spurious wake (a state-changed post not tied to loss, e.g.
+                 * the connect sequence's own CONNECTING/CONNECTED posts) -
+                 * keep waiting in this same connected phase. */
+            }
+            /* Reaching here past the inner loop means either stopRequested
+             * (checked again below) or a genuine loss - a fresh association
+             * means the server forgot our prior RptEna/report-handler
+             * registration, so fall through to backoff + retry. */
         }
 
         if (handle->stopRequested) break;
@@ -384,6 +430,13 @@ MmsReportClientConnection_start(MmsReportClientHandle handle) {
     handle->wakeSignal = Semaphore_create(0);
     if (!handle->wakeSignal) return MMS_REPORT_CLIENT_ERR_OUT_OF_MEMORY;
 
+    handle->memberRefCacheLock = Semaphore_create(1);
+    if (!handle->memberRefCacheLock) {
+        Semaphore_destroy(handle->wakeSignal);
+        handle->wakeSignal = NULL;
+        return MMS_REPORT_CLIENT_ERR_OUT_OF_MEMORY;
+    }
+
     handle->stopRequested = false;
     handle->connectionLostSignal = false;
     handle->supervisorExited = false;
@@ -393,6 +446,8 @@ MmsReportClientConnection_start(MmsReportClientHandle handle) {
     if (!handle->supervisorThread) {
         Semaphore_destroy(handle->wakeSignal);
         handle->wakeSignal = NULL;
+        Semaphore_destroy(handle->memberRefCacheLock);
+        handle->memberRefCacheLock = NULL;
         return MMS_REPORT_CLIENT_ERR_THREAD_CREATE_FAILED;
     }
     Thread_start(handle->supervisorThread);
@@ -449,5 +504,9 @@ MmsReportClientConnection_destroy(MmsReportClientHandle handle) {
     if (handle->wakeSignal) {
         Semaphore_destroy(handle->wakeSignal);
         handle->wakeSignal = NULL;
+    }
+    if (handle->memberRefCacheLock) {
+        Semaphore_destroy(handle->memberRefCacheLock);
+        handle->memberRefCacheLock = NULL;
     }
 }

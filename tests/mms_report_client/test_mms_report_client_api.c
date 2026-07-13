@@ -127,7 +127,6 @@ test_configDefaults_matchDocumentedValues(void) {
     MmsReportClientConfig config;
     MmsReportClientConfig_defaults(&config);
 
-    TEST_ASSERT_TRUE(config.generalInterrogationOnEnable);
     TEST_ASSERT_EQUAL_UINT32(0, config.connectTimeoutMs);
     TEST_ASSERT_EQUAL_UINT32(0, config.requestTimeoutMs);
     TEST_ASSERT_EQUAL_UINT32(1000, config.reconnectInitialDelayMs);
