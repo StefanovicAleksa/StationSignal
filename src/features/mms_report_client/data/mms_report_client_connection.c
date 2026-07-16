@@ -280,7 +280,46 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * TRG_OPS/BUF_TM/INTG_PD/CONF_REV are still never touched - those stay
      * exactly as the IED's own SCL config already has them. */
 
+    /* Resume a buffered RCB's delivery from the last EntryID this client
+     * actually received, instead of re-requesting the server's entire
+     * unacknowledged backlog on every RptEna transition - see
+     * MmsReportClientMemberRefCacheEntry.lastEntryId's own doc comment for
+     * why this matters (a redelivered multi-entry backlog defeats the
+     * single-slot value-diff cache). RCB_ELEMENT_ENTRY_ID is only meaningful
+     * for buffered RCBs (iec61850_client.h) - gated on target->buffered.
+     * lastEntryId is written by the report-adapter thread, so this read goes
+     * through the same memberRefCacheLock that guards it; ClientReportControlBlock_setEntryId
+     * itself is a local, synchronous struct mutation (confirmed against
+     * libiec61850's own source - it clones the value internally), not a
+     * network call, so it's safe to make while holding the lock, unlike
+     * IedConnection_setRCBValues below. On the very first-ever enable
+     * (lastEntryId still NULL - nothing to resume from yet) this is a no-op,
+     * same full-backlog behavior as before this change. */
+    if (target->buffered) {
+        MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+        if (cacheEntry) {
+            Semaphore_wait(handle->memberRefCacheLock);
+            if (cacheEntry->lastEntryId) {
+                ClientReportControlBlock_setEntryId(rcb, cacheEntry->lastEntryId);
+                mask |= RCB_ELEMENT_ENTRY_ID;
+            }
+            Semaphore_post(handle->memberRefCacheLock);
+        }
+    }
+
     IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    if (err != IED_ERROR_OK && (mask & RCB_ELEMENT_ENTRY_ID)) {
+        /* The server may have rejected an EntryID it no longer recognizes -
+         * e.g. its own buffer wrapped past it after a very long disconnect,
+         * or the server itself restarted. IEC 61850 leaves the exact failure
+         * mode here implementation-defined, so rather than guess at it, fall
+         * back once to the pre-existing full-resume behavior instead of
+         * leaving this RCB unreported. */
+        fprintf(stderr, "[mms_report_client] setRCBValues with EntryID failed for '%s': error %d - "
+                "retrying without EntryID (full resume)\n", target->objectReference, err);
+        mask &= ~(uint32_t) RCB_ELEMENT_ENTRY_ID;
+        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    }
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
                 target->objectReference, err);

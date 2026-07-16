@@ -864,6 +864,56 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   the wire's `stVal` position, `ipc_dispatcher` would still successfully decode it as quality (it
   only type-checks for `MMS_BIT_STRING`, which still passed) — just decoding the wrong bits; not
   independently confirmed, would need real-hardware verification once this fix is deployed.
+- **A fifth distinct real-hardware bug, found via real websocket-output logs showing a buffered
+  RCB's `stVal` oscillating true/false every few ms with a frozen, hours-old `t` on every
+  reconnect**: `enableOneTarget` (`data/mms_report_client_connection.c`) enabled every RCB with
+  `RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_GI [| RCB_ELEMENT_DATSET]` but never `RCB_ELEMENT_ENTRY_ID` /
+  `ClientReportControlBlock_setEntryId` — for a **buffered** RCB, that means the server has no way
+  to know what this client already received, so it redelivers its entire unacknowledged backlog on
+  every `RptEna` transition (every reconnect). Since the value-diff cache only remembers the
+  single last forwarded value, replaying the same multi-entry alternating backlog again defeats
+  it — entry 1 of the new redelivery looks "changed" relative to wherever the cache landed after
+  entry N of the previous redelivery. Root-caused against real hardware logs showing an
+  environment where reconnects are frequent (a gateway-less point-to-point link that Ubuntu
+  periodically deprioritizes, requiring manual re-enable) — not a rare edge case. Fixed by
+  persisting the most recently observed `ClientReport_getEntryId` per RCB
+  (`MmsReportClientMemberRefCacheEntry.lastEntryId`, written unconditionally in
+  `mms_report_client_report_adapter.c`'s `onReport` — independent of whether that report's own
+  entries survive the value-diff filter, since EntryID tracks "durably received," not "passed our
+  own forwarding decision" — and read in `enableOneTarget` on every (re)enable of a `target->buffered`
+  RCB, both sides guarded by the existing `memberRefCacheLock`). On the very first-ever enable
+  (`lastEntryId` still NULL) this is a no-op, same full-backlog behavior as before. If
+  `IedConnection_setRCBValues` fails with `RCB_ELEMENT_ENTRY_ID` set (server rejects an EntryID it
+  no longer recognizes — IEC 61850 leaves the exact failure mode here implementation-defined, not
+  guessed at), `enableOneTarget` retries once without it rather than leaving that RCB unreported.
+  GOOSE needs no equivalent — it has no buffered/EntryID-acknowledged delivery model at all.
+  **A second, distinct bug surfaced directly by testing this fix end-to-end**: the group-aware
+  quality-drag pass in `buildEntries` (see the quality-pairing bullet in `ipc_dispatcher/`'s own
+  Architecture entry for the mechanism) drags a sibling candidate into `forward[i]=true` purely by
+  checking whether another candidate under the same anchor forwarded — never checking whether the
+  dragged-in candidate has a value of its own in THIS report. A real buffered redelivery can
+  legitimately carry a NULL element for one dataset position (confirmed directly: `q`'s own
+  `MmsValue_getElement` returned NULL on 3 consecutive redelivered entries in the E2E test this fix
+  added) while its `stVal` sibling forwards a real change — the old code dragged the NULL-valued
+  `q` candidate in anyway, and phase 3's unconditional `updateValueDiffCache(memberRefCache, c->slot,
+  c->value)` then overwrote `q`'s real cached value with NULL, silently corrupting the cache (a
+  later report would find `cached == NULL` after `everPopulated` was already true — the exact "this
+  should never happen" condition `shouldForwardAndUpdateCache` already logs loudly for). Fixed by
+  skipping any candidate with a NULL own value in the group-extension pass — mirrors the "never
+  overwrite a real cached value with NULL" principle `shouldForwardAndUpdateCache`'s own `!value`
+  branch already applies, just closing the same gap on the drag-in path. `goose_subscriber_usecases.c`
+  has the identical, independently-duplicated fix (same structural gap, same per-feature-domain-layer
+  duplication convention) even though it wasn't the feature that surfaced it. Proven end-to-end via
+  a new `integration_tests/mms_report_client/` test,
+  `test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog`: accumulates a multi-entry
+  alternating backlog on a real `ied_simulator` "Reporter1" instance while disconnected, reconnects
+  once (backlog must be delivered — real, wanted data), then forces a second reconnect with zero new
+  changes and asserts nothing is redelivered. Required adding `entryID="true"` to `brcbMain`'s/
+  `brcbDup`'s `<OptFields>` in both `fixtures/reporter1.cid` (client-side) and
+  `integration_tests/ied_simulator/src/sim_server.c`'s own `RPT_OPT_ENTRY_ID` flag (server-side) —
+  without it the server never includes an EntryID in the report at all, so there is nothing to
+  resume from; no other E2E test asserts on `entryId`, so this was a safe additive change to the
+  shared simulator.
 - `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
   `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
   GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's

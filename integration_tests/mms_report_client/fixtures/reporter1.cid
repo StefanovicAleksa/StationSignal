@@ -31,7 +31,11 @@
             <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
                 intgPd="60000" bufTime="0">
               <TrgOps dchg="true" qchg="true" gi="true" />
-              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <!-- entryID="true" - required for mms_report_client's EntryID-resumption
+                   E2E coverage (test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog):
+                   without OptFlds.EntryID set, the server never includes an EntryID in the
+                   report at all, so there is nothing to resume from on reconnect. -->
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
               <RptEnabled max="1" />
             </ReportControl>
             <!-- Redundant instance of brcbMain over the identical ds1 dataset -
@@ -41,7 +45,7 @@
             <ReportControl name="brcbDup" rptID="brcbDup" datSet="ds1" confRev="1" buffered="true"
                 intgPd="60000" bufTime="0">
               <TrgOps dchg="true" qchg="true" gi="true" />
-              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
               <RptEnabled max="1" />
             </ReportControl>
             <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />

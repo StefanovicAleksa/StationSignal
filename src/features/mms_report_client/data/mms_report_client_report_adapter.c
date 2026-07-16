@@ -129,13 +129,11 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     }
 
     /* Guarded by memberRefCacheLock - buildReportRecord reads/mutates
-     * fallback->lastForwardedValues (the value-diff cache). enableOneTarget
-     * (mms_report_client_connection.c) no longer resets this cache on
-     * (re-)enable (the cache is populated once and preserved forever - see
-     * MmsReportClientMemberRefCacheEntry's own doc comment in
-     * mms_report_client_types.h), so this report-reader thread is currently
-     * the cache's only writer - the lock is kept anyway as cheap, uncontended
-     * insurance against any future writer reappearing on another thread. */
+     * fallback->lastForwardedValues (the value-diff cache), and the
+     * lastEntryId update just below mutates fallback->lastEntryId - both are
+     * also read on the supervisor thread (enableOneTarget, on every
+     * (re)enable), so this lock is the real cross-thread guard for both
+     * fields now, not just cheap insurance. */
     Semaphore_wait(handle->memberRefCacheLock);
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             rcbReference, buffered, rptId,
@@ -145,6 +143,16 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
             dataSetValues, reasons, dataReferences,
             fallback,
             entryCount);
+
+    /* Track the most recent EntryID for this RCB unconditionally - whether
+     * or not this report's entries survive the value-diff filter, we did
+     * durably receive it, so a later reconnect must resume from here, not
+     * re-request everything the server still has buffered. See
+     * MmsReportClientMemberRefCacheEntry.lastEntryId's own doc comment. */
+    if (fallback && entryId) {
+        if (fallback->lastEntryId) MmsValue_delete(fallback->lastEntryId);
+        fallback->lastEntryId = MmsValue_clone(entryId);
+    }
     Semaphore_post(handle->memberRefCacheLock);
 
     free(reasons);

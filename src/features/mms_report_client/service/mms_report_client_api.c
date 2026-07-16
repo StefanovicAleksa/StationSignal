@@ -393,6 +393,7 @@ buildMemberRefCache(MmsReportClientHandle client) {
                 cacheEntry->memberLeafWireTypes = leafWireTypesArray;
                 cacheEntry->leafSemantics = leafSemantics;
                 cacheEntry->everPopulated = false;
+                cacheEntry->lastEntryId = NULL;
                 LinkedList_add(cache, cacheEntry);
             } else {
                 free(cacheEntry);

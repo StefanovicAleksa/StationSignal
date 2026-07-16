@@ -646,6 +646,17 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
         if (groupAnchorIndex) {
             for (int i = 0; i < candidates.count; i++) {
                 if (forward[i] || groupAnchorIndex[i] < 0) continue;
+                /* A candidate with no value of its own in THIS report (e.g. a
+                 * buffered/redelivered entry that only captured its sibling's
+                 * transition, not this position - confirmed reachable via a
+                 * real EntryID-resumed buffered redelivery) has nothing to
+                 * drag in: forwarding it anyway would let phase 3's
+                 * updateValueDiffCache call below overwrite a real cached
+                 * value with NULL, the exact "never overwrite a real cached
+                 * value with NULL" hazard shouldForwardAndUpdateCache's own
+                 * !value branch already guards against - this closes the
+                 * same gap for the group-extension path. */
+                if (!candidates.items[i].value) continue;
                 for (int j = 0; j < candidates.count; j++) {
                     if (j == i || !forward[j]) continue;
                     if (groupAnchorIndex[j] == groupAnchorIndex[i]) {
@@ -793,6 +804,8 @@ MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
         free(e->lastForwardedValues);
     }
     free(e->leafSemantics);
+
+    if (e->lastEntryId) MmsValue_delete(e->lastEntryId);
 
     free(e->rcbReference);
     free(e);

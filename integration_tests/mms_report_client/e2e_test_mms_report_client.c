@@ -39,6 +39,7 @@
 #define TEST_PORT_DYNAMIC_DATASET 10209
 #define TEST_PORT_RECONNECT 10210
 #define TEST_PORT_CROSS_RCB_DEDUP 10211
+#define TEST_PORT_ENTRY_ID_RESUME 10212
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -706,6 +707,139 @@ test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Isolated callback state for test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog
+ * below - counts every brcbMain report received (not just the latest), since
+ * this test's whole point is proving a COUNT stays flat across a reconnect
+ * with nothing new to report.
+ */
+typedef struct {
+    volatile bool enabled;
+    volatile int reportCount;
+    volatile bool lastValue;
+} EntryIdResumeTestState;
+
+static void
+onRcbStatusForEntryIdResumeTest(void* userParam, const char* rcbReference, bool enabled, IedClientError lastError) {
+    (void) lastError;
+    if (!enabled || !rcbReference) return;
+    if (strcmp(rcbReference, "Reporter1LD1/LLN0.BR.brcbMain") != 0) return;
+
+    EntryIdResumeTestState* state = (EntryIdResumeTestState*) userParam;
+    state->enabled = true;
+}
+
+static void
+onReportForEntryIdResumeTest(void* userParam, const MmsReportRecord* record) {
+    EntryIdResumeTestState* state = (EntryIdResumeTestState*) userParam;
+
+    if (record->rcbReference && strcmp(record->rcbReference, "Reporter1LD1/LLN0.BR.brcbMain") == 0) {
+        state->reportCount++;
+        if (record->entryCount > 0 && record->entries[0].value) {
+            state->lastValue = MmsValue_getBoolean(record->entries[0].value);
+        }
+    }
+
+    MmsReportClient_destroyReportRecord((MmsReportRecord*) record);
+}
+
+/*
+ * Direct regression test for the missing-EntryID-resumption bug (see
+ * mms_report_client_connection.c's enableOneTarget - RCB_ELEMENT_ENTRY_ID /
+ * ClientReportControlBlock_setEntryId): without it, a buffered RCB's server
+ * has no way to know what this client already received, so it redelivers its
+ * ENTIRE unacknowledged backlog on every RptEna transition. Confirmed against
+ * real hardware: a buffered RCB kept resending the same alternating
+ * true/false backlog on every reconnect, defeating the value-diff cache
+ * (which only remembers the single last forwarded value - replaying the same
+ * multi-entry sequence again looks like fresh changes each time).
+ *
+ * Reproduces the shape directly: accumulate a multi-entry alternating
+ * backlog (true/false/true) WHILE disconnected, reconnect once (the backlog
+ * must be delivered - this is real, wanted data), then force a SECOND
+ * reconnect with ZERO new changes in between. Without EntryID resumption,
+ * the second reconnect would redeliver the SAME already-consumed backlog,
+ * producing spurious reports exactly like the real-hardware symptom. With
+ * it, the server has nothing new buffered past this client's last
+ * acknowledged EntryID, so nothing is redelivered.
+ */
+void
+test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_ENTRY_ID_RESUME);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_ENTRY_ID_RESUME,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    EntryIdResumeTestState state = { 0 };
+    MmsReportClient_setReportCallback(client, onReportForEntryIdResumeTest, &state);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatusForEntryIdResumeTest, &state);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.enabled),
+            "expected the first connect to enable brcbMain within the timeout");
+    Thread_sleep(300); /* let the GI-seeded bootstrap snapshot settle - never forwarded */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, state.reportCount,
+            "the first connect's GI snapshot must never reach the callback");
+
+    SimServer_stop(sim);
+
+    /* Accumulate a multi-entry buffered backlog WHILE disconnected - the same
+     * alternating true/false/true shape that exposed the real-hardware bug. */
+    SimServer_setIndication(sim, true);
+    SimServer_setIndication(sim, false);
+    SimServer_setIndication(sim, true);
+
+    state.enabled = false;
+    SimServer_start(sim, TEST_PORT_ENTRY_ID_RESUME);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.enabled),
+            "expected the reconnect supervisor to reconnect and re-enable brcbMain");
+
+    /* The backlog must actually be delivered here - this is real, wanted
+     * data, not something the fix should suppress. */
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.reportCount, 1),
+            "expected the buffered backlog accumulated while disconnected to be delivered");
+    Thread_sleep(500); /* let every backlog entry settle */
+    int reportCountAfterFirstReconnect = state.reportCount;
+    TEST_ASSERT_TRUE_MESSAGE(state.lastValue, "expected the backlog's final live value to be true");
+
+    /* Second reconnect, with ZERO new changes since the first - the direct
+     * regression check. */
+    state.enabled = false;
+    SimServer_stop(sim);
+    SimServer_start(sim, TEST_PORT_ENTRY_ID_RESUME);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.enabled),
+            "expected the second reconnect to also re-enable brcbMain");
+
+    /* Generous settle window for a hypothetical spurious redelivery to land. */
+    Thread_sleep(1000);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(reportCountAfterFirstReconnect, state.reportCount,
+            "the second reconnect, with no new changes since the first, must not redeliver the "
+            "already-consumed backlog - proves RCB_ELEMENT_ENTRY_ID resumption is actually applied "
+            "on enable, not just relying on the pre-existing value-diff filter (which alone cannot "
+            "catch a full alternating-sequence resend)");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -716,6 +850,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
+    RUN_TEST(test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog);
 
     return UNITY_END();
 }

@@ -185,6 +185,31 @@ typedef struct {
      * (mms_report_client_api.c) - this struct is malloc'd, not calloc'd, so
      * it is not zero-initialized for free. */
     bool everPopulated;
+
+    /* Owned clone of the most recent ClientReport_getEntryId this RCB's
+     * report adapter has seen (NULL until the first report carrying one
+     * arrives - unbuffered RCBs never carry an EntryID at all, so this stays
+     * NULL for their whole lifetime, same as any RCB whose reports simply
+     * never set OptFlds.EntryId). Written by the report-adapter thread
+     * (mms_report_client_report_adapter.c's onReport, unconditionally -
+     * independent of whether that particular report survives the value-diff
+     * filter, since EntryID tracks "durably received from the server," not
+     * "passed our own forwarding decision") and read by the supervisor
+     * thread (mms_report_client_connection.c's enableOneTarget, on every
+     * (re)enable of a buffered RCB) - both sides MUST go through
+     * handle->memberRefCacheLock, the same lock that already guards
+     * lastForwardedValues. Passed to ClientReportControlBlock_setEntryId so
+     * a reconnect resumes a buffered RCB's delivery from where this client
+     * left off, instead of re-requesting the server's entire unacknowledged
+     * backlog on every RptEna transition (confirmed against real hardware:
+     * without this, a buffered RCB redelivers its full backlog on every
+     * reconnect, and since the value-diff cache only remembers the single
+     * last forwarded value, replaying the same multi-entry backlog again
+     * defeats it - each redelivery's first entry looks "changed" relative to
+     * wherever the cache landed after the previous redelivery's last entry).
+     * Explicitly initialized NULL in buildMemberRefCache, freed by
+     * MmsReportClientUseCases_destroyMemberRefCacheEntry. */
+    MmsValue* lastEntryId;
 } MmsReportClientMemberRefCacheEntry;
 
 /*

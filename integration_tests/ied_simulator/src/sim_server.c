@@ -59,9 +59,17 @@ SimServer_create(void) {
      * (mms_report_client) always explicitly sets DatSet alongside RptEna on
      * enable, matching libiec61850's own reference client example
      * (client_example_no_thread.c), which is the validated, non-fragile path. */
+    /* RPT_OPT_ENTRY_ID - required for mms_report_client's EntryID-resumption
+     * E2E coverage (test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog
+     * in e2e_test_mms_report_client.c): without it, the server never includes
+     * an EntryID in the report at all, so the client has nothing to resume
+     * from on reconnect (mirrors fixtures/reporter1.cid's own
+     * OptFields entryID="true", which only governs the CLIENT side - this is
+     * the SERVER side of the same setting). */
     ReportControlBlock_create("brcbMain", ln0, "brcbMain", true, NULL, 1,
             TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
-            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION
+                    | RPT_OPT_ENTRY_ID,
             0, 60000);
 
     /* Reproduces a real-world vendor quirk found against a live ABB REC650
@@ -97,7 +105,8 @@ SimServer_create(void) {
      * above. */
     ReportControlBlock_create("brcbDup", ln0, "brcbDup", true, NULL, 1,
             TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
-            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            RPT_OPT_SEQ_NUM | RPT_OPT_TIME_STAMP | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION
+                    | RPT_OPT_ENTRY_ID,
             0, 60000);
 
     /* Parented under ggio1 itself (not ln0) with dataSetName=NULL, mirroring

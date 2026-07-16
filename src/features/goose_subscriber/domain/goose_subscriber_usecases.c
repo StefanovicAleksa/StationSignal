@@ -521,6 +521,15 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
         if (groupAnchorIndex) {
             for (int i = 0; i < candidates.count; i++) {
                 if (forward[i] || groupAnchorIndex[i] < 0) continue;
+                /* A candidate with no value of its own in this frame has
+                 * nothing to drag in - forwarding it anyway would let the
+                 * updateValueDiffCache call below overwrite a real cached
+                 * value with NULL, the exact hazard shouldForwardAndUpdateCache's
+                 * own !value branch already guards against (see
+                 * mms_report_client_usecases.c's identical fix - found via a
+                 * real EntryID-resumed buffered redelivery on the MMS side,
+                 * applied here too since the same structural gap exists). */
+                if (!candidates.items[i].value) continue;
                 for (int j = 0; j < candidates.count; j++) {
                     if (j == i || !forward[j]) continue;
                     if (groupAnchorIndex[j] == groupAnchorIndex[i]) {
