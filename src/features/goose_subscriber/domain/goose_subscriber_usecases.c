@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "features/goose_subscriber/domain/goose_subscriber_usecases.h"
@@ -17,10 +18,51 @@ freeEntriesUpTo(GooseSubscriberEntry* entries, int builtCount) {
     free(entries);
 }
 
+/*
+ * MmsValue_equals (libiec61850) is a raw, byte-exact comparison - correct for
+ * most types, but wrong for two that show up constantly in real GOOSE
+ * datasets, confirmed against real production hardware (via mms_report_client's
+ * identical bug - GOOSE frames carry the same DA types, so this fix mirrors
+ * that one exactly; see mms_report_client_usecases.c's own doc comment on its
+ * copy of this function for the full explanation):
+ *
+ * - MMS_UTC_TIME: MmsValue_equals memcmp()s all 8 bytes, but the LAST byte is
+ *   a TimeQuality flag, not part of "when did this happen" - it can
+ *   legitimately wobble even though the displayed millisecond timestamp is
+ *   unchanged. Compared instead via MmsValue_getUtcTimeInMs, matching
+ *   ipc_dispatcher's own value codec.
+ * - MMS_BIT_STRING (CODEDENUM/Dbpos/Tcmd-style status points): MmsValue_equals
+ *   memcmp()s the whole buffer INCLUDING unused padding bits, which real
+ *   device firmware is commonly inconsistent about zero-padding across
+ *   different frame-generation code paths. Compared instead via
+ *   MmsValue_getBitStringAsInteger (plus a size guard), matching
+ *   ipc_dispatcher's own value codec.
+ *
+ * Duplicated rather than shared, per this codebase's established
+ * per-feature-data/domain-layer convention (features never reach into each
+ * other's domain/data layers, only their own service API header).
+ */
+static bool
+valuesAreSemanticallyEqual(const MmsValue* cached, const MmsValue* newValue) {
+    MmsType type = MmsValue_getType((MmsValue*) cached);
+    if (type != MmsValue_getType((MmsValue*) newValue)) return false;
+
+    switch (type) {
+        case MMS_UTC_TIME:
+            return MmsValue_getUtcTimeInMs((MmsValue*) cached) == MmsValue_getUtcTimeInMs((MmsValue*) newValue);
+        case MMS_BIT_STRING:
+            return MmsValue_getBitStringSize((MmsValue*) cached) == MmsValue_getBitStringSize((MmsValue*) newValue)
+                    && MmsValue_getBitStringAsInteger((MmsValue*) cached)
+                            == MmsValue_getBitStringAsInteger((MmsValue*) newValue);
+        default:
+            return MmsValue_equals((MmsValue*) cached, (MmsValue*) newValue);
+    }
+}
+
 bool
 GooseSubscriberUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue) {
-    if (!cached) return false;
-    return MmsValue_equals((MmsValue*) cached, (MmsValue*) newValue);
+    if (!cached || !newValue) return false;
+    return valuesAreSemanticallyEqual(cached, newValue);
 }
 
 /* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
@@ -35,17 +77,6 @@ updateValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, co
 
     if (memberRefCache->lastForwardedValues[slot]) MmsValue_delete(memberRefCache->lastForwardedValues[slot]);
     memberRefCache->lastForwardedValues[slot] = newValue ? MmsValue_clone((MmsValue*) newValue) : NULL;
-}
-
-void
-GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache) {
-    if (!memberRefCache || !memberRefCache->lastForwardedValues) return;
-    for (int i = 0; i < memberRefCache->totalLeafSlots; i++) {
-        if (memberRefCache->lastForwardedValues[i]) {
-            MmsValue_delete(memberRefCache->lastForwardedValues[i]);
-            memberRefCache->lastForwardedValues[i] = NULL;
-        }
-    }
 }
 
 /*
@@ -65,24 +96,55 @@ GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* membe
  *
  * Unlike mms_report_client's equivalent, GOOSE has no ReasonForInclusion to
  * trust unconditionally - every candidate is diff-gated: if nothing has ever
- * been cached for this slot yet (cached == NULL), this is a bootstrap event
- * (the first frame ever for this target, or the first frame after a
- * STALE/INVALID_STATE -> VALID recovery, since GooseSubscriberUseCases_resetValueDiffCache
- * clears this same cache on that transition) - the cache is silently seeded
- * but this frame is NEVER forwarded itself, mirroring MMS's GI suppression
- * exactly even though GOOSE has no GI concept of its own. Otherwise, forward
- * only if the value genuinely differs from the cache.
+ * been cached for this slot yet (cached == NULL), this is either (a) this
+ * target's very first-ever valid frame (memberRefCache->everPopulated still
+ * false - completely expected, nothing to compare against yet) or (b) an
+ * unexpected gap discovered AFTER this target has already been populated
+ * once (everPopulated true) - case (b) should be structurally impossible
+ * under the current design (the cache is populated once, on the first valid
+ * frame, and PRESERVED across every later STALE/INVALID_STATE -> VALID
+ * recovery - see GooseSubscriberMemberRefCache's own doc comment - nothing
+ * ever resets a slot back to NULL again), so it's logged loudly to stderr on
+ * every occurrence, mirroring mms_report_client's identical logging exactly.
+ * Either way, the cache is silently seeded but this frame is NEVER forwarded
+ * itself for a slot with no prior cached value, mirroring MMS's own GI
+ * suppression even though GOOSE has no GI concept of its own. Otherwise
+ * (cached != NULL), forward only if the value genuinely differs from the
+ * cache - this is what makes a recovery's fresh full snapshot compare
+ * against the REAL last-known pre-outage value instead of a wiped-clean one.
  */
 static bool
 shouldForwardAndUpdateCache(GooseSubscriberMemberRefCache* memberRefCache, int slot, const MmsValue* value,
-        MmsValue** outPreviousValue) {
+        const char* reference, const char* goCbRef, MmsValue** outPreviousValue) {
     if (outPreviousValue) *outPreviousValue = NULL;
     if (slot < 0) return true;
 
     MmsValue* cached = memberRefCache->lastForwardedValues[slot];
     if (outPreviousValue && cached) *outPreviousValue = MmsValue_clone(cached);
 
+    if (!value) {
+        /* This wire position carries no value at all in this particular
+         * frame - GooseSubscriberEntry.value's own doc comment documents
+         * this exact possibility ("NULL only if the element itself was NULL
+         * in the source array"). Never crash on it (MmsValue_getType(NULL)
+         * would, via isDuplicateValue below), never treat a missing value
+         * as a bootstrap seed or a real change, and never overwrite a real
+         * cached value with NULL - under the populate-once/preserve-forever
+         * design (see GooseSubscriberMemberRefCache's own doc comment),
+         * re-nulling a slot here would make a later genuine frame for this
+         * same position spuriously trip the everPopulated-gated NULL-slot
+         * logging above. Simply leave the cache exactly as it was and
+         * don't forward this position for this frame. */
+        return false;
+    }
+
     if (!cached) {
+        if (memberRefCache->everPopulated) {
+            fprintf(stderr,
+                    "[goose_subscriber] ERROR: cache slot %d (reference '%s') for target '%s' is unexpectedly "
+                    "NULL after this target was already populated once - this should never happen, investigate\n",
+                    slot, reference ? reference : "(unknown)", goCbRef ? goCbRef : "(unknown)");
+        }
         updateValueDiffCache(memberRefCache, slot, value);
         return false;
     }
@@ -121,16 +183,6 @@ appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* 
     return true;
 }
 
-/* memberRefCache->leafSemantics is parallel to lastForwardedValues (same
- * slot indexing) - NULL-safe/bounds-checked, degrading to NONE. Mirrors
- * mms_report_client_usecases.c's identical helper exactly. */
-static IedModelDaSemantic
-lookupSemanticForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
-    if (!memberRefCache || !memberRefCache->leafSemantics) return IED_MODEL_DA_SEMANTIC_NONE;
-    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return IED_MODEL_DA_SEMANTIC_NONE;
-    return memberRefCache->leafSemantics[slot];
-}
-
 /* One not-yet-filtered leaf, gathered by collectCandidates before any
  * forward/drop decision is made - value/reference are borrowed (from
  * dataSetValues, a flattened array, or memberRefCache's own strings), never
@@ -153,6 +205,16 @@ typedef struct {
     int count;
     int capacity;
 } CandidateBuilder;
+
+/* memberRefCache->leafSemantics is parallel to lastForwardedValues (same
+ * slot indexing) - NULL-safe/bounds-checked, degrading to NONE exactly like
+ * every other "semantics table unavailable" case. */
+static IedModelDaSemantic
+lookupSemanticForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafSemantics) return IED_MODEL_DA_SEMANTIC_NONE;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return IED_MODEL_DA_SEMANTIC_NONE;
+    return memberRefCache->leafSemantics[slot];
+}
 
 /* Same grow-or-skip-on-OOM posture as appendGooseEntry (a single allocation
  * failure drops one candidate rather than aborting the whole record). */
@@ -217,6 +279,83 @@ freeFlattenedArrays(FlattenedArrayList* list) {
  * EntryCandidate for the group-aware filter in buildEntries to decide on
  * afterwards, rather than deciding forward/drop inline.
  */
+/*
+ * Reorders `flattened` (length count) into `outReordered` so
+ * outReordered[refIdx] is the value that ACTUALLY belongs at
+ * leafReferences[refIdx] - mirrors mms_report_client_usecases.c's identical
+ * reorderFlattenedToMatchReferences exactly; see that function's own doc
+ * comment for the full real-hardware finding (a device whose
+ * GetVariableAccessAttributes type-description order doesn't match its own
+ * report/GOOSE encoding order) and the Quality(13-bit bitstring)/
+ * Timestamp(UTC_TIME)-by-type, everything-else-positional resolution
+ * strategy - GOOSE frames carry the same structured DA types as MMS
+ * reports, so this is the same exposure.
+ */
+static bool
+reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* flattened, int count,
+        MmsValue** outReordered) {
+    bool* wireUsed = calloc((size_t) count, sizeof(bool));
+    if (!wireUsed) return false;
+
+    bool ok = true;
+    for (int refIdx = 0; refIdx < count && ok; refIdx++) {
+        const char* ref = leafReferences[refIdx];
+        const char* lastDollar = ref ? strrchr(ref, '$') : NULL;
+        const char* daName = lastDollar ? lastDollar + 1 : ref;
+        outReordered[refIdx] = NULL;
+
+        if (daName && strcmp(daName, "q") == 0) {
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (MmsValue_getType(flattened[w]) == MMS_BIT_STRING
+                        && MmsValue_getBitStringSize(flattened[w]) == 13) {
+                    outReordered[refIdx] = flattened[w];
+                    wireUsed[w] = true;
+                    break;
+                }
+            }
+            if (!outReordered[refIdx]) ok = false;
+        } else if (daName && strcmp(daName, "t") == 0) {
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (MmsValue_getType(flattened[w]) == MMS_UTC_TIME) {
+                    outReordered[refIdx] = flattened[w];
+                    wireUsed[w] = true;
+                    break;
+                }
+            }
+            if (!outReordered[refIdx]) ok = false;
+        }
+        /* else: deferred to the positional fill-in pass below */
+    }
+
+    if (ok) {
+        int w = 0;
+        for (int refIdx = 0; refIdx < count; refIdx++) {
+            if (outReordered[refIdx]) continue;
+            while (w < count && wireUsed[w]) w++;
+            if (w >= count) { ok = false; break; }
+            outReordered[refIdx] = flattened[w];
+            wireUsed[w] = true;
+            w++;
+        }
+    }
+
+    free(wireUsed);
+    return ok;
+}
+
+/*
+ * The per-leaf EXPECTED-vs-ACTUAL type cross-check that used to live here
+ * (decomposedLeafTypesMatch, via IedModel_dataAttributeTypeMatchesMmsType)
+ * was removed at explicit user request - mirrors the identical removal in
+ * mms_report_client_usecases.c, confirmed via real-hardware debug logging to
+ * reject genuine decompositions (flattenedCount matched memberLeafCounts[i]
+ * exactly, but the type check still failed). Removing the gate exposed a
+ * real mislabeling bug for that same device (q/stVal swapped) -
+ * reorderFlattenedToMatchReferences above fixes that directly instead of
+ * re-adding a reject-on-mismatch gate.
+ */
 static void
 collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* memberRefCache,
         int entryCount, CandidateBuilder* candidates, FlattenedArrayList* flattenedArrays) {
@@ -233,16 +372,25 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
             MmsValue** flattened = GooseSubscriberUtils_flattenStructure(rawValue, &flattenedCount);
 
             if (flattened && flattenedCount == memberRefCache->memberLeafCounts[i]) {
-                trackFlattenedArray(flattenedArrays, flattened);
-                for (int k = 0; k < flattenedCount; k++) {
-                    int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
-                    appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k], slot,
-                            lookupSemanticForSlot(memberRefCache, slot));
+                MmsValue** reordered = malloc(sizeof(MmsValue*) * (size_t) flattenedCount);
+                bool reorderOk = reordered
+                        && reorderFlattenedToMatchReferences(memberRefCache->memberLeafReferences[i], flattened,
+                                flattenedCount, reordered);
+                if (reorderOk) {
+                    trackFlattenedArray(flattenedArrays, flattened);
+                    for (int k = 0; k < flattenedCount; k++) {
+                        int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
+                        appendCandidate(candidates, reordered[k], memberRefCache->memberLeafReferences[i][k], slot,
+                                lookupSemanticForSlot(memberRefCache, slot));
+                    }
+                    free(reordered);
+                    continue; /* raw position i fully handled via decomposition */
                 }
-                continue; /* raw position i fully handled via decomposition */
+                free(reordered);
             }
-            /* Count mismatch (or flatten failure) - fall through to the
-             * non-decomposed path below for this one position. */
+            /* Count mismatch, flatten failure, or unresolvable q/t reorder -
+             * fall through to the non-decomposed path below for this one
+             * position. */
             free(flattened);
         }
 
@@ -333,7 +481,7 @@ resolveGroupAnchor(const char* reference, const GroupAnchor* anchors, int anchor
  */
 static GooseSubscriberEntry*
 buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* memberRefCache,
-        int entryCount, int* outEntryCount) {
+        const char* goCbRef, int entryCount, int* outEntryCount) {
     *outEntryCount = 0;
     if (entryCount <= 0) return NULL;
 
@@ -366,7 +514,8 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
     if (forward) {
         for (int i = 0; i < candidates.count; i++) {
             EntryCandidate* c = &candidates.items[i];
-            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, &c->previousValue);
+            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, c->reference, goCbRef,
+                    &c->previousValue);
         }
 
         if (groupAnchorIndex) {
@@ -412,6 +561,13 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
     free(forward);
     free(groupAnchorIndex);
     free(anchors);
+    /* Every candidate above was checked against memberRefCache->everPopulated
+     * as it stood BEFORE this frame - only now, having processed the whole
+     * frame, do we flip it (a no-op once already true). This is what keeps
+     * the true first-ever frame's own from-empty seeding silent while making
+     * every frame from here on treat an unexpected NULL slot as a bug to
+     * log - mirrors mms_report_client's identical buildEntries exactly. */
+    if (memberRefCache && candidates.count > 0) memberRefCache->everPopulated = true;
     free(candidates.items);
     freeFlattenedArrays(&flattenedArrays);
 
@@ -459,7 +615,7 @@ GooseSubscriberUseCases_buildRecord(
     if (dstMac) memcpy(record->dstMac, dstMac, 6);
 
     int builtEntryCount = 0;
-    record->entries = buildEntries(dataSetValues, memberRefCache, entryCount, &builtEntryCount);
+    record->entries = buildEntries(dataSetValues, memberRefCache, goCbRef, entryCount, &builtEntryCount);
     record->entryCount = builtEntryCount;
 
     return record;
@@ -538,7 +694,7 @@ crossTargetEntriesEqual(const GooseSubscriberDedupEntry* cached, int cachedCount
         MmsValue* cachedVal = cached[i].value;
         MmsValue* newVal = entries[i].value;
         if ((cachedVal == NULL) != (newVal == NULL)) return false;
-        if (cachedVal && !MmsValue_equals(cachedVal, newVal)) return false;
+        if (cachedVal && !valuesAreSemanticallyEqual(cachedVal, newVal)) return false;
     }
     return true;
 }

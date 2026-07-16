@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hal_time.h"
 #include "features/ied_model_online_loader/data/ied_model_online_loader_connection.h"
 #include "features/ied_model_online_loader/data/ied_model_online_loader_auth.h"
 #include "features/ied_model_online_loader/domain/ied_model_online_loader_usecases.h"
@@ -8,6 +9,29 @@
 #include "iec61850_common.h"
 #include "mms_type_spec.h"
 #include "mms_value.h"
+
+/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
+ * the plan this landed under) - buildFcContainer/buildFcContainerChildren/
+ * buildLogicalNodeDataModel below silently `return` on any ACSI call
+ * failure, with no diagnostic of any kind - real-hardware testing against a
+ * device with no SCL file service (forcing it through this loader) showed
+ * Gap-4 decomposition never succeeding for ANY dataset member, and there was
+ * no way to tell from any existing log whether the live MMS model-discovery
+ * walk itself was silently failing. This logs every one of those silent
+ * failure sites plus a per-DO success summary, so the next real run's log
+ * shows exactly which ACSI call failed, with what error code, for which
+ * node. Same append-per-call helper shape as the mms_report_client/
+ * ipc_dispatcher debug logs (duplicated here per this codebase's own
+ * cross-feature convention, not shared). */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
+
+#define IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH "/tmp/ied_reporter_debug_model_build.log"
 
 /* ---- small string helpers ---- */
 
@@ -107,7 +131,8 @@ resolveAndBuildDataset(IedConnection conn, LogicalNode* ln, const char* datasetR
         char* acsiMemberRef = (char*) LinkedList_getData(element);
         char* wireRef = IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef(acsiMemberRef);
         if (wireRef) {
-            /* No LD-name prefix - dynamic-model gotcha #1. */
+            /* wireRef is already LD-prefix-free (IedModelOnlineLoaderUseCases_
+             * convertAcsiRefToWireRef strips it) - dynamic-model gotcha #1. */
             DataSetEntry_create(dataSet, wireRef, -1, NULL);
             free(wireRef);
         } else {
@@ -175,6 +200,54 @@ static void buildFcContainerChildren(IedConnection conn, const char* nodeRef, Fu
         ModelNode* parentNode, LinkedList children);
 
 /*
+ * Builds a DataAttribute/DataObject subtree directly from a variable's own
+ * recursive type description, bypassing IedConnection_getDataDirectoryByFC
+ * entirely - the fallback buildFcContainer engages when that call finds zero
+ * children. Root-caused against real hardware: getDataDirectoryByFC only
+ * finds a DO's children by string-matching separately-named leaf entries in
+ * the domain's flat variable-name list (confirmed by reading libiec61850's
+ * own getDataDirectoryByFc/IedConnection_getDeviceModelFromServer source,
+ * third_party's vendored .a has no source but the sibling
+ * /home/aleksa/code/ied_reporter/libiec61850 checkout does) - but real IEC
+ * 61850 servers commonly expose a structured DO (e.g. an SPS's
+ * stVal/q/t) as ONE opaque MMS_STRUCTURE-typed named variable instead,
+ * exactly matching what a report's own wire value looks like
+ * (MmsReportEntry.value arriving as one undecomposed MMS_STRUCTURE) - the
+ * domain's flat name list then never contains the "$"-suffixed leaf entries
+ * getDataDirectoryByFC's matching depends on, so it silently finds nothing
+ * for every such DO. One getVariableSpecification call on the DO itself
+ * returns the FULL recursive component layout (names + types) regardless of
+ * how the domain names its variables, so this needs no further wire round
+ * trips per leaf.
+ */
+static void
+buildDataAttributeTreeFromSpec(MmsVariableSpecification* spec, ModelNode* parentNode, FunctionalConstraint fc) {
+    if (!spec || MmsVariableSpecification_getType(spec) != MMS_STRUCTURE) return;
+
+    int size = MmsVariableSpecification_getSize(spec);
+    for (int i = 0; i < size; i++) {
+        /* Borrowed - owned by (and destroyed recursively along with) the
+         * top-level spec buildFcContainer destroys; never destroyed here. */
+        MmsVariableSpecification* child = MmsVariableSpecification_getChildSpecificationByIndex(spec, i);
+        if (!child) continue;
+
+        const char* childName = MmsVariableSpecification_getName(child);
+        if (!childName) continue;
+
+        MmsType childType = MmsVariableSpecification_getType(child);
+        if (childType == MMS_STRUCTURE) {
+            DataObject* childDo = DataObject_create(childName, parentNode, 0);
+            buildDataAttributeTreeFromSpec(child, (ModelNode*) childDo, fc);
+        } else {
+            DataAttributeType type = mapMmsTypeToDataAttributeType(childType);
+            if (type != IEC61850_UNKNOWN_TYPE) {
+                DataAttribute_create(childName, parentNode, type, fc, 0, 0, 0);
+            }
+        }
+    }
+}
+
+/*
  * One node's worth of FC=<fc> children: each child is either itself a
  * container (its own getDataDirectoryByFC call returns a non-empty list -
  * built as a DataObject, recursed into) or a genuine leaf (empty list - type
@@ -190,9 +263,32 @@ static void
 buildFcContainer(IedConnection conn, const char* nodeRef, FunctionalConstraint fc, ModelNode* parentNode) {
     IedClientError err = IED_ERROR_OK;
     LinkedList children = IedConnection_getDataDirectoryByFC(conn, &err, nodeRef, fc);
-    if (!children) return;
-    buildFcContainerChildren(conn, nodeRef, fc, parentNode, children);
-    LinkedList_destroyDeep(children, free);
+
+    if (children && LinkedList_size(children) > 0) {
+        buildFcContainerChildren(conn, nodeRef, fc, parentNode, children);
+        LinkedList_destroyDeep(children, free);
+        return;
+    }
+    if (children) LinkedList_destroyDeep(children, free);
+
+    /* getDataDirectoryByFC found nothing - see buildDataAttributeTreeFromSpec's
+     * own doc comment for why this is the expected, common case on real
+     * hardware rather than a network failure. Fall back to the variable's own
+     * type description. */
+    IedClientError specErr = IED_ERROR_OK;
+    MmsVariableSpecification* spec = IedConnection_getVariableSpecification(conn, &specErr, nodeRef, fc);
+    if (spec) {
+        buildDataAttributeTreeFromSpec(spec, parentNode, fc);
+        MmsVariableSpecification_destroy(spec);
+        return;
+    }
+
+    char line[512];
+    snprintf(line, sizeof(line),
+            "FAIL both getDataDirectoryByFC(error=%d) and getVariableSpecification(error=%d) "
+            "nodeRef=%s fc=%d (0 children - node stays empty)",
+            (int) err, (int) specErr, nodeRef ? nodeRef : "(null)", (int) fc);
+    appendDebugLog(IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH, line);
 }
 
 static void
@@ -219,7 +315,21 @@ buildFcContainerChildren(IedConnection conn, const char* nodeRef, FunctionalCons
                     MmsVariableSpecification_destroy(spec);
                     if (type != IEC61850_UNKNOWN_TYPE) {
                         DataAttribute_create(childName, parentNode, type, fc, 0, 0, 0);
+                    } else {
+                        char line[384];
+                        snprintf(line, sizeof(line),
+                                "SKIP getVariableSpecification childRef=%s fc=%d -> unmapped MmsType "
+                                "(leaf never becomes a DataAttribute)",
+                                childRef ? childRef : "(null)", (int) fc);
+                        appendDebugLog(IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH, line);
                     }
+                } else {
+                    char line[384];
+                    snprintf(line, sizeof(line),
+                            "FAIL getVariableSpecification childRef=%s fc=%d error=%d "
+                            "(leaf never becomes a DataAttribute)",
+                            childRef ? childRef : "(null)", (int) fc, (int) specErr);
+                    appendDebugLog(IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH, line);
                 }
             }
 
@@ -242,7 +352,14 @@ static void
 buildLogicalNodeDataModel(IedConnection conn, const char* lnRef, LogicalNode* ln) {
     IedClientError err = IED_ERROR_OK;
     LinkedList doNames = IedConnection_getLogicalNodeDirectory(conn, &err, lnRef, ACSI_CLASS_DATA_OBJECT);
-    if (!doNames) return;
+    if (!doNames) {
+        char line[384];
+        snprintf(line, sizeof(line),
+                "FAIL getLogicalNodeDirectory(DATA_OBJECT) lnRef=%s error=%d (0 DOs - this LN's whole tree stays empty)",
+                lnRef ? lnRef : "(null)", (int) err);
+        appendDebugLog(IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH, line);
+        return;
+    }
 
     LinkedList element = LinkedList_getNext(doNames);
     while (element) {
@@ -253,6 +370,16 @@ buildLogicalNodeDataModel(IedConnection conn, const char* lnRef, LogicalNode* ln
             DataObject* doNode = DataObject_create(doName, (ModelNode*) ln, 0);
             buildFcContainer(conn, doRef, IEC61850_FC_ST, (ModelNode*) doNode);
             buildFcContainer(conn, doRef, IEC61850_FC_MX, (ModelNode*) doNode);
+
+            LinkedList doChildren = ModelNode_getChildren((ModelNode*) doNode);
+            int childCount = doChildren ? LinkedList_size(doChildren) : 0;
+            if (doChildren) LinkedList_destroyStatic(doChildren);
+
+            char line[384];
+            snprintf(line, sizeof(line), "DO doRef=%s builtChildCount=%d%s",
+                    doRef, childCount, childCount == 0 ? " <-- EMPTY, will forward as raw structure" : "");
+            appendDebugLog(IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH, line);
+
             free(doRef);
         }
 

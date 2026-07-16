@@ -4,6 +4,7 @@
 #include "features/control_dispatcher/data/control_dispatcher_request_queue.h"
 #include "features/control_dispatcher/data/control_dispatcher_ws_server.h"
 #include "features/control_dispatcher/data/control_dispatcher_worker.h"
+#include "features/control_dispatcher/data/control_dispatcher_json_writer.h"
 
 void
 ControlDispatcherConfig_defaults(ControlDispatcherConfig* config) {

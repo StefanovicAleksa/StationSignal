@@ -40,12 +40,12 @@
  *                                       entry from ever being treated as a
  *                                       value, routing it to _decodeQuality
  *                                       below instead). Deliberately a raw
- *                                       integer, not a named enum string -
- *                                       this function has no way to know
- *                                       which specific CODEDENUM a given
- *                                       bitstring represents (Dbpos's own
- *                                       0..3 meaning per IEC 61850-7-3 differs
- *                                       from Tcmd's), so guessing a decoded
+ *                                       integer, not a named enum string,
+ *                                       for every CODEDENUM subtype uniformly
+ *                                       (Dbpos, Tcmd, or otherwise) - this
+ *                                       function has no way to know which
+ *                                       specific CODEDENUM a given bitstring
+ *                                       represents, so guessing a decoded
  *                                       label without per-type verification
  *                                       would violate this repo's own "don't
  *                                       guess IEC 61850 semantics" rule - the

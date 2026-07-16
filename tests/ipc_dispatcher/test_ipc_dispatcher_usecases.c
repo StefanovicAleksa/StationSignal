@@ -264,8 +264,6 @@ test_assembleMessage_extrasNull_everyHasFlagFalse(void) {
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousValue);
     TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousQuality);
-    TEST_ASSERT_FALSE(message->dataPoints[0].hasLabel);
-    TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousLabel);
 
     IpcDispatcherUseCases_freeMessage(message);
 }
@@ -286,20 +284,11 @@ test_assembleMessage_extrasPopulated_roundTripsEveryField(void) {
     bool hasPreviousQuality = true;
     IpcQuality previousQuality = { IPC_QUALITY_INVALID, 7 };
 
-    bool hasLabel = true;
-    const char* label = "on";
-    bool hasPreviousLabel = true;
-    const char* previousLabel = "off";
-
     IpcDataPointExtras extras = {
         .pointHasPreviousValue = &hasPreviousValue,
         .pointPreviousValue = &previousValue,
         .pointHasPreviousQuality = &hasPreviousQuality,
         .pointPreviousQuality = &previousQuality,
-        .pointHasLabel = &hasLabel,
-        .pointLabel = &label,
-        .pointHasPreviousLabel = &hasPreviousLabel,
-        .pointPreviousLabel = &previousLabel,
     };
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
@@ -314,10 +303,6 @@ test_assembleMessage_extrasPopulated_roundTripsEveryField(void) {
     TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousQuality);
     TEST_ASSERT_EQUAL_INT(IPC_QUALITY_INVALID, message->dataPoints[0].previousQuality.validity);
     TEST_ASSERT_EQUAL_INT(7, message->dataPoints[0].previousQuality.detailFlags);
-    TEST_ASSERT_TRUE(message->dataPoints[0].hasLabel);
-    TEST_ASSERT_EQUAL_STRING("on", message->dataPoints[0].label);
-    TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousLabel);
-    TEST_ASSERT_EQUAL_STRING("off", message->dataPoints[0].previousLabel);
 
     IpcDispatcherUseCases_freeMessage(message);
 }

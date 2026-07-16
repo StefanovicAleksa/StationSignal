@@ -271,6 +271,48 @@ test_buildRecord_decomposition_countMismatch_fallsBackToRawEntry(void) {
     GooseSubscriberUseCases_freeRecord(record);
 }
 
+void
+test_buildRecord_decomposition_withWireTypesPresent_stillDecomposesWhenTypesMatch(void) {
+    /* Regression case: memberLeafWireTypes populated AND genuinely matching
+     * the wire's actual types must still decompose normally. */
+    MmsValue* stVal = MmsValue_newBoolean(true);
+    MmsValue* q = MmsValue_newBitString(13);
+    MmsValue* structVal = MmsValue_createEmptyStructure(2);
+    MmsValue_setElement(structVal, 0, stVal);
+    MmsValue_setElement(structVal, 1, q);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    uint8_t zeroMac[6] = { 0 };
+    char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 2 };
+    DataAttributeType wireTypes0[2] = { IEC61850_BOOLEAN, IEC61850_QUALITY };
+    DataAttributeType* memberLeafWireTypes[1] = { wireTypes0 };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.memberLeafWireTypes = memberLeafWireTypes;
+
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, record->entryCount,
+            "matching wire types must not block a genuinely well-ordered decomposition");
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$stVal", record->entries[0].reference);
+    TEST_ASSERT_EQUAL_STRING("Breaker1CB1/XCBR1.Pos$q", record->entries[1].reference);
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
 /* ---- buildRecord: per-position value-diff filter ---- */
 
 void
@@ -395,69 +437,6 @@ test_buildRecord_firstEverRealChange_noPriorBootstrap_previousValueIsNull(void) 
     TEST_ASSERT_EQUAL_INT(1, record->entryCount);
     TEST_ASSERT_NULL(record->entries[0].previousValue);
 
-    MmsValue_delete(dataSetValues);
-    GooseSubscriberUseCases_freeRecord(record);
-}
-
-void
-test_buildRecord_dbposSemantic_threadedOntoEntry_fromLeafSemantics(void) {
-    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
-    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
-
-    int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
-    IedModelDaSemantic leafSemantics[1] = { IED_MODEL_DA_SEMANTIC_DBPOS };
-    GooseSubscriberMemberRefCache cache = { 0 };
-    cache.memberCount = 1;
-    cache.leafSlotOffsets = leafSlotOffsets;
-    cache.totalLeafSlots = 1;
-    cache.lastForwardedValues = lastForwardedValues;
-    cache.leafSemantics = leafSemantics;
-
-    uint8_t zeroMac[6] = { 0 };
-    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
-            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
-            1, 0, 1, false, false, 2000, 0,
-            false, 0, 0, -1,
-            zeroMac, zeroMac,
-            dataSetValues, &cache, 1);
-
-    TEST_ASSERT_NOT_NULL(record);
-    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_DBPOS, record->entries[0].semantic);
-
-    MmsValue_delete(cache.lastForwardedValues[0]);
-    MmsValue_delete(dataSetValues);
-    GooseSubscriberUseCases_freeRecord(record);
-}
-
-void
-test_buildRecord_semantic_defaultsNone_whenLeafSemanticsIsNull(void) {
-    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
-    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
-
-    int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
-    GooseSubscriberMemberRefCache cache = { 0 };
-    cache.memberCount = 1;
-    cache.leafSlotOffsets = leafSlotOffsets;
-    cache.totalLeafSlots = 1;
-    cache.lastForwardedValues = lastForwardedValues;
-    cache.leafSemantics = NULL;
-
-    uint8_t zeroMac[6] = { 0 };
-    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
-            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
-            1, 0, 1, false, false, 2000, 0,
-            false, 0, 0, -1,
-            zeroMac, zeroMac,
-            dataSetValues, &cache, 1);
-
-    TEST_ASSERT_NOT_NULL(record);
-    TEST_ASSERT_EQUAL_INT(1, record->entryCount);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, record->entries[0].semantic);
-
-    MmsValue_delete(cache.lastForwardedValues[0]);
     MmsValue_delete(dataSetValues);
     GooseSubscriberUseCases_freeRecord(record);
 }
@@ -650,7 +629,13 @@ test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void) {
     char** memberLeafReferences[1] = { leafRefs0 };
     int memberLeafCounts[1] = { 2 };
     int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    /* "$q" must be a real 13-bit MMS_BIT_STRING (Quality's own fixed wire
+     * encoding, see reorderFlattenedToMatchReferences's own doc comment) -
+     * not a placeholder boolean - the reorder step now requires this to
+     * resolve which flattened wire value actually IS "q". */
+    MmsValue* cachedQ = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(cachedQ, 0);
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), cachedQ };
 
     GooseSubscriberMemberRefCache cache = { 0 };
     cache.memberCount = 1;
@@ -660,9 +645,11 @@ test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void) {
     cache.totalLeafSlots = 2;
     cache.lastForwardedValues = lastForwardedValues;
 
+    MmsValue* newQ = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(newQ, 0);
     MmsValue* structVal = MmsValue_createEmptyStructure(2);
-    MmsValue_setElement(structVal, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
-    MmsValue_setElement(structVal, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+    MmsValue_setElement(structVal, 0, MmsValue_newBoolean(true)); /* stVal: differs from cache */
+    MmsValue_setElement(structVal, 1, newQ);                     /* q: matches cache */
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues, 0, structVal);
 
@@ -768,58 +755,33 @@ test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
     GooseSubscriberUseCases_freeRecord(record);
 }
 
-/* ---- resetValueDiffCache ---- */
+/* ---- value-diff cache persistence across a simulated liveness recovery ----
+ * The cache is now NEVER reset (the old resetValueDiffCache function and its
+ * every-recovery call site in the frame adapter are both gone) - it's
+ * populated exactly once, on this target's first-ever valid frame, and
+ * preserved for the rest of the subscriber's lifetime. These tests drive
+ * buildRecord multiple times in a row with NO reset call anywhere in between
+ * (there is no such call left to make) to prove: the first call's snapshot
+ * silently seeds the cache and flips everPopulated; a later call simulating
+ * a recovery's own fresh full snapshot correctly diffs against the REAL
+ * preserved prior value - a genuine change forwards with a real (non-NULL)
+ * previousValue, an unchanged resend is suppressed exactly like any other
+ * duplicate. */
 
 void
-test_resetValueDiffCache_nullsOutEveryPopulatedSlot(void) {
-    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(true), MmsValue_newBoolean(false) };
-    GooseSubscriberMemberRefCache cache = { 0 };
-    cache.totalLeafSlots = 2;
-    cache.lastForwardedValues = lastForwardedValues;
-
-    GooseSubscriberUseCases_resetValueDiffCache(&cache);
-
-    TEST_ASSERT_NULL(cache.lastForwardedValues[0]);
-    TEST_ASSERT_NULL(cache.lastForwardedValues[1]);
-}
-
-void
-test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull(void) {
-    GooseSubscriberMemberRefCache cache = { 0 };
-    cache.totalLeafSlots = 0;
-    cache.lastForwardedValues = NULL;
-
-    GooseSubscriberUseCases_resetValueDiffCache(&cache); /* must not crash */
-}
-
-void
-test_resetValueDiffCache_isNoOp_whenMemberRefCacheIsNull(void) {
-    GooseSubscriberUseCases_resetValueDiffCache(NULL); /* must not crash */
-}
-
-void
-test_buildRecord_afterResetValueDiffCache_firstFrameIsSuppressed_reseedsCache(void) {
-    /* Simulates a recovery: a value was already cached before (seeded
-     * below), then the publisher goes STALE and comes back VALID - the frame
-     * adapter resets the cache, and the first frame after recovery carries
-     * the exact same, unchanged value. This must NOT reach the record
-     * callback (a recovery's first frame is bootstrap-only, exactly like the
-     * initial first-ever frame), but must silently reseed the cache so a
-     * genuine change after the recovery has a real previous value to
-     * report. */
+test_buildRecord_firstFrame_seedsCache_andSetsEverPopulated(void) {
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
     MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
 
     int leafSlotOffsets[1] = { 0 };
-    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* cached before the "outage" */
+    MmsValue* lastForwardedValues[1] = { NULL };
     GooseSubscriberMemberRefCache cache = { 0 };
     cache.memberCount = 1;
     cache.leafSlotOffsets = leafSlotOffsets;
     cache.totalLeafSlots = 1;
     cache.lastForwardedValues = lastForwardedValues;
 
-    GooseSubscriberUseCases_resetValueDiffCache(&cache);
-    TEST_ASSERT_NULL_MESSAGE(cache.lastForwardedValues[0], "reset must clear the pre-outage cache");
+    TEST_ASSERT_FALSE(cache.everPopulated);
 
     uint8_t zeroMac[6] = { 0 };
     GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
@@ -831,9 +793,87 @@ test_buildRecord_afterResetValueDiffCache_firstFrameIsSuppressed_reseedsCache(vo
 
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
-            "a recovery's first frame must never reach the callback, same as the initial "
-            "first-ever frame");
-    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "the cache must still be reseeded after recovery");
+            "the very first-ever frame must never reach the callback - bootstrap-only");
+    TEST_ASSERT_NOT_NULL_MESSAGE(cache.lastForwardedValues[0], "the cache must be seeded from the first frame");
+    TEST_ASSERT_TRUE_MESSAGE(cache.everPopulated, "everPopulated must flip true after the first frame");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_simulatedRecovery_genuineChangeForwards_withRealPreviousValue(void) {
+    /* Simulates a liveness recovery: the cache already holds a real value
+     * from before the "outage" (no reset ever runs in between - there is no
+     * such call anymore), and the "recovery"'s own fresh full snapshot
+     * carries a genuinely different value. Must forward, WITH a real
+     * (non-NULL) previousValue reflecting the true pre-outage state - not
+     * NULL, which is exactly the bug this design fixes. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(false)); /* changed while "stale" */
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) }; /* real pre-outage value, still cached */
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.everPopulated = true; /* this target already completed its first-ever frame before */
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a genuine change discovered on recovery must forward, diffed against the preserved cache");
+    TEST_ASSERT_FALSE(MmsValue_getBoolean(record->entries[0].value));
+    TEST_ASSERT_NOT_NULL_MESSAGE(record->entries[0].previousValue,
+            "previousValue must be the REAL preserved pre-outage value, never NULL, after a recovery");
+    TEST_ASSERT_TRUE_MESSAGE(MmsValue_getBoolean(record->entries[0].previousValue),
+            "previousValue must reflect the true value from before the outage");
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_simulatedRecovery_unchangedResend_isSuppressed(void) {
+    /* Same simulated-recovery setup, but this time the recovery's own fresh
+     * full snapshot carries the SAME value as before the outage - must be
+     * suppressed by the ordinary diff check, exactly like any other
+     * unchanged resend, with no special-cased "recovery" behavior needed. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true)); /* unchanged across the "outage" */
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(true) };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.everPopulated = true;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "an unchanged resend after a recovery must be suppressed, same as any other duplicate");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+    TEST_ASSERT_TRUE(MmsValue_getBoolean(cache.lastForwardedValues[0]));
 
     MmsValue_delete(cache.lastForwardedValues[0]);
     MmsValue_delete(dataSetValues);
@@ -863,6 +903,103 @@ test_isDuplicateValue_falseWhenDifferent(void) {
     MmsValue* cached = MmsValue_newBoolean(true);
     MmsValue* newValue = MmsValue_newBoolean(false);
     TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+/* Type-aware comparison cases - see valuesAreSemanticallyEqual's own doc
+ * comment in goose_subscriber_usecases.c (and its identical, independently
+ * duplicated twin in mms_report_client_usecases.c) for the full real-hardware
+ * finding: MmsValue_equals is a raw byte-exact comparison, wrong for
+ * MMS_UTC_TIME (includes the TimeQuality byte) and MMS_BIT_STRING (includes
+ * unused padding bits) - both types show up constantly in real GOOSE
+ * datasets too. */
+
+void
+test_isDuplicateValue_utcTime_sameMsDifferentQualityByte_isDuplicate(void) {
+    MmsValue* cached = MmsValue_newUtcTimeByMsTime(1700000000123ULL);
+    MmsValue* newValue = MmsValue_newUtcTimeByMsTime(1700000000123ULL);
+    MmsValue_setUtcTimeMsEx(cached, 1700000000123ULL, 0x00);
+    MmsValue_setUtcTimeMsEx(newValue, 1700000000123ULL, 0x0A);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsValue_equals(cached, newValue),
+            "sanity: the OLD raw byte-exact comparison sees these as different - documents the bug this fixes");
+    TEST_ASSERT_TRUE_MESSAGE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue),
+            "a differing TimeQuality byte alone must not be treated as a real change");
+
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_utcTime_genuinelyDifferentMs_isNotDuplicate(void) {
+    MmsValue* cached = MmsValue_newUtcTimeByMsTime(1700000000123ULL);
+    MmsValue* newValue = MmsValue_newUtcTimeByMsTime(1700000000456ULL);
+
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_bitString_sameSizeSameBits_isDuplicate(void) {
+    MmsValue* cached = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(cached, 0, false);
+    MmsValue_setBitStringBit(cached, 1, true);
+    MmsValue* newValue = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(newValue, 0, false);
+    MmsValue_setBitStringBit(newValue, 1, true);
+
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_bitString_genuinelyDifferentBits_isNotDuplicate(void) {
+    MmsValue* cached = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(cached, 0, false);
+    MmsValue_setBitStringBit(cached, 1, true);
+    MmsValue* newValue = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(newValue, 0, true);
+    MmsValue_setBitStringBit(newValue, 1, true);
+
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_bitString_sameDecodedIntegerDifferentSize_isNotDuplicate(void) {
+    /* See mms_report_client's identical test's own comment for why the
+     * real-world padding-bit scenario itself can't be reproduced through the
+     * public MmsValue API - this proves the added size guard instead. */
+    MmsValue* cached = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(cached, 0, true);
+    MmsValue_setBitStringBit(cached, 1, false);
+
+    MmsValue* newValue = MmsValue_newBitString(8);
+    MmsValue_setBitStringBit(newValue, 0, true);
+
+    TEST_ASSERT_EQUAL_UINT32(MmsValue_getBitStringAsInteger(cached), MmsValue_getBitStringAsInteger(newValue));
+    TEST_ASSERT_FALSE_MESSAGE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue),
+            "a genuine size difference must never be masked by a coincidentally-matching decoded integer");
+
+    MmsValue_delete(cached);
+    MmsValue_delete(newValue);
+}
+
+void
+test_isDuplicateValue_typeMismatch_isNotDuplicate(void) {
+    MmsValue* cached = MmsValue_newBoolean(true);
+    MmsValue* newValue = MmsValue_newBitString(2);
+    MmsValue_setBitStringBit(newValue, 0, true);
+
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_isDuplicateValue(cached, newValue));
+
     MmsValue_delete(cached);
     MmsValue_delete(newValue);
 }
@@ -1080,13 +1217,12 @@ main(void) {
     RUN_TEST(test_freeRecord_doesNotCrash_onNull);
     RUN_TEST(test_buildRecord_decomposesStructuredEntry_intoFlatLeaves);
     RUN_TEST(test_buildRecord_decomposition_countMismatch_fallsBackToRawEntry);
+    RUN_TEST(test_buildRecord_decomposition_withWireTypesPresent_stillDecomposesWhenTypesMatch);
 
     RUN_TEST(test_buildRecord_firstEverValue_isSuppressed_andSeedsCache);
     RUN_TEST(test_buildRecord_unchangedValue_isDroppedAfterSeed);
     RUN_TEST(test_buildRecord_changedValue_isForwarded_andUpdatesCache);
     RUN_TEST(test_buildRecord_firstEverRealChange_noPriorBootstrap_previousValueIsNull);
-    RUN_TEST(test_buildRecord_dbposSemantic_threadedOntoEntry_fromLeafSemantics);
-    RUN_TEST(test_buildRecord_semantic_defaultsNone_whenLeafSemanticsIsNull);
 
     RUN_TEST(test_buildRecord_valueForwarded_dragsUnchangedQualitySibling);
     RUN_TEST(test_buildRecord_draggedAlongSibling_previousValueEqualsOwnCurrentValue);
@@ -1097,14 +1233,19 @@ main(void) {
     RUN_TEST(test_buildRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
     RUN_TEST(test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
 
-    RUN_TEST(test_resetValueDiffCache_nullsOutEveryPopulatedSlot);
-    RUN_TEST(test_resetValueDiffCache_isNoOp_whenLastForwardedValuesIsNull);
-    RUN_TEST(test_resetValueDiffCache_isNoOp_whenMemberRefCacheIsNull);
-    RUN_TEST(test_buildRecord_afterResetValueDiffCache_firstFrameIsSuppressed_reseedsCache);
+    RUN_TEST(test_buildRecord_firstFrame_seedsCache_andSetsEverPopulated);
+    RUN_TEST(test_buildRecord_simulatedRecovery_genuineChangeForwards_withRealPreviousValue);
+    RUN_TEST(test_buildRecord_simulatedRecovery_unchangedResend_isSuppressed);
 
     RUN_TEST(test_isDuplicateValue_falseWhenCachedIsNull);
     RUN_TEST(test_isDuplicateValue_trueWhenEqual);
     RUN_TEST(test_isDuplicateValue_falseWhenDifferent);
+    RUN_TEST(test_isDuplicateValue_utcTime_sameMsDifferentQualityByte_isDuplicate);
+    RUN_TEST(test_isDuplicateValue_utcTime_genuinelyDifferentMs_isNotDuplicate);
+    RUN_TEST(test_isDuplicateValue_bitString_sameSizeSameBits_isDuplicate);
+    RUN_TEST(test_isDuplicateValue_bitString_genuinelyDifferentBits_isNotDuplicate);
+    RUN_TEST(test_isDuplicateValue_bitString_sameDecodedIntegerDifferentSize_isNotDuplicate);
+    RUN_TEST(test_isDuplicateValue_typeMismatch_isNotDuplicate);
 
     RUN_TEST(test_shouldForwardAcrossTarget_firstEverContent_isForwarded_andSeedsCache);
     RUN_TEST(test_shouldForwardAcrossTarget_sameTargetIdenticalContent_isStillForwarded);

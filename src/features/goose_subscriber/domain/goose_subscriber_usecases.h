@@ -38,14 +38,18 @@
  * Unlike mms_report_client, GOOSE has no ReasonForInclusion-equivalent
  * signal at all, so there is no "trust the server unconditionally" branch -
  * every candidate is diff-gated against the cache; a NULL cache slot
- * (nothing forwarded yet for that position - true on the very first frame
- * ever for a target, and again after any STALE/INVALID_STATE -> VALID
- * recovery, see GooseSubscriberUseCases_resetValueDiffCache) is the only
- * thing that unconditionally survives, which is GOOSE's equivalent of an
- * MMS GI snapshot. A value/quality (or other sibling DA) pair still travels
- * together via the same group-anchor "drag-along" rule mms_report_client
- * uses: if any candidate resolving to the same "$"-prefix anchor qualifies,
- * every candidate in that group forwards.
+ * (nothing forwarded yet for that position - expected only on the very
+ * first frame ever for a target) is the only thing that unconditionally
+ * survives, which is GOOSE's equivalent of an MMS GI snapshot. The cache is
+ * populated once, on that first frame, and PRESERVED across every later
+ * STALE/INVALID_STATE -> VALID recovery - never reset - so a recovery's own
+ * fresh full snapshot diffs against the real, preserved last-known value
+ * from before the outage instead of a wiped-clean cache; see
+ * GooseSubscriberMemberRefCache's own doc comment in goose_subscriber_types.h
+ * for the full design. A value/quality (or other sibling DA) pair still
+ * travels together via the same group-anchor "drag-along" rule
+ * mms_report_client uses: if any candidate resolving to the same "$"-prefix
+ * anchor qualifies, every candidate in that group forwards.
  */
 GooseSubscriberRecord*
 GooseSubscriberUseCases_buildRecord(
@@ -67,32 +71,27 @@ GooseSubscriberUseCases_freeRecord(GooseSubscriberRecord* record);
 /*
  * Value-diff check for the group-aware filter's diff-gate. cached is the
  * last value actually cached for this exact wire position (NULL means
- * nothing has ever been cached yet). Returns true (duplicate, should be
- * dropped) only when cached is non-NULL AND bit-for-bit equal
- * (MmsValue_equals) to newValue - identical semantics to
- * MmsReportClientUseCases_isDuplicateValue. A NULL cached value always
- * returns false (not a duplicate), but the caller (shouldForwardAndUpdateCache,
- * goose_subscriber_usecases.c) treats a NULL cache as a bootstrap event and
- * seeds it WITHOUT forwarding - so the first frame ever for a target, or the
- * first frame after a recovery, never itself reaches the caller's record
- * callback, only the first genuine change afterward does. Exposed for direct
- * unit testing, mirroring that function's own precedent.
+ * nothing has ever been cached yet - only expected for this target's very
+ * first-ever frame; the cache is populated once and preserved forever after
+ * that, never reset on a liveness recovery - see GooseSubscriberMemberRefCache's
+ * own doc comment). Returns true (duplicate, should be dropped) only when
+ * cached is non-NULL AND bit-for-bit equal (MmsValue_equals) to newValue -
+ * identical semantics to MmsReportClientUseCases_isDuplicateValue. A NULL
+ * cached value OR a NULL newValue (a wire position can legitimately carry
+ * no value in a given frame - GooseSubscriberEntry.value's own doc comment
+ * documents this exact possibility) always returns false (not a duplicate)
+ * rather than dereferencing NULL, but the caller
+ * (shouldForwardAndUpdateCache, goose_subscriber_usecases.c) treats a NULL
+ * cache as a bootstrap event and seeds it WITHOUT forwarding - so the very
+ * first-ever frame for a target never itself reaches the caller's record
+ * callback, only the first genuine change afterward does. Every later
+ * recovery's own fresh full snapshot instead diffs against the real,
+ * preserved last-known value from before the outage - not against a
+ * wiped-clean cache. Exposed for direct unit testing, mirroring that
+ * function's own precedent.
  */
 bool
 GooseSubscriberUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue);
-
-/*
- * Resets one target's value-diff cache in place: frees every populated slot
- * of memberRefCache->lastForwardedValues (MmsValue_delete) and sets it back
- * to NULL, mirroring MmsReportClientUseCases_resetValueDiffCache. Called by
- * the frame adapter on every STALE/INVALID_STATE -> VALID transition,
- * alongside the existing hasForwardedStNum reset, so the first frame after a
- * recovery is treated as a fresh bootstrap event (cache-seed only, never
- * forwarded) rather than being diff-filtered against stale pre-outage
- * values. NULL-safe.
- */
-void
-GooseSubscriberUseCases_resetValueDiffCache(GooseSubscriberMemberRefCache* memberRefCache);
 
 /*
  * Pure edge-detection: given the previous and current GooseSubscriber_isValid()

@@ -56,9 +56,11 @@ typedef struct {
     /* Owned clone of whatever was cached for this exact wire position
      * immediately BEFORE this frame overwrote it (see
      * GooseSubscriberMemberRefCache.lastForwardedValues) - mirrors
-     * MmsReportEntry.previousValue exactly. NULL only in the narrow,
-     * pre-existing structural case where this position has no cache slot at
-     * all (slot < 0). */
+     * MmsReportEntry.previousValue exactly, including the "populated once,
+     * preserved forever, never reset on recovery" design - see
+     * GooseSubscriberMemberRefCache's own doc comment. NULL means either this
+     * target's genuine first-ever frame (expected, routine) or this position
+     * has no cache slot at all (slot < 0). */
     MmsValue* previousValue;
 
     /* IED_MODEL_DA_SEMANTIC_DBPOS if this leaf's real SCL bType was
@@ -125,13 +127,15 @@ typedef struct {
  * doc comment) - mirrors mms_report_client's MmsReportClientMemberRefCacheEntry,
  * minus any ReasonForInclusion concept (GOOSE has none): every candidate is
  * diff-gated unconditionally, a NULL cache slot being the only thing that
- * unconditionally survives (the case that lets the first-frame/post-recovery
- * full snapshot through). Extracted as its own struct, rather than folding
- * these fields directly into GooseSubscriberTargetEntry's public shape, so
- * goose_subscriber_usecases.c's pure-logic functions stay constructible with
- * plain data in unit tests, with no GooseSubscriptionTarget/GooseSubscriber
- * dependency - same rationale as MmsReportClientMemberRefCacheEntry's own
- * separation from ReportControlBlockTarget.
+ * unconditionally survives (the case that lets the first-frame-ever full
+ * snapshot through - see lastForwardedValues's own field comment below for
+ * why this is now ONLY the first frame ever, not every recovery). Extracted
+ * as its own struct, rather than folding these fields directly into
+ * GooseSubscriberTargetEntry's public shape, so goose_subscriber_usecases.c's
+ * pure-logic functions stay constructible with plain data in unit tests,
+ * with no GooseSubscriptionTarget/GooseSubscriber dependency - same
+ * rationale as MmsReportClientMemberRefCacheEntry's own separation from
+ * ReportControlBlockTarget.
  */
 typedef struct {
     char** memberReferences; /* owned array of owned strings, resolved once at
@@ -148,6 +152,18 @@ typedef struct {
     char*** memberLeafReferences;
     int* memberLeafCounts;
 
+    /* Parallel to memberLeafReferences (same shape) - each decomposed
+     * member's own per-leaf EXPECTED DataAttributeType, from
+     * IedModel_getDataSetMemberLeafWireTypes, cross-checked in
+     * collectCandidates against the ACTUAL wire-decoded MmsType before a
+     * decomposition zip is trusted - see
+     * MmsReportClientMemberRefCacheEntry.memberLeafWireTypes's own doc
+     * comment (mms_report_client_types.h) for the real-hardware finding this
+     * guards against; identical rationale applies to GOOSE, which carries
+     * the same structured DA types. May be NULL (degrades to "no type
+     * check, trust the zip") if allocation failed at build time. */
+    DataAttributeType** memberLeafWireTypes;
+
     /* Value-diff cache. One slot per *expanded leaf* position: a
      * non-decomposed member i occupies exactly 1 slot at leafSlotOffsets[i];
      * a decomposed member i occupies memberLeafCounts[i] consecutive slots
@@ -159,11 +175,25 @@ typedef struct {
      * would otherwise still forward every member, including untouched
      * siblings (e.g. a Quality DA that didn't change alongside a value that
      * did), the same noise problem mms_report_client's hybrid filter solves
-     * on the MMS side. Reset (not just Gap 2's hasForwardedStNum) on a
-     * STALE/INVALID_STATE -> VALID transition - see the frame adapter - so a
-     * recovery is treated as a fresh bootstrap event (cache-seed only, never
-     * forwarded - see shouldForwardAndUpdateCache) rather than diffing
-     * against stale pre-outage values. */
+     * on the MMS side.
+     *
+     * **Populated exactly once, on this target's first-ever valid frame, and
+     * PRESERVED for the rest of this subscriber's lifetime - NEVER reset on
+     * a STALE/INVALID_STATE -> VALID recovery.** (This supersedes an earlier
+     * design where the whole cache was wiped back to NULL on every recovery
+     * via a since-deleted `GooseSubscriberUseCases_resetValueDiffCache`
+     * function - that made every recovery look like a fresh bootstrap,
+     * discarding the real last-known value and reporting
+     * `previousValue: null` right when a real value existed a moment
+     * before.) A recovery's own fresh full snapshot (the first frame after
+     * GooseSubscriber_isValid() goes back to true) now diffs against the
+     * REAL, preserved last-known values from before the outage instead: a
+     * genuine change made while the target was stale/invalid is correctly
+     * forwarded with a real previousValue, an unchanged resend is correctly
+     * suppressed by the ordinary diff check - see shouldForwardAndUpdateCache
+     * in goose_subscriber_usecases.c. Only Gap 2's hasForwardedStNum still
+     * resets on that transition (an unrelated heartbeat-dedup concern - see
+     * the frame adapter). */
     int* leafSlotOffsets;
     int totalLeafSlots;
     MmsValue** lastForwardedValues;
@@ -176,6 +206,20 @@ typedef struct {
      * IED_MODEL_DA_SEMANTIC_NONE everywhere) if allocation failed at build
      * time. */
     IedModelDaSemantic* leafSemantics;
+
+    /* Set to true, once, at the end of the first frame this target ever
+     * processes (see buildEntries in goose_subscriber_usecases.c) - purely
+     * to gate the debug logging in shouldForwardAndUpdateCache: a NULL cache
+     * slot found while this is still false is the expected, routine
+     * first-ever-frame case (nothing to log); a NULL slot found after this
+     * is true should be structurally impossible under the never-reset design
+     * above and is logged loudly on every occurrence as a bug worth
+     * investigating. Zero-initialized to false for free, since this struct
+     * is embedded inside GooseSubscriberTargetEntry, whose whole array is
+     * calloc'd in GooseSubscription_start (unlike mms_report_client's
+     * equivalent field, which needs explicit initialization - that struct is
+     * malloc'd, not calloc'd). */
+    bool everPopulated;
 } GooseSubscriberMemberRefCache;
 
 /*

@@ -2,6 +2,7 @@
 #define IED_MODEL_USECASES_H_
 
 #include "linked_list.h"
+#include "mms_common.h"
 #include "features/ied_model/domain/ied_model_types.h"
 
 /*
@@ -64,6 +65,15 @@
  * touches the network. Returns an empty (never NULL) list if lnReference is
  * NULL or doesn't resolve. Caller owns the list and its elements
  * (LinkedList_destroyDeep(list, free)).
+ *
+ * getDataSetMemberLeafWireTypes: index-aligned with
+ * getDataSetMemberLeafReferences's own result list for the same
+ * (datasetReference, memberIndex) - same decomposition rules, same
+ * "empty list if not decomposed" convention. Each element is a heap-boxed
+ * DataAttributeType (this leaf's own already-known SCL-declared type, read
+ * directly off its DataAttribute node) - see
+ * dataAttributeTypeMatchesMmsType's own doc comment for what this is used
+ * for. Caller owns the list and its elements: LinkedList_destroyDeep(list, free).
  */
 
 LinkedList IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle);
@@ -76,8 +86,19 @@ LinkedList IedModelUseCases_getDataSetMemberLeafReferences(IedModelHandle handle
 LinkedList IedModelUseCases_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference);
 LinkedList IedModelUseCases_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
         int memberIndex);
+LinkedList IedModelUseCases_getDataSetMemberLeafWireTypes(IedModelHandle handle, const char* datasetReference,
+        int memberIndex);
 LinkedList IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle,
         const char* lnReference);
+
+/*
+ * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType against
+ * its ACTUAL wire-decoded MmsType - see the .c file's own doc comment on this
+ * function for the full real-hardware finding this guards against. Only
+ * implements confident, well-established groupings; anything not explicitly
+ * modeled always matches (no check).
+ */
+bool IedModelUseCases_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType actual);
 
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModelUseCases_destroyReportControlBlockTarget(void* target);

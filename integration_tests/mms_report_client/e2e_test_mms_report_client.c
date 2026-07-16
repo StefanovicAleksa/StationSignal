@@ -69,13 +69,13 @@ static volatile bool dynamicRcbEnabled;
 static volatile bool dynamicRcbFailed;
 
 /* Counts MMS_REPORT_CLIENT_CONNECTED transitions, for
- * test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseededPreviousValue
+ * test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue
  * to observe that a real second connection (not just a re-enable on the same
  * association) actually happened. */
 static volatile int connectedCount;
 
 /* Counts successful brcbMain enable events specifically (RptEna set true),
- * for test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseededPreviousValue
+ * for test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue
  * to prove that one real reconnect produces exactly ONE enable cycle, not
  * two-or-more - see supervisorLoop's own comment on the reconnect "storm"
  * this guards against (mms_report_client_connection.c). */
@@ -223,39 +223,33 @@ test_dataChangeOnServer_triggersReportWithNewValue(void) {
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
             "expected the reconnect supervisor thread to connect and enable brcbMain within the timeout");
 
-    /* This client never requests GI on enable (see enableOneTarget's own
-     * comment - unreliable on real hardware, matches goose_subscriber's
-     * GI-less design exactly), so nothing has seeded the value-diff cache
-     * yet - the FIRST report this client ever receives for a position has
-     * cached==NULL and is therefore itself treated as a bootstrap event
-     * (silently seeds the cache, never forwarded). This is deliberate, not a
-     * gap: shouldForwardAndUpdateCache cannot safely special-case "first
-     * observation with a real-change reason" without reopening the exact bug
-     * real-hardware testing found (a reconnect also resets the cache to
-     * NULL, and this same simulator tags a reconnect's redelivered-but-
-     * unchanged report as DATA_CHANGE too - trusting the reason bit on a
-     * NULL cache would forward that right back). So this test flips twice:
-     * the first flip is the throwaway seed, the second is the one that
-     * actually reaches the callback. */
-    SimServer_setIndication(sim, true);
+    /* This client now deterministically requests GI on every enable (see
+     * enableOneTarget's own comment) purely to seed the value-diff cache -
+     * the GI-triggered snapshot (current live value, false - see
+     * sim_server.c) lands on shouldForwardAndUpdateCache's cached==NULL
+     * branch just like any other first observation, and must never itself
+     * reach the callback. */
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "the first-ever observation for this position must be bootstrap-suppressed, "
-            "since nothing has ever seeded the cache and this client never requests GI");
+            "the GI snapshot requested on enable must never reach the callback - it silently "
+            "seeds the cache instead");
 
-    SimServer_setIndication(sim, false);
+    /* Because GI already seeded the cache with the live default (false), this
+     * single flip is itself a genuine, immediately-forwarded change - no
+     * throwaway warm-up flip needed anymore. */
+    SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
-            "expected a report after the second flip of GGIO1.Ind1.stVal");
+            "expected a report after flipping GGIO1.Ind1.stVal");
 
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0.BR.brcbMain", lastRcbReference);
     TEST_ASSERT_EQUAL_INT(2, lastEntryCount);
-    TEST_ASSERT_FALSE(lastEntryValue);
+    TEST_ASSERT_TRUE(lastEntryValue);
     TEST_ASSERT_TRUE_MESSAGE((lastReason & IEC61850_REASON_DATA_CHANGE) != 0,
             "expected the report's reason-for-inclusion to include data-change");
     TEST_ASSERT_TRUE_MESSAGE(lastEntry0HasPreviousValue,
-            "the throwaway seed flip's value must surface as this entry's previousValue");
-    TEST_ASSERT_TRUE_MESSAGE(lastEntry0PreviousValue,
-            "previousValue must be the seed flip's value (true), not the simulator's original default");
+            "the GI snapshot's value must surface as this entry's previousValue");
+    TEST_ASSERT_FALSE_MESSAGE(lastEntry0PreviousValue,
+            "previousValue must be the GI-seeded live default (false), not the flipped-to value");
 
     /* brcbMain's OptFlds has no DataRef (see sim_server.c) - these are the
      * locally-resolved fallback references, proving the new
@@ -367,21 +361,21 @@ test_authRequired_wrongPassword_neverConnects(void) {
  * the RCB against it, and a real data-change report arrives after flipping
  * GGIO1.Ind1.stVal.
  *
- * This client never requests GI on enable, so nothing ever seeds the
- * value-diff cache automatically - every entry in urcbDyn's first-ever
- * report has cached == NULL and is therefore bootstrap-suppressed regardless
- * of its own reason (see shouldForwardAndUpdateCache's own doc comment for
- * why a real-change reason is never trusted to bypass this, even on a first
- * observation - the same real-hardware finding that fixed the flooding bug
- * also rules out narrowly trusting reason bits here). This test flips twice:
- * the first flip is a throwaway seed for all 6 dataset members, the second
- * is what actually reaches the callback. On that second flip, only Ind1's
- * own group (stVal + its q/t siblings, dragged along by group-extension)
- * survives - SPCSO1's unrelated group stays suppressed (its own cache was
- * seeded by the first flip too, and SPCSO1's value never itself changes, so
- * nothing in that group individually qualifies and nothing drags it in).
- * Expected surviving entries: Ind1.stVal, Ind1.q, Ind1.t (3, not all 6
- * dataset members).
+ * This client now deterministically requests GI on every enable, purely to
+ * seed the value-diff cache - urcbDyn's GI-triggered snapshot seeds all 6
+ * dataset members (cached == NULL for each) and is itself bootstrap-suppressed
+ * regardless of its own reason (see shouldForwardAndUpdateCache's own doc
+ * comment for why a real-change reason is never trusted to bypass this, even
+ * on a first observation - the same real-hardware finding that fixed the
+ * flooding bug also rules out narrowly trusting reason bits here). Because GI
+ * already seeded the cache with every member's live default, one single flip
+ * afterward is itself a genuine, immediately-forwarded change - no throwaway
+ * warm-up flip needed. On that flip, only Ind1's own group (stVal + its q/t
+ * siblings, dragged along by group-extension) survives - SPCSO1's unrelated
+ * group stays suppressed (its own cache was seeded by GI too, and SPCSO1's
+ * value never itself changes, so nothing in that group individually qualifies
+ * and nothing drags it in). Expected surviving entries: Ind1.stVal, Ind1.q,
+ * Ind1.t (3, not all 6 dataset members).
  */
 void
 test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
@@ -414,31 +408,32 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
     TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed,
             "urcbDyn must not fail after this feature exists - it used to fail with error 32 (OBJECT_VALUE_INVALID)");
 
-    /* Throwaway seed flip: this is urcbDyn's first-ever report - every one of
-     * its 6 members has cached == NULL and is bootstrap-suppressed (see this
-     * test's own doc comment above). */
-    SimServer_setIndication(sim, true);
+    /* urcbDyn's GI-triggered snapshot (all 6 dataset members, live defaults)
+     * seeds the cache and must never itself reach the callback. */
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "urcbDyn's first-ever report must be entirely bootstrap-suppressed, since nothing has "
-            "seeded the cache and this client never requests GI");
+            "urcbDyn's GI snapshot must never reach the callback - it silently seeds the cache "
+            "for all 6 dataset members instead");
 
-    SimServer_setIndication(sim, false);
+    /* Because GI already seeded the cache, this single flip is itself a
+     * genuine, immediately-forwarded change - no throwaway warm-up flip
+     * needed. */
+    SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
-            "expected a report from urcbDyn's dynamically-created dataset after the second flip");
+            "expected a report from urcbDyn's dynamically-created dataset after flipping Ind1.stVal");
 
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.RP.urcbDyn", lastRcbReference);
     TEST_ASSERT_EQUAL_INT_MESSAGE(3, lastEntryCount,
             "only Ind1's own group (stVal + its q/t siblings, dragged along by group-extension) "
-            "should survive - SPCSO1's unrelated group stays suppressed (unchanged since the seed)");
-    TEST_ASSERT_FALSE(lastEntryValue);
+            "should survive - SPCSO1's unrelated group stays suppressed (unchanged since the GI seed)");
+    TEST_ASSERT_TRUE(lastEntryValue);
     TEST_ASSERT_TRUE_MESSAGE((lastReason & IEC61850_REASON_DATA_CHANGE) != 0,
             "expected the report's reason-for-inclusion to include data-change");
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", lastEntry0Reference);
     TEST_ASSERT_TRUE_MESSAGE(lastEntry0HasPreviousValue,
-            "the throwaway seed flip's value must surface as this entry's previousValue");
-    TEST_ASSERT_TRUE_MESSAGE(lastEntry0PreviousValue,
-            "previousValue must be the seed flip's value (true), not the simulator's original default");
+            "the GI snapshot's value must surface as this entry's previousValue");
+    TEST_ASSERT_FALSE_MESSAGE(lastEntry0PreviousValue,
+            "previousValue must be the GI-seeded live default (false), not the flipped-to value");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -447,36 +442,45 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
 }
 
 /*
- * Proves the reconnect cache-reseeding mechanism end-to-end:
- * MmsReportClientMemberRefCacheEntry's lastForwardedValues cache is built
- * once at MmsReportClient_start and is never rebuilt across reconnects, so
- * without explicitly resetting it on every (re-)enable
- * (mms_report_client_connection.c's enableOneTarget, via
- * MmsReportClientUseCases_resetValueDiffCache), a reconnect's redelivered
- * report would be diff-checked against the STALE pre-disconnect cache
- * instead of being treated as a fresh bootstrap event.
+ * Proves the value-diff cache's populate-once/preserve-forever design
+ * end-to-end: MmsReportClientMemberRefCacheEntry's lastForwardedValues cache
+ * is built once at MmsReportClient_start and is never rebuilt OR reset
+ * across reconnects (enableOneTarget no longer resets anything on
+ * (re-)enable - the reset mechanism this test used to exercise,
+ * MmsReportClientUseCases_resetValueDiffCache, has been deleted entirely -
+ * see MmsReportClientMemberRefCacheEntry's own doc comment for the full
+ * redesign). So a reconnect's own fresh GI snapshot, and this simulator's
+ * buffered redelivery of brcbMain's pre-disconnect content, both diff
+ * against the REAL, preserved pre-disconnect value - not a wiped-clean one.
  *
  * SimServer_stop/_start operate on the same SimServer (same IedModel/IedServer
  * object - only the TCP listener toggles, see SimServer_stop/_start's own
  * comments), so GGIO1.Ind1.stVal survives the restart unchanged (true, set by
- * the pre-disconnect flip below). This simulator has been confirmed to
- * redeliver brcbMain's buffered content on re-enable and tag it DATA_CHANGE
- * even though the value never actually changed relative to the pre-disconnect
- * state - shouldForwardAndUpdateCache no longer trusts that bit
- * unconditionally (see its own doc comment for the real-hardware finding that
- * proved the old unconditional-trust design unsafe), so the redelivery must
- * still be suppressed here exactly like this client's own first-ever
- * observation for a position (this client never requests GI - see
- * enableOneTarget's own comment). This test flips the value once before
- * disconnecting (so the pre-disconnect cache is non-default), reconnects, asserts the reconnect's
- * own redelivery never reaches the callback, then flips the value AGAIN
- * after reconnecting and asserts the resulting report's previousValue
- * reflects the reconnect's own re-seeded state (true, matching the
- * post-restart live value) rather than stale pre-disconnect state - proving
- * the reset+reseed happened correctly, not just that nothing crashed.
+ * the pre-disconnect flip below). This client deterministically requests GI
+ * on every enable, including the reconnect's own re-enable. Both the
+ * reconnect's GI-triggered snapshot and this simulator's buffered
+ * redelivery of brcbMain's pre-disconnect content (tagged DATA_CHANGE even
+ * though the value never actually changed) carry the SAME live value (true)
+ * that's already sitting in the preserved cache from before the disconnect
+ * - so both are ordinary duplicates of a real cached value, suppressed by
+ * the everyday value-diff check, regardless of arrival order.
+ * shouldForwardAndUpdateCache no longer trusts a DATA_CHANGE reason bit
+ * unconditionally (see its own doc comment for the real-hardware finding
+ * that proved the old unconditional-trust design unsafe), which is what
+ * makes this order-independent guarantee hold. This test flips the value
+ * once before disconnecting (a real, GI-seeded-then-forwarded change, since
+ * the first connect's own GI snapshot already seeded the pre-disconnect
+ * cache with the live default - so the pre-disconnect cache ends up
+ * non-default), reconnects, asserts neither the reconnect's GI snapshot nor
+ * its buffered redelivery ever reaches the callback (both are duplicates of
+ * the preserved value), then flips the value AGAIN after reconnecting and
+ * asserts the resulting report's previousValue reflects the REAL preserved
+ * pre-disconnect/post-reconnect state (true, correctly carried across the
+ * reconnect) rather than being lost to a cache reset - proving the cache
+ * was genuinely preserved, not just that nothing crashed.
  */
 void
-test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseededPreviousValue(void) {
+test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue(void) {
     SimServer sim = SimServer_create();
     SimServer_start(sim, TEST_PORT_RECONNECT);
 
@@ -505,8 +509,8 @@ test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseeded
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
             "expected the first connect to enable brcbMain within the timeout");
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "the first connect must not produce a report - this client never requests GI, and "
-            "nothing has changed yet");
+            "the first connect's GI-triggered snapshot must never reach the callback - it "
+            "silently seeds the cache instead");
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, connectedCount, "expected exactly one connection so far");
 
     /* Generous settle window for a hypothetical extra, redundant enable cycle
@@ -517,21 +521,17 @@ test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseeded
             "expected exactly one enable cycle for brcbMain from the first connect, not a "
             "redundant re-enable storm");
 
-    /* This client never requests GI, so nothing has seeded the value-diff
-     * cache yet - this flip is simultaneously this test's only pre-disconnect
+    /* The first connect's own GI snapshot already seeded the cache with the
+     * live default (false), so this is this test's only pre-disconnect
      * transition (deliberately just one, matching the buffered RCB's own
-     * un-acked backlog staying minimal by disconnect time) AND the
-     * bootstrap-suppressed first-ever observation for this position: it's
-     * silently seeded (cache becomes true, non-default) but never forwarded
-     * itself, exactly like a foreign GI would have been had one been
-     * requested. */
+     * un-acked backlog staying minimal by disconnect time) AND a genuine,
+     * immediately-forwarded change (cache becomes true, non-default) - unlike
+     * before GI was re-added, this is no longer a throwaway/suppressed flip. */
     SimServer_setIndication(sim, true);
-    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "the first-ever observation for this position must be bootstrap-suppressed, since "
-            "this client never requests GI - it still silently seeds the cache with true (making "
-            "it non-default), so a stale-cache bug (using the ORIGINAL false instead of the "
-            "reconnect's own reseeded true as previousValue below) would be distinguishable from "
-            "a correct reseed");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
+            "expected a real, GI-seeded-then-forwarded report after this pre-disconnect flip");
+    TEST_ASSERT_TRUE(lastEntryValue);
+    reportReceived = false;
     rcbEnabled = false;
 
     SimServer_stop(sim);
@@ -559,32 +559,36 @@ test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseeded
             "expected exactly one enable cycle for the reconnect (total 2), not a redundant "
             "re-enable storm racing report delivery");
 
-    /* This simulator redelivers brcbMain's buffered content on re-enable and
-     * tags it DATA_CHANGE even though the value never actually changed -
-     * shouldForwardAndUpdateCache no longer trusts that bit unconditionally
-     * (see its own doc comment), so this redelivery must be suppressed
-     * exactly like this client's own first-ever observation for a position,
-     * silently reseeding the cache instead. Also proves the reset-before-
-     * enable ordering fix (see enableOneTarget's own comment): the cache is
-     * guaranteed clear before this redelivered report can possibly be
-     * dispatched, however quickly it arrives relative to the enable call
-     * returning. */
+    /* The reconnect's re-enable requests GI (deterministic snapshot) AND this
+     * simulator redelivers brcbMain's buffered content (tagged DATA_CHANGE
+     * even though the value never actually changed) - both carry the same
+     * live value (true), which ALSO matches the value already sitting in the
+     * cache from before the disconnect (the cache is populated once and
+     * PRESERVED forever now - never reset on reconnect, see
+     * MmsReportClientMemberRefCacheEntry's own doc comment). So both the GI
+     * snapshot and the buffered redelivery are ordinary duplicates of the
+     * real, preserved pre-disconnect value - neither one is a "bootstrap"
+     * event and neither ever reaches the callback, regardless of arrival
+     * order (shouldForwardAndUpdateCache no longer trusts a reason bit
+     * unconditionally, see its own doc comment, and there is no reset-timing
+     * race left to worry about since nothing is ever reset). */
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "the reconnect's own redelivered report must never reach the callback either, even "
-            "though this simulator tags it DATA_CHANGE - the value never actually changed, and "
-            "a reason bit is no longer trusted to bypass the value-diff check");
+            "neither the reconnect's GI snapshot nor its buffered redelivery must ever reach the "
+            "callback - the value never actually changed across the reconnect, diffed against the "
+            "real preserved pre-disconnect value");
 
-    /* Flip again, now FROM the reconnect-reseeded true back to false. */
+    /* Flip again, now FROM the real preserved pre-disconnect value (true) back to false. */
     SimServer_setIndication(sim, false);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
             "expected a report after flipping GGIO1.Ind1.stVal post-reconnect");
     TEST_ASSERT_FALSE(lastEntryValue);
     TEST_ASSERT_TRUE_MESSAGE(lastEntry0HasPreviousValue,
-            "the reconnect's own redelivered value must surface as this entry's previousValue");
+            "the real, preserved pre-disconnect value must surface as this entry's previousValue - "
+            "this is the whole point of never resetting the cache on reconnect");
     TEST_ASSERT_TRUE_MESSAGE(lastEntry0PreviousValue,
-            "previousValue must reflect the reconnect's own report (true, the post-restart live "
-            "value), not stale pre-disconnect state");
+            "previousValue must reflect the true pre-disconnect/post-reconnect live value (true), "
+            "correctly preserved across the reconnect rather than lost to a cache reset");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -634,15 +638,18 @@ onReportForCrossRcbDedupTest(void* userParam, const MmsReportRecord* record) {
  * and brcbDup (fixtures/reporter1.cid) are two independently-enabled RCBs
  * over the IDENTICAL ds1 dataset/TrgOps/OptFields - reproducing a real
  * device's redundant/reserved RCB pattern (e.g. "urcbA01"/"urcbB01"). Both
- * get RptEna on connect (this client never requests GI), but each one's
- * first-ever observation is cache-seed-only and never reaches the callback
- * at all (bootstrap suppression) - so cross-RCB dedup can't be proven
- * against that first observation. Instead, this test flips GGIO1.Ind1.stVal
- * AFTER both RCBs are enabled: each independently produces a real,
- * byte-identical DATA_CHANGE report at nearly the same moment, and only one
- * of the two must ever reach the report callback. urcbDyn (also declared in
- * this fixture) reports a different, larger dataset, so it's unaffected and
- * used here only to confirm the client is otherwise fully connected/enabled.
+ * get RptEna+GI on connect (this client now deterministically requests GI on
+ * every enable), but each one's GI-triggered snapshot is cache-seed-only and
+ * never reaches the callback at all (bootstrap suppression) - so cross-RCB
+ * dedup can't be proven against that snapshot. Instead, this test flips
+ * GGIO1.Ind1.stVal AFTER both RCBs are enabled: because GI already seeded
+ * both RCBs' independent caches with the live default, this single flip is
+ * itself a genuine, immediately-forwarded change from each - each
+ * independently produces a real, byte-identical DATA_CHANGE report at nearly
+ * the same moment, and only one of the two must ever reach the report
+ * callback. urcbDyn (also declared in this fixture) reports a different,
+ * larger dataset, so it's unaffected and used here only to confirm the
+ * client is otherwise fully connected/enabled.
  */
 void
 test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback(void) {
@@ -674,15 +681,12 @@ test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback(void) {
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.brcbDupEnabled), "expected brcbDup to enable");
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.urcbDynEnabled), "expected urcbDyn to enable");
 
-    /* Both RCBs' first-ever observations are cache-seed-only and never reach
-     * the callback (bootstrap suppression) - this client never requests GI,
-     * so this throwaway flip is what seeds both RCBs' independent caches;
-     * the real, forwarded change below is what actually produces real,
-     * byte-identical DATA_CHANGE reports from each independently-enabled
-     * RCB. */
+    /* Both RCBs' GI-triggered snapshots are cache-seed-only and never reach
+     * the callback (bootstrap suppression) - because GI already seeded both
+     * RCBs' independent caches with the live default, this single flip is
+     * itself what produces real, byte-identical DATA_CHANGE reports from each
+     * independently-enabled RCB (no throwaway warm-up flip needed). */
     SimServer_setIndication(sim, true);
-    Thread_sleep(200);
-    SimServer_setIndication(sim, false);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.brcbMainOrDupReportCount, 1),
             "expected at least one of brcbMain/brcbDup's identical data-change reports to reach the callback");
@@ -710,7 +714,7 @@ main(void) {
     RUN_TEST(test_authRequired_correctPassword_connectsAndEnablesRcb);
     RUN_TEST(test_authRequired_wrongPassword_neverConnects);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
-    RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsReseededPreviousValue);
+    RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
 
     return UNITY_END();

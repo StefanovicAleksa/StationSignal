@@ -1,8 +1,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hal_time.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
+
+/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
+ * the plan this landed under) - see mms_report_client_api.c's identical
+ * helper's own comment for the full reasoning (duplicated here per this
+ * codebase's own cross-feature convention). This is the report-time half of
+ * the same investigation: mms_report_client_api.c's own debug log tells
+ * whether decomposition METADATA exists (memberLeafCounts[i] > 0); this one
+ * tells whether a report that HAS that metadata still gets rejected here,
+ * at the point where the wire value is actually flattened and zipped. */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
+
+#define MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH "/tmp/ied_reporter_debug_decompose.log"
 
 static void
 freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
@@ -14,10 +33,59 @@ freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
     free(entries);
 }
 
+/*
+ * MmsValue_equals (libiec61850) is a raw, byte-exact comparison - correct for
+ * most types, but wrong for two that show up constantly in real report
+ * datasets, confirmed against real production hardware:
+ *
+ * - MMS_UTC_TIME: MmsValue_equals memcmp()s all 8 bytes, but per IEC 61850
+ *   the LAST byte is a TimeQuality flag (leap-second-known/clock-failure/
+ *   clock-not-synchronized/accuracy), not part of "when did this happen" -
+ *   it can legitimately wobble (a device's clock-sync state settling right
+ *   after a reconnect) even though the displayed millisecond timestamp is
+ *   unchanged. Compared instead via MmsValue_getUtcTimeInMs - the same
+ *   accessor ipc_dispatcher's own value codec already uses to render this
+ *   type, so "same JSON output" now correctly implies "same by this filter."
+ * - MMS_BIT_STRING (the wire encoding for CODEDENUM/Dbpos/Tcmd-style status
+ *   points, see ipc_dispatcher's own value codec): MmsValue_equals memcmp()s
+ *   the whole underlying buffer, INCLUDING unused padding bits in the last
+ *   byte. Real device firmware is commonly inconsistent about zero-padding
+ *   those across different report-generation code paths (e.g. a GI-triggered
+ *   read vs. a live-change report) - two values that decode to the identical
+ *   integer (and thus render identically) can still fail a raw memcmp.
+ *   Compared instead via MmsValue_getBitStringAsInteger (plus a size guard) -
+ *   again, the same accessor the value codec already uses to render it.
+ *
+ * Both gaps let a report that changed nothing get judged "different" and
+ * forwarded - observed as value==previousValue duplicates flooding the
+ * websocket right at connect (each reconnect/GI cycle gives the comparison a
+ * fresh chance to misfire against the freshly-reseeded cache). Every other
+ * type falls through to MmsValue_equals unchanged - BOOLEAN/INTEGER/UNSIGNED/
+ * FLOAT/STRING already compare semantically correctly, or aren't implicated.
+ * goose_subscriber_usecases.c has the identical, independently-duplicated fix
+ * (same root cause, same two types, GOOSE frames carry the same DA types).
+ */
+static bool
+valuesAreSemanticallyEqual(const MmsValue* cached, const MmsValue* newValue) {
+    MmsType type = MmsValue_getType((MmsValue*) cached);
+    if (type != MmsValue_getType((MmsValue*) newValue)) return false;
+
+    switch (type) {
+        case MMS_UTC_TIME:
+            return MmsValue_getUtcTimeInMs((MmsValue*) cached) == MmsValue_getUtcTimeInMs((MmsValue*) newValue);
+        case MMS_BIT_STRING:
+            return MmsValue_getBitStringSize((MmsValue*) cached) == MmsValue_getBitStringSize((MmsValue*) newValue)
+                    && MmsValue_getBitStringAsInteger((MmsValue*) cached)
+                            == MmsValue_getBitStringAsInteger((MmsValue*) newValue);
+        default:
+            return MmsValue_equals((MmsValue*) cached, (MmsValue*) newValue);
+    }
+}
+
 bool
 MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue) {
-    if (!cached) return false;
-    return MmsValue_equals((MmsValue*) cached, (MmsValue*) newValue);
+    if (!cached || !newValue) return false;
+    return valuesAreSemanticallyEqual(cached, newValue);
 }
 
 /* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
@@ -52,13 +120,23 @@ updateValueDiffCache(MmsReportClientMemberRefCacheEntry* memberRefCache, int slo
  *
  * Always diff-checks against the cache, REGARDLESS of the server's own
  * ReasonForInclusion: if nothing has ever been cached for this slot yet
- * (cached == NULL), this is a bootstrap event - whatever the first report
- * for this position happens to be after an enable (this client never
- * requests GI itself, see enableOneTarget's own comment, but a foreign
- * client's own GI, a buffered redelivery, or an ordinary first spontaneous
- * send are all indistinguishable from here and treated identically) - the
- * cache is silently seeded but this first report is NEVER forwarded itself.
- * Otherwise, forward only if the value genuinely differs from the cache.
+ * (cached == NULL), this is either (a) the RCB's very first-ever report
+ * (memberRefCache->everPopulated still false - completely expected, nothing
+ * to compare against yet) or (b) an unexpected gap discovered AFTER this RCB
+ * has already been populated once (everPopulated true) - case (b) should be
+ * structurally impossible under the current design (the cache is populated
+ * once, on first connect, and PRESERVED across every reconnect - see
+ * MmsReportClientMemberRefCacheEntry's own doc comment - nothing ever resets
+ * a slot back to NULL again), so it's logged loudly to stderr on every
+ * occurrence as a bug signal worth investigating on sight, not silently
+ * treated the same as case (a). Either way, the cache is silently seeded but
+ * this report is NEVER forwarded itself for a slot with no prior cached
+ * value. Otherwise (cached != NULL), forward only if the value genuinely
+ * differs from the cache - this is what makes a reconnect's fresh GI/
+ * redelivered snapshot compare against the REAL last-known pre-disconnect
+ * value instead of a wiped-clean one: a genuine change while disconnected
+ * now correctly forwards with a real previousValue, an unchanged resend is
+ * correctly suppressed.
  *
  * DELIBERATELY does not trust a DATA_CHANGE/QUALITY_CHANGE/DATA_UPDATE
  * reason bit as an unconditional "skip the diff-check" signal, unlike an
@@ -81,14 +159,38 @@ updateValueDiffCache(MmsReportClientMemberRefCacheEntry* memberRefCache, int slo
  */
 static bool
 shouldForwardAndUpdateCache(MmsReportClientMemberRefCacheEntry* memberRefCache, int slot,
-        const MmsValue* value, MmsValue** outPreviousValue) {
+        const MmsValue* value, const char* reference, MmsValue** outPreviousValue) {
     if (outPreviousValue) *outPreviousValue = NULL;
     if (slot < 0) return true;
 
     MmsValue* cached = memberRefCache->lastForwardedValues[slot];
     if (outPreviousValue && cached) *outPreviousValue = MmsValue_clone(cached);
 
+    if (!value) {
+        /* This wire position carries no value at all in this particular
+         * report (MmsValue_getElement can legitimately return NULL for some
+         * index - GooseSubscriberEntry.value's own doc comment documents
+         * the identical possibility on the GOOSE side). Never crash on it
+         * (MmsValue_getType(NULL) would, via isDuplicateValue below), never
+         * treat a missing value as a bootstrap seed or a real change, and
+         * never overwrite a real cached value with NULL - under the
+         * populate-once/preserve-forever design (see this struct's own doc
+         * comment), re-nulling a slot here would make a later genuine
+         * report for this same position spuriously trip the
+         * everPopulated-gated NULL-slot logging above. Simply leave the
+         * cache exactly as it was and don't forward this position for this
+         * report. */
+        return false;
+    }
+
     if (!cached) {
+        if (memberRefCache->everPopulated) {
+            fprintf(stderr,
+                    "[mms_report_client] ERROR: cache slot %d (reference '%s') for RCB '%s' is unexpectedly "
+                    "NULL after this RCB was already populated once - this should never happen, investigate\n",
+                    slot, reference ? reference : "(unknown)",
+                    memberRefCache->rcbReference ? memberRefCache->rcbReference : "(unknown)");
+        }
         updateValueDiffCache(memberRefCache, slot, value);
         return false;
     }
@@ -219,12 +321,110 @@ freeFlattenedArrays(FlattenedArrayList* list) {
 }
 
 /*
+ * Reorders `flattened` (length count) into `outReordered` (caller-allocated,
+ * same length) so outReordered[refIdx] is the value that ACTUALLY belongs at
+ * leafReferences[refIdx], even when the wire's real element order doesn't
+ * match this daemon's locally-resolved reference order - confirmed via
+ * real-hardware debug logging against a device whose GetVariableAccessAttributes
+ * type-description order (used to build leafReferences, in
+ * ied_model_online_loader_connection.c's buildDataAttributeTreeFromSpec) does
+ * NOT match its own report encoding order for the same structured attribute
+ * (an "Ind" SPS's stVal/q came out swapped: the bitstring landed on the
+ * "$stVal" reference, the boolean on "$q").
+ *
+ * Two of IEC 61850's standardized common data attributes have a FIXED,
+ * unambiguous wire encoding regardless of CDC - Quality ("q") is always a
+ * 13-bit MMS_BIT_STRING (Quality_toMmsValue, iec61850_common.c), Timestamp
+ * ("t") is always MMS_UTC_TIME - so those two are matched by TYPE (and, for
+ * "q", exact bit size, since a CODEDENUM-typed stVal - e.g. a DPC's Dbpos -
+ * is also MMS_BIT_STRING but never 13 bits wide) rather than trusting either
+ * order. This is NOT "guessing IEC 61850 semantics" (this codebase's own
+ * Hard Rule) - Quality's and Timestamp's wire encodings are standardized and
+ * identical across every CDC, unlike e.g. a CODEDENUM's Dbpos-vs-Tcmd
+ * ambiguity, which is deliberately still never guessed anywhere in this
+ * codebase. Whatever's left (the CDC-specific value field(s), e.g. stVal) is
+ * assigned positionally among the remaining, unconsumed wire slots, in
+ * order - the same trust-the-order assumption as before, just narrowed to
+ * only the slot(s) that can't be resolved unambiguously by type.
+ *
+ * Returns false (caller must not trust this decomposition - fall back to the
+ * raw, non-decomposed entry, same as an outright count mismatch) if a "q" or
+ * "t" reference exists but no matching-typed, not-yet-claimed wire element
+ * was found for it, or if positional fill-in runs out of slots (should be
+ * structurally impossible given equal lengths, kept as defense-in-depth).
+ */
+static bool
+reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* flattened, int count,
+        MmsValue** outReordered) {
+    bool* wireUsed = calloc((size_t) count, sizeof(bool));
+    if (!wireUsed) return false;
+
+    bool ok = true;
+    for (int refIdx = 0; refIdx < count && ok; refIdx++) {
+        const char* ref = leafReferences[refIdx];
+        const char* lastDollar = ref ? strrchr(ref, '$') : NULL;
+        const char* daName = lastDollar ? lastDollar + 1 : ref;
+        outReordered[refIdx] = NULL;
+
+        if (daName && strcmp(daName, "q") == 0) {
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (MmsValue_getType(flattened[w]) == MMS_BIT_STRING
+                        && MmsValue_getBitStringSize(flattened[w]) == 13) {
+                    outReordered[refIdx] = flattened[w];
+                    wireUsed[w] = true;
+                    break;
+                }
+            }
+            if (!outReordered[refIdx]) ok = false;
+        } else if (daName && strcmp(daName, "t") == 0) {
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (MmsValue_getType(flattened[w]) == MMS_UTC_TIME) {
+                    outReordered[refIdx] = flattened[w];
+                    wireUsed[w] = true;
+                    break;
+                }
+            }
+            if (!outReordered[refIdx]) ok = false;
+        }
+        /* else: deferred to the positional fill-in pass below */
+    }
+
+    if (ok) {
+        int w = 0;
+        for (int refIdx = 0; refIdx < count; refIdx++) {
+            if (outReordered[refIdx]) continue;
+            while (w < count && wireUsed[w]) w++;
+            if (w >= count) { ok = false; break; }
+            outReordered[refIdx] = flattened[w];
+            wireUsed[w] = true;
+            w++;
+        }
+    }
+
+    free(wireUsed);
+    return ok;
+}
+
+/*
  * Gap 4 decomposition, unchanged from the old single-pass version - just
  * deferred: instead of deciding forward/drop inline, every (possibly
  * decomposed-leaf) value is recorded as an EntryCandidate for the group-aware
  * filter below to decide on afterwards. See this function's old doc comment
  * (now on buildEntries) for the decomposition/count-mismatch-fallback rule
  * itself, which is unchanged.
+ */
+/*
+ * The per-leaf EXPECTED-vs-ACTUAL type cross-check that used to live here
+ * (decomposedLeafTypesMatch, via IedModel_dataAttributeTypeMatchesMmsType)
+ * was removed at explicit user request - confirmed via real-hardware
+ * debug logging to reject genuine decompositions (flattenedCount matched
+ * memberLeafCounts[i] exactly, but the type check still failed), blocking
+ * Gap-4 decomposition outright for a device it should otherwise work on.
+ * collectCandidates below now uses reorderFlattenedToMatchReferences instead
+ * (see its own doc comment) - not a positional-vs-nothing choice anymore,
+ * but positional-with-q/t-corrected-by-type.
  */
 static void
 collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
@@ -243,17 +443,57 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
             int flattenedCount = 0;
             MmsValue** flattened = MmsReportClientUtils_flattenStructure(rawValue, &flattenedCount);
 
+            /* Per-leaf EXPECTED-vs-ACTUAL type cross-check
+             * (decomposedLeafTypesMatch) removed from this gate entirely, at
+             * explicit user request - it was rejecting real decompositions
+             * on real hardware (flattenedCount matched memberLeafCounts[i]
+             * exactly, but the type check still failed), blocking Gap-4
+             * decomposition outright for a device it should otherwise work
+             * on. memberLeafWireTypes/IedModel_dataAttributeTypeMatchesMmsType
+             * are left in place (still populated, just unconsulted here)
+             * rather than torn out, since removing them changes nothing
+             * behaviorally now. Removing the gate exposed a real
+             * mislabeling bug for that same device (q/stVal swapped) -
+             * reorderFlattenedToMatchReferences (its own doc comment above)
+             * fixes that directly instead of re-adding a reject-on-mismatch
+             * gate. */
             if (flattened && flattenedCount == memberRefCache->memberLeafCounts[i]) {
-                trackFlattenedArray(flattenedArrays, flattened);
-                for (int k = 0; k < flattenedCount; k++) {
-                    int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
-                    appendCandidate(candidates, flattened[k], memberRefCache->memberLeafReferences[i][k],
-                            reason, slot, lookupSemanticForSlot(memberRefCache, slot));
+                MmsValue** reordered = malloc(sizeof(MmsValue*) * (size_t) flattenedCount);
+                bool reorderOk = reordered
+                        && reorderFlattenedToMatchReferences(memberRefCache->memberLeafReferences[i], flattened,
+                                flattenedCount, reordered);
+                if (reorderOk) {
+                    trackFlattenedArray(flattenedArrays, flattened);
+                    for (int k = 0; k < flattenedCount; k++) {
+                        int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
+                        appendCandidate(candidates, reordered[k], memberRefCache->memberLeafReferences[i][k],
+                                reason, slot, lookupSemanticForSlot(memberRefCache, slot));
+                    }
+                    free(reordered);
+                    continue; /* raw position i fully handled via decomposition */
                 }
-                continue; /* raw position i fully handled via decomposition */
+                free(reordered);
             }
-            /* Count mismatch (or flatten failure) - fall through to the
-             * non-decomposed path below for this one position. */
+
+            /* Metadata says this member SHOULD decompose (memberLeafCounts[i]
+             * > 0, reached this branch at all) but the report-time flatten
+             * still didn't match - logging exactly why (flatten failure,
+             * count mismatch, or an unresolvable q/t reorder) since this is
+             * the other of the two places decomposition can still silently
+             * fail even after the online-loader's model-build fix. */
+            {
+                char line[384];
+                snprintf(line, sizeof(line),
+                        "member=%d ref=%s REJECTED: flattenedCount=%d expectedCount=%d flattenNonNull=%d",
+                        i, memberRefCache->memberLeafReferences[i] && memberRefCache->memberLeafReferences[i][0]
+                                ? memberRefCache->memberLeafReferences[i][0] : "(unknown)",
+                        flattenedCount, memberRefCache->memberLeafCounts[i], flattened != NULL);
+                appendDebugLog(MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH, line);
+            }
+
+            /* Count mismatch, flatten failure, or unresolvable q/t reorder -
+             * fall through to the non-decomposed path below for this one
+             * position. */
             free(flattened);
         }
 
@@ -399,7 +639,8 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
     if (forward) {
         for (int i = 0; i < candidates.count; i++) {
             EntryCandidate* c = &candidates.items[i];
-            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, &c->previousValue);
+            forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, c->reference,
+                    &c->previousValue);
         }
 
         if (groupAnchorIndex) {
@@ -446,6 +687,13 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
     free(forward);
     free(groupAnchorIndex);
     free(anchors);
+    /* Every candidate above was checked against memberRefCache->everPopulated
+     * as it stood BEFORE this report - only now, having processed the whole
+     * report, do we flip it (a no-op once already true). This is what keeps
+     * the true first-ever report's own from-empty seeding silent (see
+     * shouldForwardAndUpdateCache's own doc comment) while making every
+     * report from here on treat an unexpected NULL slot as a bug to log. */
+    if (memberRefCache && candidates.count > 0) memberRefCache->everPopulated = true;
     free(candidates.items);
     freeFlattenedArrays(&flattenedArrays);
 
@@ -533,6 +781,11 @@ MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
     free(e->memberLeafCounts);
     free(e->leafSlotOffsets);
 
+    if (e->memberLeafWireTypes) {
+        for (int i = 0; i < e->memberCount; i++) free(e->memberLeafWireTypes[i]);
+        free(e->memberLeafWireTypes);
+    }
+
     if (e->lastForwardedValues) {
         for (int i = 0; i < e->totalLeafSlots; i++) {
             if (e->lastForwardedValues[i]) MmsValue_delete(e->lastForwardedValues[i]);
@@ -579,7 +832,7 @@ crossRcbEntriesEqual(const MmsReportClientDedupEntry* cached, int cachedCount,
         MmsValue* cachedVal = cached[i].value;
         MmsValue* newVal = entries[i].value;
         if ((cachedVal == NULL) != (newVal == NULL)) return false;
-        if (cachedVal && !MmsValue_equals(cachedVal, newVal)) return false;
+        if (cachedVal && !valuesAreSemanticallyEqual(cachedVal, newVal)) return false;
     }
     return true;
 }
@@ -616,17 +869,6 @@ MmsReportClientUseCases_shouldForwardAcrossRcb(MmsReportClientCrossRcbDedupCache
         replaceCrossRcbDedupContent(cache, rcbReference, entries, entryCount);
     }
     return !isDuplicate;
-}
-
-void
-MmsReportClientUseCases_resetValueDiffCache(MmsReportClientMemberRefCacheEntry* entry) {
-    if (!entry || !entry->lastForwardedValues) return;
-    for (int i = 0; i < entry->totalLeafSlots; i++) {
-        if (entry->lastForwardedValues[i]) {
-            MmsValue_delete(entry->lastForwardedValues[i]);
-            entry->lastForwardedValues[i] = NULL;
-        }
-    }
 }
 
 /*

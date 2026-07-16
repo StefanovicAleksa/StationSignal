@@ -1,8 +1,31 @@
+#include <stdio.h>
 #include <stdlib.h>
+#include "hal_time.h"
 #include "features/mms_report_client/service/mms_report_client_api.h"
 #include "features/mms_report_client/data/mms_report_client_connection.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
+
+/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
+ * the plan this landed under) - the online-loader's model-build fix (falling
+ * back to getVariableSpecification when getDataDirectoryByFC finds nothing)
+ * was confirmed via real-hardware logs to build real DataObject children now
+ * (e.g. "Ind" got 3), but Gap-4 decomposition still wasn't picking them up
+ * downstream - this logs, per dataset member, exactly what
+ * IedModel_getDataSetMemberLeafReferences returned at buildMemberRefCache
+ * time (the metadata half of decomposition), to tell whether the remaining
+ * break is here or later at report-time flatten/type-matching (see
+ * collectCandidates's own identical diagnostic in
+ * mms_report_client_usecases.c). */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
+
+#define MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH "/tmp/ied_reporter_debug_decompose.log"
 
 void
 MmsReportClientConfig_defaults(MmsReportClientConfig* config) {
@@ -119,6 +142,39 @@ linkedListToStringArray(LinkedList list, int* outCount) {
 }
 
 /* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * DataAttributeType* (see IedModel_getDataSetMemberLeafWireTypes) - copies
+ * each boxed enum BY VALUE into the array and frees the boxed items. Returns
+ * NULL and leaves *outCount at 0 on empty/NULL input or allocation failure
+ * (list fully destroyed either way). */
+static DataAttributeType*
+linkedListToWireTypeArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    DataAttributeType* array = calloc((size_t) count, sizeof(DataAttributeType));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        DataAttributeType* boxed = (DataAttributeType*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
+
+    *outCount = count;
+    return array;
+}
+
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
  * IedModelDaSemantic* (see IedModel_getDataSetMemberSemantics/
  * _getDataSetMemberLeafSemantics) - copies each boxed enum BY VALUE into the
  * array and frees the boxed items (unlike linkedListToStringArray, which
@@ -161,10 +217,11 @@ linkedListToSemanticArray(LinkedList list, int* outCount) {
  * decomposition) and value-diff (hybrid event filter) per-RCB caches at the
  * same time - see MmsReportClientMemberRefCacheEntry's own doc comment. Built
  * once at start; never rebuilt on reconnect (same lifetime as client->targets)
- * - though each entry's lastForwardedValues slots ARE explicitly reset on
- * every successful (re-)enable (mms_report_client_connection.c's enableOneTarget,
- * via MmsReportClientUseCases_resetValueDiffCache), so a reconnect's GI
- * snapshot is never wrongly diffed against stale pre-disconnect values.
+ * - and each entry's lastForwardedValues slots are likewise populated once
+ * and PRESERVED for the client's whole lifetime, never reset on a
+ * (re-)enable, so a reconnect's GI snapshot diffs against the real,
+ * preserved last-known values from before the disconnect instead of a
+ * wiped-clean cache.
  */
 static LinkedList
 buildMemberRefCache(MmsReportClientHandle client) {
@@ -204,6 +261,14 @@ buildMemberRefCache(MmsReportClientHandle client) {
             int* leafOffsets = calloc((size_t) count, sizeof(int));
             int totalLeafSlots = 0;
 
+            /* Parallel to leafRefsArray/leafCounts (same shape, same
+             * per-member walk) - each decomposed member's own per-leaf
+             * EXPECTED DataAttributeType, cross-checked in collectCandidates
+             * against the actual wire-decoded MmsType before a decomposition
+             * zip is trusted. See MmsReportClientMemberRefCacheEntry.memberLeafWireTypes's
+             * own doc comment for the real-hardware finding this guards against. */
+            DataAttributeType** leafWireTypesArray = calloc((size_t) count, sizeof(DataAttributeType*));
+
             /* Per-raw-member Dbpos semantics (count-aligned with `array`
              * itself) plus, for decomposed members, per-leaf semantics
              * (mirrors leafRefsArray/leafCounts' own shape exactly, since
@@ -232,6 +297,34 @@ buildMemberRefCache(MmsReportClientHandle client) {
 
                     leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
                     leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+                    if (target->datasetReference) {
+                        char line[384];
+                        snprintf(line, sizeof(line),
+                                "rcbReference=%s member=%d memberRef=%s -> leafCount=%d%s",
+                                target->objectReference ? target->objectReference : "(unknown)", m,
+                                (array && m < count && array[m]) ? array[m] : "(unknown)",
+                                leafCount, leafCount > 0 ? "" : " (NOT decomposed - metadata empty)");
+                        appendDebugLog(MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH, line);
+                    }
+
+                    if (leafWireTypesArray && target->datasetReference) {
+                        int leafWireTypeCount = 0;
+                        DataAttributeType* wireTypes = linkedListToWireTypeArray(
+                                IedModel_getDataSetMemberLeafWireTypes(client->iedModel,
+                                        target->datasetReference, m),
+                                &leafWireTypeCount);
+                        /* Only trust this member's wire-types array if its count
+                         * matches leafCount - a mismatch here means the two
+                         * IedModel walks somehow disagreed on leaf count for the
+                         * SAME (datasetReference, m), which should be
+                         * structurally impossible (identical traversal), but
+                         * degrading to "no type check for this member" is
+                         * strictly safer than indexing past the end of a
+                         * shorter array. */
+                        leafWireTypesArray[m] = (wireTypes && leafWireTypeCount == leafCount) ? wireTypes : NULL;
+                        if (wireTypes && leafWireTypeCount != leafCount) free(wireTypes);
+                    }
 
                     if (leafSemArray && leafSemCounts && target->datasetReference) {
                         int leafSemCount = 0;
@@ -297,7 +390,9 @@ buildMemberRefCache(MmsReportClientHandle client) {
                 cacheEntry->leafSlotOffsets = leafOffsets;
                 cacheEntry->totalLeafSlots = totalLeafSlots;
                 cacheEntry->lastForwardedValues = lastForwardedValues;
+                cacheEntry->memberLeafWireTypes = leafWireTypesArray;
                 cacheEntry->leafSemantics = leafSemantics;
+                cacheEntry->everPopulated = false;
                 LinkedList_add(cache, cacheEntry);
             } else {
                 free(cacheEntry);
@@ -314,6 +409,10 @@ buildMemberRefCache(MmsReportClientHandle client) {
                 free(leafCounts);
                 free(leafOffsets);
                 free(lastForwardedValues);
+                if (leafWireTypesArray) {
+                    for (int m = 0; m < count; m++) free(leafWireTypesArray[m]);
+                    free(leafWireTypesArray);
+                }
                 free(leafSemantics);
             }
         }

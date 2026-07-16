@@ -2,6 +2,7 @@
 #define IED_MODEL_API_H_
 
 #include "linked_list.h"
+#include "mms_common.h"
 #include "features/ied_model/domain/ied_model_types.h"
 
 /*
@@ -118,6 +119,44 @@ LinkedList IedModel_getDataSetMemberSemantics(IedModelHandle handle, const char*
  */
 LinkedList IedModel_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
         int memberIndex);
+
+/*
+ * Index-aligned with IedModel_getDataSetMemberLeafReferences's own result
+ * list for the same (datasetReference, memberIndex) - same decomposition
+ * rules, same "empty list if not decomposed" convention. Each element is a
+ * heap-boxed DataAttributeType: this leaf's own already-known SCL-declared
+ * type, read directly off its DataAttribute node (set once at load time via
+ * IedModelUtils_mapBType). Used by mms_report_client/goose_subscriber
+ * alongside IedModel_dataAttributeTypeMatchesMmsType below to cross-check a
+ * Gap-4 decomposition zip before trusting it - see that function's own doc
+ * comment for the real-hardware finding this guards against. Empty for a
+ * model built via IedModel_wrapDynamicModel (no SCL to have parsed a
+ * DataAttributeType from).
+ * Caller owns the list and its elements: LinkedList_destroyDeep(list, free).
+ */
+LinkedList IedModel_getDataSetMemberLeafWireTypes(IedModelHandle handle, const char* datasetReference,
+        int memberIndex);
+
+/*
+ * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType (from
+ * IedModel_getDataSetMemberLeafWireTypes) against its ACTUAL wire-decoded
+ * MmsType (MmsValue_getType on the received value), before
+ * mms_report_client/goose_subscriber trust a Gap-4 decomposition zip.
+ * Exists because the pre-existing count-only fallback (see
+ * getDataSetMemberLeafReferences's own doc comment on the wire-order
+ * assumption) cannot catch a same-count-but-different-ORDER mismatch between
+ * this daemon's locally-resolved leaf order (SCL <DOType> XML child order)
+ * and a real device's actual runtime attribute order - confirmed against
+ * real production hardware: a DPC's "Pos" structured attribute had its
+ * stVal/t sub-elements zipped to the wrong reference labels (a UTC_TIME
+ * value landed on the "stVal" reference, a BOOLEAN landed on "t") because
+ * both orderings happened to have the same leaf count. Only implements
+ * CONFIDENT, well-established groupings (per this codebase's "don't guess
+ * IEC 61850 semantics" rule) - anything not explicitly modeled always
+ * matches (no check), rather than risk a false-positive rejection of a
+ * genuinely well-ordered structure.
+ */
+bool IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType actual);
 
 /*
  * For one LN (given its own "LD/LN" object reference, e.g.

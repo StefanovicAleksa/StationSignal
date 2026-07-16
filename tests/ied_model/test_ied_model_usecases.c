@@ -54,13 +54,6 @@ setUp(void) {
     fixtureHandle.model = fixtureModel;
     fixtureHandle.accessMode = IED_MODEL_ACCESS_READ_AND_WRITE; /* unused by usecases; gating lives in api.c */
     fixtureHandle.iedName = "TestIED";
-    /* fixtureHandle is `static` (zero-initialized once at program start) but
-     * setUp() only re-links the fields above on every test - explicitly
-     * reset these two so a previous test's daSemantics assignment (see the
-     * Dbpos semantics tests below) never leaks into an unrelated test via
-     * stale/dangling state. */
-    fixtureHandle.daSemantics = NULL;
-    fixtureHandle.daSemanticCount = 0;
     handle = &fixtureHandle;
 }
 
@@ -437,197 +430,88 @@ test_getDataSetMemberLeafReferences_empty_whenIndexNegative(void) {
     LinkedList_destroyDeep(leaves, free);
 }
 
-/* ---- Data set member Dbpos semantics ----
- *
- * These tests build models directly via the dynamic model API (like every
- * other test in this file) rather than through the SCL loader - the loader's
- * OWN capture of Dbpos semantics (buildDataAttribute's bType check) is a
- * data-layer/parsing concern proven separately, at the E2E level (see
- * integration_tests/ied_model). What's under test here is purely
- * IedModelUseCases_getDataSetMemberSemantics/_getDataSetMemberLeafSemantics'
- * own resolution+lookup logic, so daSemantics is populated by hand on the
- * bare handle, exactly as if the loader had already run.
- */
+/* ---- getDataSetMemberLeafWireTypes / dataAttributeTypeMatchesMmsType ----
+ * See mms_report_client_usecases.c's decomposedLeafTypesMatch (and its
+ * goose_subscriber twin) for what these back: real production hardware
+ * mislabeled a structured DPC's stVal/t leaves because the wire order didn't
+ * match this daemon's locally-resolved SCL order, and the pre-existing
+ * count-only fallback couldn't catch it. */
 
 void
-test_getDataSetMemberSemantics_resolvesDbpos_andDefaultsNoneForUnmarkedCodedEnum(void) {
-    IedModel* bareModel = IedModel_create("Bare");
-    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
-    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
-
-    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
-    DataAttribute* stVal = DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_CODEDENUM, IEC61850_FC_ST, 0, 0, 0);
-    /* ctlVal deliberately never appears in daSemantics below - simulates a
-     * Tcmd-typed attribute, which shares Dbpos's wire representation
-     * (IEC61850_CODEDENUM) but a different meaning (see
-     * IedModelUtils_mapBType's own doc comment) - proves lookup keys on the
-     * real DataAttribute* pointer, never guesses from type alone. */
-    DataAttribute_create("ctlVal", (ModelNode*) pos, IEC61850_CODEDENUM, IEC61850_FC_CO, 0, 0, 0);
-
-    DataSet* dataSet = DataSet_create("ds1", ln0);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos$stVal", -1, NULL);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$CO$Pos$ctlVal", -1, NULL);
-
-    IedModelDaSemanticEntry semantics[1] = { { stVal, IED_MODEL_DA_SEMANTIC_DBPOS } };
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
-        .iedName = "Bare", .daSemantics = semantics, .daSemanticCount = 1 };
-
-    LinkedList result = IedModelUseCases_getDataSetMemberSemantics(&bareHandle, "BareLD1/LLN0$ds1");
-
-    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(result));
-    LinkedList element = LinkedList_getNext(result);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_DBPOS, *(IedModelDaSemantic*) LinkedList_getData(element));
-    element = LinkedList_getNext(element);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, *(IedModelDaSemantic*) LinkedList_getData(element));
-
-    LinkedList_destroyDeep(result, free);
-    IedModel_destroy(bareModel);
-}
-
-void
-test_getDataSetMemberSemantics_none_forOrdinaryAttribute(void) {
-    /* Shared fixture's "events" dataset member is a plain BOOLEAN stVal, no
-     * daSemantics entries at all (setUp resets daSemantics to NULL/0). */
-    LinkedList result = IedModelUseCases_getDataSetMemberSemantics(handle, "TestIEDLD1/LLN0$events");
-
-    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(result));
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, *(IedModelDaSemantic*) firstElement(result));
-
-    LinkedList_destroyDeep(result, free);
-}
-
-void
-test_getDataSetMemberSemantics_none_forDecomposableDoLevelMember(void) {
-    /* A DO-level (no daName) FCDA has nothing to resolve at THIS position -
-     * getDataSetMemberLeafSemantics is the decomposed counterpart. */
-    IedModel* bareModel = IedModel_create("Bare");
-    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
-    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
-
-    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
-    DataAttribute* stVal = DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_CODEDENUM, IEC61850_FC_ST, 0, 0, 0);
-
-    DataSet* dataSet = DataSet_create("ds1", ln0);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
-
-    IedModelDaSemanticEntry semantics[1] = { { stVal, IED_MODEL_DA_SEMANTIC_DBPOS } };
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
-        .iedName = "Bare", .daSemantics = semantics, .daSemanticCount = 1 };
-
-    LinkedList result = IedModelUseCases_getDataSetMemberSemantics(&bareHandle, "BareLD1/LLN0$ds1");
-
-    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(result));
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, *(IedModelDaSemantic*) firstElement(result));
-
-    LinkedList_destroyDeep(result, free);
-    IedModel_destroy(bareModel);
-}
-
-void
-test_getDataSetMemberSemantics_empty_whenDatasetReferenceIsNull(void) {
-    LinkedList result = IedModelUseCases_getDataSetMemberSemantics(handle, NULL);
-
-    TEST_ASSERT_NOT_NULL(result);
-    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(result));
-
-    LinkedList_destroyDeep(result, free);
-}
-
-void
-test_getDataSetMemberLeafSemantics_decomposesFlatDo_resolvesDbposLeaf(void) {
-    IedModel* bareModel = IedModel_create("Bare");
-    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
-    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
-
-    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
-    DataAttribute* stVal = DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_CODEDENUM, IEC61850_FC_ST, 0, 0, 0);
-    DataAttribute_create("q", (ModelNode*) pos, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
-
-    DataSet* dataSet = DataSet_create("ds1", ln0);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
-
-    IedModelDaSemanticEntry semantics[1] = { { stVal, IED_MODEL_DA_SEMANTIC_DBPOS } };
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
-        .iedName = "Bare", .daSemantics = semantics, .daSemanticCount = 1 };
-
-    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafSemantics(&bareHandle, "BareLD1/LLN0$ds1", 0);
-
-    /* Order matches getDataSetMemberLeafReferences' own traversal exactly
-     * (stVal then q - same walk, see that function's own equivalent test). */
-    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
-    LinkedList element = LinkedList_getNext(leaves);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_DBPOS, *(IedModelDaSemantic*) LinkedList_getData(element));
-    element = LinkedList_getNext(element);
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, *(IedModelDaSemantic*) LinkedList_getData(element));
-
-    LinkedList_destroyDeep(leaves, free);
-    IedModel_destroy(bareModel);
-}
-
-void
-test_getDataSetMemberLeafSemantics_recursesIntoConstructedAttribute(void) {
-    /* Mirrors test_getDataSetMemberLeafReferences_recursesIntoConstructedAttribute -
-     * a Dbpos nested inside a CONSTRUCTED DA must still resolve via the
-     * recursive walk, not just at the top level. */
-    IedModel* bareModel = IedModel_create("Bare");
-    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
-    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
-
-    DataObject* phV = DataObject_create("PhV", (ModelNode*) ln0, 0);
-    DataAttribute* cVal = DataAttribute_create("cVal", (ModelNode*) phV, IEC61850_CONSTRUCTED, IEC61850_FC_MX, 0, 0, 0);
-    DataAttribute* nestedPos = DataAttribute_create("pos", (ModelNode*) cVal, IEC61850_CODEDENUM, IEC61850_FC_MX, 0, 0, 0);
-
-    DataSet* dataSet = DataSet_create("ds1", ln0);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$MX$PhV", -1, NULL);
-
-    IedModelDaSemanticEntry semantics[1] = { { nestedPos, IED_MODEL_DA_SEMANTIC_DBPOS } };
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
-        .iedName = "Bare", .daSemantics = semantics, .daSemanticCount = 1 };
-
-    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafSemantics(&bareHandle, "BareLD1/LLN0$ds1", 0);
-
-    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(leaves));
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_DBPOS, *(IedModelDaSemantic*) firstElement(leaves));
-
-    LinkedList_destroyDeep(leaves, free);
-    IedModel_destroy(bareModel);
-}
-
-void
-test_getDataSetMemberLeafSemantics_empty_whenMemberIsAlreadyLeafLevel(void) {
-    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafSemantics(handle, "TestIEDLD1/LLN0$events", 0);
-
-    TEST_ASSERT_NOT_NULL(leaves);
-    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
-
-    LinkedList_destroyDeep(leaves, free);
-}
-
-void
-test_getDataSetMemberSemantics_none_whenOnlineDiscoveryStyleHandle_hasNoSemanticsTable(void) {
-    /* Mirrors IedModel_wrapDynamicModel's own handle shape - daSemantics ==
-     * NULL, daSemanticCount == 0. Must degrade to NONE everywhere, never
-     * crash. */
+test_getDataSetMemberLeafWireTypes_decomposesFlatDo_matchesReferenceOrder(void) {
     IedModel* bareModel = IedModel_create("Bare");
     LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
     LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
 
     DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
     DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_CODEDENUM, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("t", (ModelNode*) pos, IEC61850_TIMESTAMP, IEC61850_FC_ST, 0, 0, 0);
 
     DataSet* dataSet = DataSet_create("ds1", ln0);
-    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos$stVal", -1, NULL);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
 
     struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
-        .iedName = "Bare", .daSemantics = NULL, .daSemanticCount = 0 };
+        .iedName = "Bare" };
 
-    LinkedList result = IedModelUseCases_getDataSetMemberSemantics(&bareHandle, "BareLD1/LLN0$ds1");
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafWireTypes(&bareHandle, "BareLD1/LLN0$ds1", 0);
 
-    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(result));
-    TEST_ASSERT_EQUAL(IED_MODEL_DA_SEMANTIC_NONE, *(IedModelDaSemantic*) firstElement(result));
+    /* Order matches getDataSetMemberLeafReferences' own traversal exactly
+     * (stVal then t - same walk). */
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
+    LinkedList element = LinkedList_getNext(leaves);
+    TEST_ASSERT_EQUAL(IEC61850_CODEDENUM, *(DataAttributeType*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL(IEC61850_TIMESTAMP, *(DataAttributeType*) LinkedList_getData(element));
 
-    LinkedList_destroyDeep(result, free);
+    LinkedList_destroyDeep(leaves, free);
     IedModel_destroy(bareModel);
+}
+
+void
+test_getDataSetMemberLeafWireTypes_empty_whenMemberIsAlreadyLeafLevel(void) {
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafWireTypes(handle, "TestIEDLD1/LLN0$events", 0);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getDataSetMemberLeafWireTypes_empty_whenDatasetReferenceIsNull(void) {
+    LinkedList leaves = IedModelUseCases_getDataSetMemberLeafWireTypes(handle, NULL, 0);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_dataAttributeTypeMatchesMmsType_confidentMatches(void) {
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_BOOLEAN, MMS_BOOLEAN));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_TIMESTAMP, MMS_UTC_TIME));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_QUALITY, MMS_BIT_STRING));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_CODEDENUM, MMS_BIT_STRING));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_INT32, MMS_INTEGER));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_FLOAT32, MMS_FLOAT));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_VISIBLE_STRING_255, MMS_VISIBLE_STRING));
+}
+
+void
+test_dataAttributeTypeMatchesMmsType_confidentMismatches(void) {
+    /* The exact real-hardware finding this guards against: a UTC_TIME value
+     * landing where a coded/bit-string status was expected, and a BOOLEAN
+     * landing where a timestamp was expected. */
+    TEST_ASSERT_FALSE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_CODEDENUM, MMS_UTC_TIME));
+    TEST_ASSERT_FALSE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_TIMESTAMP, MMS_BOOLEAN));
+    TEST_ASSERT_FALSE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_BOOLEAN, MMS_UTC_TIME));
+    TEST_ASSERT_FALSE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_QUALITY, MMS_BOOLEAN));
+}
+
+void
+test_dataAttributeTypeMatchesMmsType_unmodeledTypeAlwaysMatches(void) {
+    /* Not confident enough to assert - must never reject, regardless of
+     * actual wire type, per this codebase's "don't guess IEC 61850
+     * semantics" rule. */
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_UNKNOWN_TYPE, MMS_BOOLEAN));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_UNKNOWN_TYPE, MMS_UTC_TIME));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_OCTET_STRING_64, MMS_OCTET_STRING));
+    TEST_ASSERT_TRUE(IedModelUseCases_dataAttributeTypeMatchesMmsType(IEC61850_CONSTRUCTED, MMS_STRUCTURE));
 }
 
 /* ---- Reportable attribute references for a dynamic-dataset LN ---- */
@@ -824,14 +708,12 @@ main(void) {
     RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexOutOfRange);
     RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexNegative);
 
-    RUN_TEST(test_getDataSetMemberSemantics_resolvesDbpos_andDefaultsNoneForUnmarkedCodedEnum);
-    RUN_TEST(test_getDataSetMemberSemantics_none_forOrdinaryAttribute);
-    RUN_TEST(test_getDataSetMemberSemantics_none_forDecomposableDoLevelMember);
-    RUN_TEST(test_getDataSetMemberSemantics_empty_whenDatasetReferenceIsNull);
-    RUN_TEST(test_getDataSetMemberLeafSemantics_decomposesFlatDo_resolvesDbposLeaf);
-    RUN_TEST(test_getDataSetMemberLeafSemantics_recursesIntoConstructedAttribute);
-    RUN_TEST(test_getDataSetMemberLeafSemantics_empty_whenMemberIsAlreadyLeafLevel);
-    RUN_TEST(test_getDataSetMemberSemantics_none_whenOnlineDiscoveryStyleHandle_hasNoSemanticsTable);
+    RUN_TEST(test_getDataSetMemberLeafWireTypes_decomposesFlatDo_matchesReferenceOrder);
+    RUN_TEST(test_getDataSetMemberLeafWireTypes_empty_whenMemberIsAlreadyLeafLevel);
+    RUN_TEST(test_getDataSetMemberLeafWireTypes_empty_whenDatasetReferenceIsNull);
+    RUN_TEST(test_dataAttributeTypeMatchesMmsType_confidentMatches);
+    RUN_TEST(test_dataAttributeTypeMatchesMmsType_confidentMismatches);
+    RUN_TEST(test_dataAttributeTypeMatchesMmsType_unmodeledTypeAlwaysMatches);
 
     RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_returnsStAndMxLeavesUnderThatLnOnly);
     RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_recursesIntoConstructedAttribute);

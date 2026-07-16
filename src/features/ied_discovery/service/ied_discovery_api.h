@@ -5,15 +5,16 @@
 #include "features/ied_discovery/domain/ied_discovery_types.h"
 
 /*
- * Public boundary of the ied_discovery feature. Other callers (main.c, or
- * whatever later replaces its terminal-prompt adapter) should only ever
- * include this header - never reach into domain/data/utils directly.
+ * Public boundary of the ied_discovery feature. Other callers (scan_orchestration's
+ * own worker - see its Architecture bullet) should only ever include this
+ * header - never reach into domain/data/utils directly.
  *
- * Pure request/response, no I/O prompting anywhere in here - the
- * interaction medium (today: a thin terminal adapter, main_discovery_prompt.c)
- * is deliberately kept out of this feature entirely, so it can be swapped
- * later (e.g. driven through the API layer this daemon reports to) without
- * touching this API at all.
+ * Pure request/response, no I/O prompting anywhere in here - there is no
+ * in-process interactive medium at all anymore (main.c's old terminal-prompt
+ * adapter, main_discovery_prompt.c, was removed once control_dispatcher's
+ * START_SCAN/STOP_SCAN commands became the daemon's only scan-driving
+ * interface); discovery results reach a caller exclusively over
+ * scan_dispatcher's websocket now.
  *
  * This is network HOST discovery on an already-named local interface
  * (getifaddrs + CIDR math + TCP probe + a real MMS/ACSE association) - it

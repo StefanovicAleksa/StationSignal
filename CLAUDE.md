@@ -8,61 +8,58 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
 ## Commands
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
-  compiling it together with `src/main_discovery_prompt.c`, every `.c` file under
-  `src/orchestration/`, `src/scan_orchestration/`, and `src/device_manager/`, and all nine
-  `src/features/<feature>/` directories (`service`/`data`/`domain`/`utils`), e.g.:
-  `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c src/main_discovery_prompt.c
+  compiling it together with every `.c` file under `src/orchestration/`,
+  `src/scan_orchestration/`, and `src/device_manager/`, and all nine `src/features/<feature>/`
+  directories (`service`/`data`/`domain`/`utils`), e.g.:
+  `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c
   src/orchestration/*/*.c src/scan_orchestration/*/*.c src/device_manager/*/*.c
   src/features/*/*/*.c -o /tmp/ied_reporter_daemon -Lthird_party/lib -liec61850 -lhal -lmxml
-  -lwebsockets -lcjson -lpthread && /tmp/ied_reporter_daemon [host] [mmsPort] [iedName]
-  [interface] [acseAuthPassword] [sclFilePath]` (also wrapped by `rebuild_proj.sh`) — this is a
-  manual stopgap, not a substitute for a real build system; don't invent or guess a permanent
-  build command, ask before assuming one. `sudo` is only required if a real device is actually
-  reached over GOOSE (raw socket) — the process itself starts fine without it, see
-  `device_manager`'s own bullet below on why a failed boot-time device is no longer fatal. Only
-  `mmsPort`/`interface`/`acseAuthPassword` have fallback defaults (102/`eth0`/unauthenticated) if
-  omitted:
-  - **`main.c`'s primary job now is `device_manager` + `control_dispatcher`** (see their own
-    Architecture bullets below), not this one boot-time device — an always-on control websocket
-    (default `127.0.0.1:8767`) accepts `START_REPORTING`/`STOP_REPORTING` JSON commands for any
-    number of concurrently running devices, each auto-assigned its own `ipc_dispatcher` websocket
-    port from `device_manager`'s own configured range (default 9000-9999). The argv-supplied
-    `host` (below) is entirely optional and, when given, is started via the exact same
-    `DeviceManager_startReporting` call a control-websocket client would use — not a separate
-    code path. **Breaking change from the single-device version of this file**: there is no
-    longer an `ipcPort` argv slot (5th slot used to override the one fixed dispatcher's port) —
-    `device_manager` owns per-device port allocation now, so `acseAuthPassword`/`sclFilePath`
-    each moved one slot earlier (5th/6th, not 6th/7th).
-  - `host` omitted/empty: runs the continuous background scan (`scan_orchestration`) on
-    `interface` instead, streaming discovered IEC 61850 MMS devices over its own shared websocket
-    (default port 8766) while an interactive terminal prompt lets you pick a device from the
-    live, growing list (or type in an extra candidate IP to verify and add) at any time; picking
-    one stops the scan, then hands the picked host to the same `DeviceManager_startReporting`
-    call the argv-supplied-host path uses. If no host is ever picked (stdin EOF), this is no
-    longer fatal — `control_dispatcher` stays up regardless, waiting for commands. See
-    `scan_orchestration/`'s own Architecture bullet below.
-  - `iedName` omitted/empty: passed through as auto-detect — works only if the SCL declares
-    exactly one `<IED>` (see `orchestration/`'s own bullet) — UNLESS `sclFilePath` is also given,
-    in which case `device_manager` requires `iedName` explicitly (see its own bullet below) — a
-    stricter contract than `Orchestration_runFromLocalFile`'s own auto-detect, deliberately, per
-    this feature's own explicit requirement.
-  - `sclFilePath` (optional, 6th slot): if given, skips `scl_bootstrap` entirely and loads
-    this local SCL file instead (`Orchestration_runFromLocalFile`) — for devices whose MMS
-    server doesn't implement file services (confirmed in practice against OMICRON IED Scout's
-    "Simulate IED" mode: a real, connectable MMS/GOOSE device that associates fine but returns
-    `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` when browsed — no `.icd`/`.cid`/etc. served at
-    all). `host`/`mmsPort` still drive the real live `mms_report_client`/`goose_subscriber`
-    connections; `ied_discovery`'s scan/manual-add still works the same beforehand to find
-    that host. See `orchestration/`'s own bullet for the stage-by-stage behavior.
-  - If `sclFilePath` is **not** given and the bootstrap stage comes back with exactly
-    `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (the same device class the bullet above
-    describes, just without an operator having a local SCL copy in hand), `device_manager`
-    automatically retries once via `Orchestration_runFromOnlineDiscovery` (via
-    `DeviceManagerBootstrapPolicy_run`, extracted from this file's own original inline sequencing
-    — see `device_manager`'s own bullet below) — builds the model directly from the live device's
-    own MMS data model instead of any SCL file at all. See `ied_model_online_loader/`'s own
-    Architecture bullet below and the "No over-the-wire tree discovery" Hard Rule's documented
-    exception.
+  -lwebsockets -lcjson -lpthread && /tmp/ied_reporter_daemon` (also wrapped by
+  `rebuild_proj.sh`) — this is a manual stopgap, not a substitute for a real build system; don't
+  invent or guess a permanent build command, ask before assuming one. `sudo` is only required if
+  a real device is actually reached over GOOSE (raw socket) once a client asks the daemon to
+  report on one — the process itself starts and idles fine without it.
+  - **`main.c` takes no arguments and has no terminal/CLI surface at all** — it is a pure
+    background process-runner for an external API layer. It creates `device_manager` +
+    `scan_orchestration` + `control_dispatcher`, starts the one always-on control websocket
+    (default `127.0.0.1:8767`), and blocks until `SIGINT`/`SIGTERM`. Every device/scan lifecycle
+    action is driven exclusively through that one control websocket's four JSON commands — there
+    is no boot-time device and no interactive discovery prompt anymore (both were removed once
+    `control_dispatcher` grew a full command set covering the same ground). See
+    `control_dispatcher/`'s own Architecture bullet below for the full envelope shape.
+  - `START_REPORTING {host, mmsPort, iedName?, interfaceId, sclFilePath?, acseAuthPassword?,
+    accessMode?}` → `{deviceId, wsPort}`: starts one IED's full MMS+GOOSE reporting pipeline via
+    `DeviceManager_startReporting`, auto-assigning that device its own `ipc_dispatcher` websocket
+    port from `device_manager`'s configured range (default 9000-9999), returned as `wsPort`.
+    `iedName` omitted/empty auto-detects — works only if the SCL declares exactly one `<IED>`
+    (see `orchestration/`'s own bullet) — UNLESS `sclFilePath` is also given, in which case
+    `device_manager` requires `iedName` explicitly (see its own bullet below) — a stricter
+    contract than `Orchestration_runFromLocalFile`'s own auto-detect, deliberately, per this
+    feature's own explicit requirement. `sclFilePath` omitted (the common case): loads the
+    device's structure via `scl_bootstrap` (network SCL fetch) and, if that comes back with
+    exactly `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (a real, connectable MMS/GOOSE device
+    that never serves an SCL file over file services — confirmed in practice against OMICRON IED
+    Scout's "Simulate IED" mode), `device_manager` automatically retries once via
+    `Orchestration_runFromOnlineDiscovery` (via `DeviceManagerBootstrapPolicy_run`) — builds the
+    model directly from the live device's own MMS data model instead. See
+    `ied_model_online_loader/`'s own Architecture bullet below and the "No over-the-wire tree
+    discovery" Hard Rule's documented exception. `sclFilePath` given: skips `scl_bootstrap`
+    entirely and loads this local SCL file instead (`Orchestration_runFromLocalFile`) — for
+    devices whose MMS server doesn't implement file services at all. See `orchestration/`'s own
+    bullet for the stage-by-stage behavior and `device_manager/`'s own bullet for the full
+    reserve/bootstrap/finalize sequencing.
+  - `STOP_REPORTING {deviceId}` → `{deviceId}`: stops and tears down the device started by the
+    `START_REPORTING` call that returned this `deviceId`, freeing its `ipc_dispatcher` port for
+    reuse.
+  - `START_SCAN {interfaceId, mmsPort, sweepIntervalMs?}` → `{scanId}`: starts a continuous
+    background subnet scan (`scan_orchestration`) on `interfaceId`/`mmsPort`, streaming
+    discovered IEC 61850 MMS devices over the shared `scan_dispatcher` websocket (default port
+    8766 — one shared instance for every concurrent scan in the process, not one per scan; see
+    `scan_orchestration/`'s own bullet below). Starts that shared websocket on the first
+    concurrently-active scan (0→1) if not already running.
+  - `STOP_SCAN {scanId}` → `{scanId}`: stops the scan started by the `START_SCAN` call that
+    returned this `scanId`. Tears down the shared `scan_dispatcher` websocket if this was the
+    last active scan (1→0).
 - Build + run IED simulator (integration test fixture): `cd integration_tests/ied_simulator && make`
 - Generate simulator model: `./integration_tests/ied_simulator/scripts/generate_model.sh`
 - Run unit tests: `cd tests && make run` — strictly unit, no file I/O beyond two
@@ -174,6 +171,17 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   /tmp/goose_loopback_smoke_test` — proves a bare `GoosePublisher`/`GooseReceiver` pair
   round-trips a real GOOSE frame over `lo` before trusting that assumption in the E2E test above.
 - Run via `sudo` once built — raw socket access required for GOOSE sniffing.
+- `./run_all_tests.sh` runs every suite above in one pass: the unit tests (`tests/`) followed by
+  every `integration_tests/<feature>/` E2E suite, in the same `make clean && make run` shape each
+  suite's own bullet already documents. Re-execs itself under `sudo` if not already root (some
+  suites need `CAP_NET_RAW` for GOOSE, most don't — running everything under one `sudo` umbrella
+  is simpler than tracking which is which per invocation). Reports pass/fail per suite AND
+  aggregates every individual Unity `N Tests M Failures P Ignored` summary line across the whole
+  run (`tests/` alone runs many separate Unity binaries, each with its own such line) into one
+  grand total printed at the end. **This suite list is hand-maintained inside the script, not
+  auto-discovered — whenever a test suite is added or removed (a new `tests/<feature>/` Makefile
+  entry in `tests/Makefile`'s own `TESTS` list, or a new/removed `integration_tests/<feature>/`
+  directory), update `run_all_tests.sh`'s `run_suite` calls in the same change.**
 
 ## Current State (update as this evolves)
 - `src/main.c` now wires the real thing: `OrchestrationConfig_defaults` (which also defaults
@@ -251,6 +259,24 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   own `.c` files (the latter two were themselves missing from `rebuild_proj.sh` until this pass —
   a gap from `scan_orchestration`'s own original commit, fixed here since `main.c` cannot build
   without them regardless).
+- **`main.c` was rewritten once more, most recently, to remove its remaining terminal/CLI surface
+  entirely** (explicit user request, turning the daemon into a pure background process-runner for
+  an external API layer) — **every bullet above describing argv slots, a boot-time device, or an
+  interactive discovery prompt is now historical only and no longer reflects current behavior.**
+  `main.c` now takes **zero arguments** (`int main(void)`) and does nothing but create
+  `device_manager` + `scan_orchestration` + `control_dispatcher`, start the one always-on control
+  websocket, and block on `SIGINT`/`SIGTERM` until torn down in the same reverse order as before.
+  The entire `host`-omitted background-scan-plus-interactive-prompt block and the
+  argv-supplied-host boot-time `DeviceManager_startReporting` call (both described above) are
+  gone, along with `src/main_discovery_prompt.c`/`.h` (deleted — nothing else referenced them).
+  `control_dispatcher`'s `START_SCAN`/`STOP_SCAN` and `START_REPORTING`/`STOP_REPORTING` commands
+  (see its own Architecture bullet below, and this file's own `main.c` Commands bullet above for
+  the full request/response schema of all four) are now the daemon's **only** way to start/stop
+  anything — this was already fully implemented and tested (the scan actions landed in an earlier
+  pass this doc had failed to document at all until now, a real doc/code drift caught while
+  planning this change). `rebuild_proj.sh` and this file's own manual build command were updated
+  to drop `src/main_discovery_prompt.c`. `ied_discovery`'s own service header doc comment was
+  updated to stop referencing `main_discovery_prompt.c` as the discovery interaction medium.
 - **Bugfix surfaced by wiring `ipc_dispatcher` into orchestration's own rollback paths**:
   `MmsReportClientConnection_destroy` (`src/features/mms_report_client/data/mms_report_client_connection.c`)
   used to destroy `handle->wakeSignal` (the semaphore) *before* `IedConnection_destroy` - but
@@ -327,13 +353,17 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   The "nothing cached yet" case (`cached == NULL`) is a **bootstrap** event —
   `shouldForwardAndUpdateCache` silently seeds the cache from it but returns `false` (never
   forwarded). This is now **unconditional**, for the same reason the reason-trust bypass above had
-  to go entirely, not just partially: a reconnect resets this same cache to `NULL` on every
-  (re-)enable (`MmsReportClientUseCases_resetValueDiffCache`, called from `enableOneTarget`), so
-  "first observation, cached == NULL, tagged with a real-change reason" is *structurally
+  to go entirely, not just partially: at the time this fix landed, a reconnect reset this same
+  cache to `NULL` on every (re-)enable (`MmsReportClientUseCases_resetValueDiffCache`, called from
+  `enableOneTarget` — **this reset mechanism was later removed entirely, see the "cache is now
+  never reset" redesign further below** — the cache is populated once and preserved forever, and
+  `cached == NULL` is now only expected on a position's genuine first-ever observation), so
+  "first observation, cached == NULL, tagged with a real-change reason" was *structurally
   indistinguishable* from "a reconnect's redelivered-but-unchanged report, cache freshly reset,
   spuriously tagged with a real-change reason" — the exact pattern the real device demonstrated.
   Trusting reason on the `cached == NULL` branch for one would necessarily also trust it for the
-  other, reopening the same bug. **`mms_report_client` no longer requests GI at all, on any
+  other, reopening the same bug — this reasoning is why `reason` stays untrusted unconditionally
+  even after the reset mechanism itself was later removed. **`mms_report_client` no longer requests GI at all, on any
   enable** (`MmsReportClientConfig.generalInterrogationOnEnable` was removed entirely, along
   with the `ClientReportControlBlock_setGI`/`RCB_ELEMENT_GI` branch in `enableOneTarget` —
   see this feature's own Architecture bullet below for the full reasoning) — GI proved
@@ -364,9 +394,11 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   requiring no change to the report adapter itself. `goose_subscriber` mirrors the
   bootstrap-suppression side of this exactly (GOOSE has no reason-for-inclusion at all, so *every*
   candidate already went through this same "cached==NULL → bootstrap, don't forward" rule, and
-  never needed a reason-trust bypass removed) — including for the first frame after a
-  STALE/INVALID_STATE→VALID liveness recovery, not just the literal first-ever frame (the cache is
-  reset the same way on both).
+  never needed a reason-trust bypass removed) — for the literal first-ever frame only; a
+  STALE/INVALID_STATE→VALID liveness recovery's own first frame is now diffed against the real,
+  preserved pre-outage cache instead of being unconditionally bootstrap-suppressed too (see the
+  "Fifth change in the same family" bullet under `mms_report_client/`'s own Architecture entry
+  above for the full redesign, which applies identically to `goose_subscriber`).
   **The per-position value-diff filter above, by itself, broke `ipc_dispatcher`'s quality pairing**
   (found against real production traffic): quality (`q`) almost never changes value
   report-to-report and rarely carries a real-change reason on a report triggered by its sibling
@@ -475,6 +507,42 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   feature entirely rather than merely left untrusted (see `mms_report_client/`'s own Architecture
   bullet above for the full reasoning and the resulting test changes) — the two changes shipped
   together since both touch the same few lines of `enableOneTarget`.
+- **Fifth change in the same family — the value-diff cache is now NEVER reset at all, on either
+  `mms_report_client` or `goose_subscriber`, at explicit user request**: every bugfix above
+  (storm/locking/reset-ordering) treated "reset the cache on every reconnect/recovery" as a given
+  and fixed increasingly narrow races around *when* that reset ran — but the reset itself was the
+  root of a separate, simpler problem: a device with a perfectly good last-known value lost it
+  every time the connection blipped, since a freshly-nulled cache turns the reconnect's own GI/
+  redelivered snapshot back into a bootstrap event (silently seeded, never forwarded,
+  `previousValue` left `NULL`) even though a real prior value existed a moment before. The fix:
+  `MmsReportClientUseCases_resetValueDiffCache`/`GooseSubscriberUseCases_resetValueDiffCache` are
+  deleted entirely (zero remaining callers) — `enableOneTarget`
+  (`mms_report_client_connection.c`) no longer resets anything before its enable write, and the
+  frame adapter (`goose_subscriber_frame_adapter.c`'s `onGooseReceived`) no longer resets anything
+  on a STALE/INVALID_STATE→VALID transition (it still resets the unrelated `hasForwardedStNum`
+  heartbeat-dedup flag there, untouched). The cache is now populated **exactly once**, on a
+  position's genuine first-ever observation, and **preserved for the rest of the client/
+  subscriber's lifetime** (only freed at `STOP_REPORTING`/destroy, as before). GI (MMS) and the
+  liveness-recovery mechanism (GOOSE) are otherwise unchanged — still forced/detected on every
+  reconnect/recovery — but the fresh snapshot they produce now diffs against the **real, preserved
+  last-known value** instead of a wiped-clean one: a genuine change made while disconnected now
+  correctly forwards with a real, non-`NULL` `previousValue`; an unchanged resend is still
+  correctly suppressed by the ordinary diff check, no bootstrap logic or reset-timing race
+  involved. A new per-RCB/per-target `everPopulated` flag (`MmsReportClientMemberRefCacheEntry`/
+  `GooseSubscriberMemberRefCache`, set once at the end of the first report/frame either feature's
+  own `buildEntries` ever processes) exists purely to gate a new debug check in
+  `shouldForwardAndUpdateCache` (both features): a cache slot found `NULL` *after* `everPopulated`
+  is already `true` should now be structurally impossible (nothing ever resets a slot back to
+  `NULL` again) — `fprintf(stderr, ...)` fires on every such occurrence, since it now signals a
+  real bug worth investigating on sight, not routine startup noise. `memberRefCacheLock`
+  (MMS)/`targetStateLock` (GOOSE) are unchanged — the MMS lock in particular is now technically
+  guarding a single-writer scenario (the report-adapter thread is the cache's only remaining
+  writer, since the supervisor thread no longer touches it), kept anyway as cheap, uncontended
+  insurance. Proven via new unit tests in both features' usecases test files driving
+  `buildReportRecord`/`buildRecord` multiple times in a row with no reset call anywhere in
+  between, asserting: the first call silently seeds the cache and sets `everPopulated`; a
+  simulated-reconnect/recovery call with a genuinely different value forwards with a real
+  `previousValue`; an unchanged resend is suppressed exactly like any other duplicate.
 - `ied_model`'s `IedModel_getGooseSubscriptionTargets` returns `GooseSubscriptionTarget*`
   (object reference plus optional VLAN/APPID/dst-MAC parsed from SCL's `<GSE><Address>`),
   not a bare `char*` — this was a breaking change made when `goose_subscriber` needed the
@@ -635,8 +703,8 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   async TCP-probe state machine without pulling in the full MMS-association + SCL browse/fetch
   — that async state machine is substantial enough to be worth reusing rather than duplicating,
   unlike the small ACSE-auth-setup snippet `mms_report_client`/`ied_discovery` each duplicate.
-- `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use; `GooseSubscriptionTarget` carries the equivalent `datasetReference` for `goose_subscriber`. `IedModel_getDataSetMemberReferences(handle, datasetReference)` returns the ordered, heap-allocated member-reference strings backing one dataset (index i matches the i-th report/GOOSE entry) — purely local, walks the already-parsed SCL `DataSet`, never over-the-wire (see Hard Rules) — this is what both consumers use to label entries by position. Also exposes `IedModel_listIedNames(path, outError)` — lists every `<IED name="...">` at an SCL file's top level without building a full model, for `orchestration`'s optional IED-name auto-detection (see that feature's own bullet below); a file with zero `<IED>` elements is a valid, non-error, empty result. **Hardened against real-world SCL variation** (found integrating against a real Siemens SIPROTEC device and its exported station SCD): `VLAN-ID`/`APPID` are parsed as hex, not decimal-defaulting `strtoul` base-0 (real values like `"000A"` were silently corrupted to `0` under octal autodetection); `<GSE>`'s `MinTime`/`MaxTime` are now read instead of always defaulting; `<SDI>`-wrapped (structured/array) `<DOI>`/`<DAI>` overrides are now recursed into instead of silently dropped; enumerated `<DAI>` `Val` labels are resolved against the DA's real `<EnumType>` ordinal instead of `atoi`'d (a non-numeric label like `"status-only"` used to silently become ordinal `0`, itself a valid-looking wrong value, not a skip); `LDevice/@ldName` (SCL functional naming) is read and threaded into FCDA/LDevice resolution as a third fallback convention. A vendor pattern where control blocks are embedded as escaped text inside `<Private type="...ControlBlockStorage...">` (seen in a raw, unconfigured Siemens device-type template) is detected and warned about rather than silently producing an empty model — actually parsing that escaped payload is out of scope (vendor-specific, speculative). Deliberately **not** hardened, considered and deferred pending real evidence: duplicate `LDevice/@inst` across multiple `<AccessPoint>`s, `DAI/@ix` array indices, `<Val sGroup="N">` setting-group overrides, dotted `doName`/`daName` FCDA shorthand, non-dash-separated MAC address formats. `GSEControl`'s `datSet` was reconsidered for symmetry with `ReportControl`'s now-optional one and deliberately kept required — every real `GSEControl` sample encountered populates it. **Also retains a small Dbpos-semantics side table**, added at explicit user request for `ipc_dispatcher`'s descriptive-label feature (see "IPC / Reporting Out" below): `buildDataAttribute` (`data/ied_model_scl_loader.c`) checks the raw SCL `bType` string directly (before `IedModelUtils_mapBType` collapses `Dbpos`/`Tcmd` into one generic `IEC61850_CODEDENUM`) and, for a genuine `Dbpos`, records `{DataAttribute*, IED_MODEL_DA_SEMANTIC_DBPOS}` into a model-scoped `LinkedList` threaded through the same structure-pass functions `enumAttrs` already uses, copied into a flat array on `IedModelHandle` at load time. Two new accessors, `IedModel_getDataSetMemberSemantics`/`_getDataSetMemberLeafSemantics`, mirror `_getDataSetMemberReferences`/`_getDataSetMemberLeafReferences` exactly (same index-alignment, same decomposed-vs-leaf split) but return `IedModelDaSemantic` instead of a reference string. Empty for a model built via `IedModel_wrapDynamicModel` (no SCL `bType` available over the wire) and for the dynamic ("Dyn"-dataset) RCB fallback path (no accessor built for that path in v1) — both accepted gaps, not silently glossed over.
-- `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`, **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them — **`GI` is never requested at all**, removed entirely after proving unreliable on real hardware, see below), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). `MmsReportEntry.reference` prefers the server's own `ClientReport_getDataReference` (only present if the RCB's `OptFlds` has `DataRef` set) and falls back to a per-RCB cache of `IedModel_getDataSetMemberReferences` results (built once at `MmsReportClient_start`, never rebuilt on reconnect) when the server omits it. Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). **Supports ACSE password authentication** via `MmsReportClientConfig.acseAuthPassword` (`data/mms_report_client_auth.c`'s `MmsReportClientAuth_configurePasswordAuth`, same third-party calls as `scl_bootstrap`'s own `data/scl_bootstrap_auth.c` — duplicated rather than shared, since features never reach into each other's `data/`/`domain/` layers, only `service/*_api.h`). `NULL` (default) means every association is unauthenticated, unchanged from before this was added. Unlike `scl_bootstrap` (which tries unauthenticated first, then retries once with a password only on rejection, since it's scanning candidates blind), `mms_report_client` applies the configured password unconditionally from the very first connect attempt — it always targets one already-known IED, so there's no ambiguity to resolve with a retry. Applied once, at `MmsReportClientConnection_create` time, to the one `IedConnection` object that's reused across every reconnect (unlike `scl_bootstrap`'s fresh-connection-per-attempt design), so it covers every future reconnect automatically. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`, including both a correct-password-connects and a wrong-password-never-connects case against a real `SimServer_requireAuthentication`-protected instance. **`MmsReportEntry` also now carries `previousValue`/`semantic`** (see the value-diff filter bullet above and "IPC / Reporting Out" below for the full change-stream rework and Dbpos-labeling feature these back) — `previousValue` an owned clone of the pre-update value-diff cache slot, `semantic` sourced from `ied_model`'s new Dbpos-semantics accessors via a parallel `leafSemantics` array on `MmsReportClientMemberRefCacheEntry`, built alongside the existing `lastForwardedValues` cache in `buildMemberRefCache`.
+- `ied_model/` (implemented) — loads an IED's data model from SCL (`.icd`/`.cid`/`.scd`), gated by an `AccessMode` (REPORT_ONLY/READ_ONLY/READ_AND_WRITE). Public boundary: `src/features/ied_model/service/ied_model_api.h`. `goose_subscriber`/`mms_report_client` should get their subscription targets from here, not by re-parsing SCL themselves. `IedModel_getReportSubscriptionTargets` returns `ReportControlBlockTarget*` (object reference with the correct `.RP.`/`.BR.` segment, buffered flag, dataset reference) rather than a bare string, specifically for `mms_report_client`'s use; `GooseSubscriptionTarget` carries the equivalent `datasetReference` for `goose_subscriber`. `IedModel_getDataSetMemberReferences(handle, datasetReference)` returns the ordered, heap-allocated member-reference strings backing one dataset (index i matches the i-th report/GOOSE entry) — purely local, walks the already-parsed SCL `DataSet`, never over-the-wire (see Hard Rules) — this is what both consumers use to label entries by position. Also exposes `IedModel_listIedNames(path, outError)` — lists every `<IED name="...">` at an SCL file's top level without building a full model, for `orchestration`'s optional IED-name auto-detection (see that feature's own bullet below); a file with zero `<IED>` elements is a valid, non-error, empty result. **Hardened against real-world SCL variation** (found integrating against a real Siemens SIPROTEC device and its exported station SCD): `VLAN-ID`/`APPID` are parsed as hex, not decimal-defaulting `strtoul` base-0 (real values like `"000A"` were silently corrupted to `0` under octal autodetection); `<GSE>`'s `MinTime`/`MaxTime` are now read instead of always defaulting; `<SDI>`-wrapped (structured/array) `<DOI>`/`<DAI>` overrides are now recursed into instead of silently dropped; enumerated `<DAI>` `Val` labels are resolved against the DA's real `<EnumType>` ordinal instead of `atoi`'d (a non-numeric label like `"status-only"` used to silently become ordinal `0`, itself a valid-looking wrong value, not a skip); `LDevice/@ldName` (SCL functional naming) is read and threaded into FCDA/LDevice resolution as a third fallback convention. A vendor pattern where control blocks are embedded as escaped text inside `<Private type="...ControlBlockStorage...">` (seen in a raw, unconfigured Siemens device-type template) is detected and warned about rather than silently producing an empty model — actually parsing that escaped payload is out of scope (vendor-specific, speculative). Deliberately **not** hardened, considered and deferred pending real evidence: duplicate `LDevice/@inst` across multiple `<AccessPoint>`s, `DAI/@ix` array indices, `<Val sGroup="N">` setting-group overrides, dotted `doName`/`daName` FCDA shorthand, non-dash-separated MAC address formats. `GSEControl`'s `datSet` was reconsidered for symmetry with `ReportControl`'s now-optional one and deliberately kept required — every real `GSEControl` sample encountered populates it. **Also exposes `IedModel_getDataSetMemberLeafWireTypes`** (mirrors `_getDataSetMemberLeafSemantics` exactly — reads each leaf's already-known `DataAttributeType` directly off its `DataAttribute` node, no new SCL-parsing pass) **plus `IedModel_dataAttributeTypeMatchesMmsType`**, added after a real-hardware finding that the Gap-4 structure-decomposition zip in `mms_report_client`/`goose_subscriber` needed a per-leaf type cross-check, not just the pre-existing count check — see `mms_report_client/`'s own bullet below for the full story.
+- `mms_report_client/` (implemented) — connects to one IED over MMS, discovers its Report Control Blocks via `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on each (`RptEna`, **plus `DatSet`** using `ReportControlBlockTarget.datasetReference` — relying on a server-side default dataset configured only at RCB-creation time turned out to be fragile/version-dependent in practice, so the client always (re-)asserts it explicitly on every enable, matching libiec61850's own reference client example; `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are still left untouched, exactly as the IED's SCL config has them — **`GI` is requested on every enable**, purely to seed the value-diff cache deterministically, see below for the full history: removed entirely once, then reinstated for this narrow reason), and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON stringification is deferred to `ipc_dispatcher` — no JSON library is vendored). `MmsReportEntry.reference` prefers the server's own `ClientReport_getDataReference` (only present if the RCB's `OptFlds` has `DataRef` set) and falls back to a per-RCB cache of `IedModel_getDataSetMemberReferences` results (built once at `MmsReportClient_start`, never rebuilt on reconnect) when the server omits it. Works under every `ied_model` `AccessMode`, including `REPORT_ONLY`. Public boundary: `src/features/mms_report_client/service/mms_report_client_api.h`. Reconnects with exponential backoff via a dedicated supervisor thread (`hal_thread.h`'s `Thread`/`Semaphore`) driven by `IedConnection`'s state-changed handler — see that header's own doc comments for why the handler can't drive reconnection directly (deadlock risk). MMS host/port are caller-supplied (SCL parsing of the MMS `<ConnectedAP>` IP address is out of scope for now — only GOOSE addressing is parsed by `ied_model`). **Supports ACSE password authentication** via `MmsReportClientConfig.acseAuthPassword` (`data/mms_report_client_auth.c`'s `MmsReportClientAuth_configurePasswordAuth`, same third-party calls as `scl_bootstrap`'s own `data/scl_bootstrap_auth.c` — duplicated rather than shared, since features never reach into each other's `data/`/`domain/` layers, only `service/*_api.h`). `NULL` (default) means every association is unauthenticated, unchanged from before this was added. Unlike `scl_bootstrap` (which tries unauthenticated first, then retries once with a password only on rejection, since it's scanning candidates blind), `mms_report_client` applies the configured password unconditionally from the very first connect attempt — it always targets one already-known IED, so there's no ambiguity to resolve with a retry. Applied once, at `MmsReportClientConnection_create` time, to the one `IedConnection` object that's reused across every reconnect (unlike `scl_bootstrap`'s fresh-connection-per-attempt design), so it covers every future reconnect automatically. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/`, including both a correct-password-connects and a wrong-password-never-connects case against a real `SimServer_requireAuthentication`-protected instance. **`MmsReportEntry` also now carries `previousValue`** (see the value-diff filter bullet above and "IPC / Reporting Out" below for the full change-stream rework these back) — an owned clone of the pre-update value-diff cache slot, built alongside the existing `lastForwardedValues` cache in `buildMemberRefCache`.
   **`MmsReportClientConfig.generalInterrogationOnEnable` was removed entirely** (it used to
   default to `true`) — GI proved unreliable on real hardware even after its `reason` bit stopped
   being trusted for filtering (see the value-diff filter bullet above): a device has been
@@ -646,25 +714,156 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   seeded but never forwarded) already gets the same "don't flood the frontend with the initial
   snapshot" outcome without asking the device for one. `enableOneTarget` now only ever sets
   `RCB_ELEMENT_RPT_ENA`[`|RCB_ELEMENT_DATSET`] — matching `goose_subscriber`'s own GI-less design
-  exactly (GOOSE has no GI concept at all). **`enableOneTarget` also now resets the RCB's
-  value-diff cache (`MmsReportClientUseCases_resetValueDiffCache`, under `memberRefCacheLock`)
-  BEFORE issuing the enable write, not after** (the order this codebase originally shipped with)
-  — resetting afterward left a real race window: a report the enable write triggers (this
-  client's own first observation, a foreign client's concurrent GI, or a buffered RCB's
-  redelivery of un-acked backlog content on re-enable) is dispatched on libiec61850's own
-  report-reader thread, entirely independent of how far the supervisor thread has gotten past
-  `IedConnection_setRCBValues` returning — resetting only afterward could lose that race and diff
-  the report against a STALE (pre-disconnect, on reconnect) cache instead of a freshly-cleared
-  one, plausibly surfacing on real hardware as a burst of "everything changed" right after a
-  connect/reconnect. Resetting first closes the window structurally instead of relying on which
-  thread happens to win a scheduling race. Proven via
-  `integration_tests/mms_report_client/`'s reconnect test, which now also documents (in its own
-  comment) that a *buffered* RCB's un-acked backlog accumulates across every pre-disconnect
-  transition made while connected, not just ones made while disconnected — the test deliberately
-  keeps to exactly one pre-disconnect transition to avoid multiple queued entries replaying
-  (each as a separate report) on reconnect, which would otherwise make a genuinely-changed
-  redelivered entry look identical to this bug rather than proving the cache resets cleanly.
+  exactly (GOOSE has no GI concept at all). At the time this GI-removal-then-reinstatement saga
+  played out, `enableOneTarget` also reset the RCB's value-diff cache on every (re-)enable,
+  moved to run BEFORE the enable write rather than after (closing a race window between the write
+  triggering a report and the supervisor thread getting around to resetting). **That reset
+  mechanism has since been removed entirely** (see the "Fifth change in the same family" bullet
+  above, under the reconnect/rollback bugfix family) — the cache is now populated once and
+  preserved forever instead, so there is no reset-timing race left to close; the reconnect test
+  in `integration_tests/mms_report_client/` referenced below should be read with that superseding
+  design in mind.
   **Dynamically creates a dataset for RCBs whose SCL declares no `datSet` at all** (`datSet="Dyn"` in SCL `<ReportSettings>` terms — confirmed against a real device, `E13_6MD`/`IEC 61850v2 JA4 station.scd`: every one of its ~174 `ReportControl` elements omits `datSet`, and RCBs there are parented under the specific LN they report on, not just `LLN0`, contradicting the earlier assumption that an RCB's parent LN is always `LLN0`). Previously this feature deliberately never created datasets itself (`setRCBValues` just failed with `IED_ERROR_OBJECT_VALUE_INVALID`, logged, RCB skipped) — that stance blocked reporting entirely on this whole class of device. Now, `data/mms_report_client_connection.c`'s `getOrCreateDynamicDataset` (called from `enableOneTarget` only when `target->datasetReference` is NULL) synthesizes an association-scoped dataset (`IedConnection_createDataSet` with an `@`-prefixed name — destroyed automatically when the connection closes, so no explicit cleanup/leak risk across reconnects) covering **every FC=ST/MX leaf attribute under the RCB's own LN** — "all the variables" for that LN, by this codebase's existing FC=ST/MX "reportable" convention (see `IedModel_getReadTargets`). The member list comes from a new `ied_model` accessor, `IedModel_getReportableAttributeReferencesForLogicalNode(handle, lnReference)` (`ReportControlBlockTarget` gained an `lnReference` field for this), purely local like every other `ied_model` accessor — never over-the-wire. `mms_report_client_api.c`'s `buildMemberRefCache` uses this same accessor (not just the connection layer) to seed the RCB's reference-labeling/value-diff cache up front, so dynamic RCBs get the exact same reference-labeling/value-diff-filter treatment as SCL-declared ones, no special-casing downstream. A new domain usecase, `MmsReportClientUseCases_buildWireMemberReferences`, converts this codebase's standard `"$"`-joined reference form to `IedConnection_createDataSet`'s required dot/bracket wire form. A per-connect-cycle cache (LN reference → generated dataset name, built fresh in `enableAllTargets`, discarded at the end) de-dupes dataset creation across an LN's redundant reserved RCB instances (e.g. `urcbA..urcbJ` all sharing one LN) — without it, a device like `E13_6MD` would attempt to create the same dataset ~10× over just for one LN's reserved slots. **Known, deliberately unsolved limitations**: no chunking against a device's `maxAttributes` cap (an LN with more reportable leaves than the cap fails `createDataSet` for that LN, falls back to the pre-existing failure mode); no handling of a device's total dataset-count cap being smaller than its unique-LN count (per-LN scope, not per-LDevice) — both are honest, unresolved trade-offs from a design discussion that intentionally deferred multiple stakeholder-specific scope questions rather than guessing. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/mms_report_client/` (a fixture RCB parented under a non-`LLN0` LN, no `datSet` at all, mirroring `E13_6MD`'s real shape).
+  **GI was later reinstated, at explicit user request, after real-world use surfaced a gap the
+  removal above didn't account for**: the removal's own reasoning ("bootstrap suppression alone
+  gets the same outcome without asking the device for one") assumed *some* report always arrives
+  to naturally seed `shouldForwardAndUpdateCache`'s cache first. That's false for a device with no
+  periodic integrity reporting (`IntgPd`) and no other traffic at enable time — without GI, the
+  cache is only ever seeded by whatever report happens to arrive first, and on such a device
+  that's the very first GENUINE value change after connecting. That change gets silently
+  bootstrap-suppressed right along with it (the exact same mechanism that correctly suppresses a
+  real GI snapshot), so only the *second* change onward was ever visible — a real device with this
+  reporting profile would appear to the frontend as if the filter were dropping legitimate
+  changes, because it was. `enableOneTarget` (`data/mms_report_client_connection.c`) now
+  unconditionally sets `RCB_ELEMENT_GI` and calls `ClientReportControlBlock_setGI(rcb, true)` on
+  every enable — first connect and every reconnect alike — no config knob (unlike the pre-removal
+  `generalInterrogationOnEnable` bool this codebase once had; nothing asked for a way to turn it
+  off this time). This is a narrow, deliberate use of GI: it exists ONLY to force an immediate,
+  deterministic snapshot at enable time, and that snapshot is NEVER trusted or forwarded — it lands
+  on the exact same `cached == NULL` bootstrap-suppression branch any other first observation
+  would, in `shouldForwardAndUpdateCache`. At the time this reasoning was written, the cache was
+  also reset immediately before this write on every enable, so GI's snapshot was always diffed
+  against a freshly-cleared cache — **that reset no longer exists** (see the "Fifth change in the
+  same family" bullet above): the cache is populated once and preserved forever, so on a genuine
+  first-ever connect GI's snapshot still lands on the same `cached == NULL` bootstrap branch (the
+  cache is still empty at that point), but on every reconnect after that, GI's snapshot instead
+  diffs against the real, preserved last-known value from before the disconnect. Re-adding GI is
+  safe this time specifically because the OTHER half of the
+  original bugfix — never trusting a report's `reason` bit for filtering, see
+  `shouldForwardAndUpdateCache`'s own doc comment — was never touched or weakened; that, not GI's
+  absence, is what made the original real-hardware flooding bug possible, and it still applies
+  unconditionally to every report regardless of source (this client's own requested GI, a foreign
+  client's concurrent GI, or a buffered RCB's redelivered backlog). On a genuine first-ever
+  connect specifically, the still-empty cache may receive both a GI-triggered snapshot AND a
+  buffered RCB's redelivered backlog carrying the same live value in either order — whichever
+  lands first hits the
+  `cached == NULL` branch and seeds the cache, whichever lands second is then a byte-identical
+  duplicate and is suppressed by the ordinary value-diff check instead; neither ever reaches the
+  callback either way, so this is order-independent by construction, not a race the implementation
+  has to win. `goose_subscriber` is untouched — it has no GI concept at all, and its own
+  `cached == NULL` bootstrap suppression (already order-independent for the same structural reason)
+  needed no equivalent change. `integration_tests/mms_report_client/`'s tests were updated to match
+  the new behavior: the "throwaway seed flip" pattern each test previously used to manually stand
+  in for GI's absence is gone — since GI now seeds the cache deterministically at enable time, the
+  first flip in each test is itself a real, immediately-forwarded change; the reconnect test's
+  redelivery-suppression assertion is unchanged in outcome but its comment now explains the
+  GI/buffered-redelivery order-independence above.
+  **A second, distinct real-hardware bug was found shortly after the GI reinstatement above,
+  against a real production device**: right at connect, a buffered RCB forwarded the SAME report
+  content 3 times in a row — `value == previousValue` on every field — before settling into
+  correct filtering. Root-caused to `shouldForwardAndUpdateCache`'s diff-check
+  (`MmsReportClientUseCases_isDuplicateValue`, and the identical cross-RCB-dedup call in
+  `MmsReportClientUseCases_shouldForwardAcrossRcb`) calling libiec61850's `MmsValue_equals`
+  directly — a raw, byte-exact comparison, confirmed by reading the vendored source, that's wrong
+  for two IEC 61850 types that show up constantly in real report datasets: **`MMS_UTC_TIME`**
+  (`memcmp`s all 8 bytes, but the last byte is a `TimeQuality` flag — leap-second-known/
+  clock-failure/clock-not-synchronized/accuracy — not part of "when did this happen," and can
+  legitimately wobble right around a reconnect even though the displayed millisecond timestamp is
+  unchanged) and **`MMS_BIT_STRING`** (the wire encoding for CODEDENUM/Dbpos/Tcmd-style status
+  points — `memcmp`s the whole buffer INCLUDING unused padding bits, which real device firmware is
+  commonly inconsistent about zero-padding across different report-generation code paths, e.g. a
+  GI-triggered read vs. a live-change report — two values that decode to the identical integer,
+  and thus render identically in the JSON, can still fail a raw `memcmp`). Fixed by a new
+  `valuesAreSemanticallyEqual` (`domain/mms_report_client_usecases.c`) that type-switches: same
+  type required (preserves existing `MmsValue_equals` type-mismatch behavior — not the bug);
+  `MMS_UTC_TIME` compared via `MmsValue_getUtcTimeInMs` (the same accessor `ipc_dispatcher`'s own
+  value codec already uses to render this type, so "same JSON output" now correctly implies "same
+  by this filter" too); `MMS_BIT_STRING` compared via `MmsValue_getBitStringSize` (a guard) plus
+  `MmsValue_getBitStringAsInteger` (again, the same accessor the value codec already uses); every
+  other type falls through to `MmsValue_equals` unchanged. **Affects `goose_subscriber` identically**
+  (`GooseSubscriberUseCases_isDuplicateValue` and `shouldForwardAcrossTarget` both called
+  `MmsValue_equals` directly too — GOOSE frames carry the same DA types) — fixed with an
+  independently-duplicated copy of the same helper in `goose_subscriber_usecases.c`, per this
+  codebase's established per-feature-domain-layer convention. Proven via new unit tests
+  (`tests/mms_report_client/test_mms_report_client_usecases.c`,
+  `tests/goose_subscriber/test_goose_subscriber_usecases.c`) constructing same-value-different-
+  quality-byte `MMS_UTC_TIME` pairs and same-decoded-integer-different-size `MMS_BIT_STRING` pairs
+  directly — **note the exact real-world byte pattern (same declared size, differing UNUSED padding
+  bits) can't be reproduced via the public `MmsValue` API**: `MmsValue_setBitStringBit` itself
+  refuses to touch bit positions ≥ the declared size (confirmed directly in libiec61850's own
+  source), so every `MmsValue` constructible via the public API has its padding bits permanently
+  zeroed by `MmsValue_newBitString`'s own `calloc` — that gap only exists in a real device's own
+  wire encoding, not in anything reachable through well-behaved client code, which is exactly why
+  it was a genuine, hard-to-suspect field bug rather than something a normal test would catch.
+  Separately (not the cause of the wrong comparison, but why the burst happened specifically at
+  connect and then stopped): `supervisorLoop` used to reset `currentBackoffMs` to `0`
+  unconditionally on every *momentary* successful connect, before the connection proved it could
+  stay up — a real, flaky link that connects then bounces right back (unlike the clean loopback
+  simulator, which never does this) got stuck retrying at the initial ~1s backoff tier forever
+  instead of escalating, giving the comparison bug repeated fresh chances to fire in a tight burst
+  right after connect. Fixed by only resetting `currentBackoffMs` if the just-lost connection had
+  actually stayed up for `MMS_REPORT_CLIENT_STABLE_CONNECTION_MS` (`5000`ms) — reuses the existing,
+  already-tested exponential-backoff math (`MmsReportClientUseCases_computeNextBackoffDelay`)
+  unchanged, just fixes *when* it resets rather than inventing a new debounce mechanism.
+  **A third, distinct real-hardware bug was found shortly after, also surfacing after
+  disconnect/reconnect cycles on real hardware**: a structured attribute (`Pos`, a DPC on LN
+  `SCSWI2`) had its `stVal`/`t` sub-elements swapped — `stVal` showed a huge millisecond-timestamp
+  number, `t` showed a plain boolean. Root-caused to the Gap-4 structure-decomposition path
+  (`collectCandidates`, mirrored in `goose_subscriber_usecases.c`): it flattens a structured
+  attribute's wire value (`MmsReportClientUtils_flattenStructure`, walking the received
+  `MmsValue`'s own `MMS_STRUCTURE` element order) and zips it index-for-index against a
+  **locally-resolved** reference list built from this daemon's own parsed SCL file
+  (`IedModel_getDataSetMemberLeafReferences`, a depth-first walk of the SCL `<DOType>`'s literal
+  XML `<DA>`/`<SDO>` child order). The only safety check before trusting this zip was
+  `flattenedCount == memberLeafCounts[i]` — a bare **count** comparison; nothing verified
+  **order**, and nothing in MMS/IEC 61850 requires a `<DOType>`'s declared `<DA>` order to match a
+  real device's actual runtime attribute order (confirmed: `ClientReport_getDataReference`/
+  `OptFlds` `DataRef` cannot help here either — it's fundamentally per-top-level-dataset-member
+  (per-FCDA) only, with no protocol-level concept of a reference for a leaf *inside* a structured
+  value). This same-count-different-order gap was already documented as an *assumption* in
+  `IedModelUseCases_getDataSetMemberLeafReferences`'s own doc comment, but had no actual guard.
+  Fixed with a new `ied_model` accessor, `IedModel_getDataSetMemberLeafWireTypes` (mirrors
+  `_getDataSetMemberLeafReferences`/`_getDataSetMemberLeafSemantics` exactly — same index-aligned,
+  same decomposed-vs-leaf split — but reads each leaf's already-known `DataAttributeType` directly
+  off its `DataAttribute` node, set once at SCL-load time via `IedModelUtils_mapBType`; no new
+  SCL-parsing pass needed, since `struct sDataAttribute` already stores this field, fully exposed
+  in `iec61850_model.h`) plus a new `IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType
+  expected, MmsType actual)` cross-check, called once per decomposed leaf
+  (`decomposedLeafTypesMatch`, both `mms_report_client_usecases.c` and its `goose_subscriber`
+  twin) alongside the existing count check — on ANY leaf's type mismatch, falls back to the raw/
+  non-decomposed entry exactly like a count mismatch already did (silently — same posture, no new
+  logging), rather than trusting a same-count-wrong-order zip. Only implements **confident**,
+  well-established type groupings (BOOLEAN↔`MMS_BOOLEAN`, TIMESTAMP↔`MMS_UTC_TIME`,
+  QUALITY/CODEDENUM/CHECK/GENERIC_BITSTRING/OPTFLDS/TRGOPS↔`MMS_BIT_STRING`, the INT*/FLOAT*/
+  ENUMERATED family↔`MMS_INTEGER`/`MMS_UNSIGNED`/`MMS_FLOAT`, VISIBLE_STRING*/UNICODE_STRING_255↔
+  `MMS_VISIBLE_STRING`/`MMS_STRING`) — per this codebase's "don't guess IEC 61850 semantics" rule,
+  anything not explicitly modeled (`IEC61850_UNKNOWN_TYPE`, `OCTET_STRING_*`, `ENTRY_TIME`,
+  `PHYCOMADDR`, `CURRENCY`, `CONSTRUCTED`) always matches (no check), rather than risk
+  false-positive-rejecting a genuinely well-ordered structure. Proven via new unit tests in both
+  `tests/ied_model/` (the new accessor + the type-compatibility matrix) and both
+  `mms_report_client`/`goose_subscriber` usecases test files (a same-count-different-order fixture
+  — a UTC_TIME value and a boolean swapped into a `stVal`/`t`-labeled pair, exactly reproducing
+  the real-hardware symptom — asserting fallback to the raw entry, plus a regression case proving
+  a genuinely-matching order still decomposes normally). No new E2E test: `ied_simulator` builds
+  its dynamic model directly from the same code that produces its own reference list, so wire
+  order and reference order are inherently always in sync there — this bug class can only be
+  exercised at the unit level with hand-built fixtures, which is what the existing Gap-4
+  decomposition tests already do. Also plausibly explains the "oscillating quality" symptom
+  observed alongside this on the same device: `q` and `stVal` (Dbpos-coded) are both wire-typed
+  `MMS_BIT_STRING`, so if the order mismatch zipped the `...Pos$q` reference to what was actually
+  the wire's `stVal` position, `ipc_dispatcher` would still successfully decode it as quality (it
+  only type-checks for `MMS_BIT_STRING`, which still passed) — just decoding the wrong bits; not
+  independently confirmed, would need real-hardware verification once this fix is deployed.
 - `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
   `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
   GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's
@@ -687,7 +886,7 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   interface-name parsing in SCL, matching `mms_report_client`'s host/port convention). Proven
   end-to-end against a real `ied_simulator` IED publishing real GOOSE frames over `lo` in
   `integration_tests/goose_subscriber/` (requires `sudo` — see Commands). **`GooseSubscriberEntry`
-  also now carries `previousValue`/`semantic`**, mirroring `MmsReportEntry`'s identical addition
+  also now carries `previousValue`**, mirroring `MmsReportEntry`'s identical addition
   exactly (see that feature's own bullet above and "IPC / Reporting Out" below) —
   `shouldForwardAndUpdateCache` here has no `ReasonForInclusion` concept at all, so the same
   "cached==NULL → bootstrap, seed but don't forward" rule is GOOSE's entire mechanism for
@@ -818,28 +1017,14 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   own bitstring never reaches this path at all — `IpcDispatcherUseCases_pairQuality` excludes
   every `q`-named entry from ever being treated as a value, routing it to `_decodeQuality`
   instead (see above), so this addition can't double-decode or conflict with quality handling.
-  **This CODEDENUM ambiguity was later resolved for the specific `Dbpos` case, at explicit user
-  request** (see "IPC / Reporting Out" below): `ied_model`'s SCL loader now retains the DA's real
-  SCL `bType` string at parse time (before `IedModelUtils_mapBType` discards it into the generic
-  `IEC61850_CODEDENUM` bucket) in a new per-handle side table (`IedModelDaSemantic`, keyed by the
-  model-owned `DataAttribute*` pointer — not the vendored `DataAttribute` struct itself, which
-  can't be touched per the Hard Rule below), exposed via `IedModel_getDataSetMemberSemantics`/
-  `_getDataSetMemberLeafSemantics` and threaded onto `MmsReportEntry.semantic`/
-  `GooseSubscriberEntry.semantic`. `IpcDispatcherValueCodec_decodeDbposLabel`
-  (`utils/ipc_dispatcher_value_codec.c`) uses this SCL-confirmed hint — never the bitstring alone —
-  plus libiec61850's own `Dbpos_fromMmsValue` (`iec61850_common.h`) to add an **additive**
-  `"label"`/`"previousLabel"` string (`"intermediate-state"`/`"off"`/`"on"`/`"bad-state"`)
-  alongside the existing raw numeric `value`/`previousValue`, only when the semantic hint confirms
-  a genuine Dbpos — `Tcmd` and any other CODEDENUM still fall back to the raw integer exactly as
-  before, no guessing. **Real bug found and fixed while wiring this up**: `MmsValue_getBitStringAsInteger`
-  (the raw-integer path above) and `Dbpos_fromMmsValue` disagree on bit order for a genuine Dbpos
-  bitstring (confirmed empirically — `DBPOS_OFF`/`DBPOS_ON` come out swapped between the two), so
-  the mms/goose adapters override the raw numeric value with `Dbpos_fromMmsValue`'s own ordinal
-  whenever the label decode succeeds, so `value`/`label` (and `previousValue`/`previousLabel`)
-  never contradict each other in the JSON — seen only for genuine Dbpos points; the raw path is
-  otherwise untouched. This side table is empty for a model built via `IedModel_wrapDynamicModel`
-  (online-discovery has no SCL `bType` to draw from) and for the dynamic ("Dyn"-dataset) RCB
-  fallback path — both are accepted v1 gaps, not silently swept under the rug.
+  **This codebase previously carried a descriptive-label feature for the specific `Dbpos` case
+  (an SCL-derived semantic side table plus an additive `"label"`/`"previousLabel"` JSON field),
+  removed again at explicit user request** so every CODEDENUM value (`Dbpos`, `Tcmd`, or any
+  other) is reported identically — a raw integer via `MmsValue_getBitStringAsInteger`, no
+  per-type special casing anywhere in `ied_model`/`mms_report_client`/`goose_subscriber`/
+  `ipc_dispatcher`. Removal was driven by the same reasoning the original addition's own caveat
+  already flagged: treating one CODEDENUM subtype differently from the rest was itself the
+  discrepancy the user wanted gone, not a value worth keeping despite it.
   Anything else (structures, arrays, octet strings, etc. — not reachable from today's
   leaf-DA-only FCDA datasets) falls back to an owned `"<unsupported:...>"` placeholder string,
   never silently dropped. **Threading is the crux of this feature**: `mms_report_client`'s
@@ -897,12 +1082,13 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   caller-supplied host identically — used for manually-typed candidates, no special-cased
   trust). Optionally gated behind ACSE password auth (one retry, mirroring `scl_bootstrap`'s own
   policy) via its own independent `IedDiscoveryConfig.acseAuthPassword` — features never share
-  config structs across the public boundary. The interactive terminal loop (scan, print a
-  numbered list, let the operator type a number to pick or an IP to add-and-verify a manual
-  candidate) is deliberately kept **out** of this feature entirely, in a separate thin adapter,
-  `src/main_discovery_prompt.c` — the user who requested this explicitly said the interaction
-  medium will likely be replaced later (e.g. driven by the API layer this daemon reports to), so
-  it must be swappable without touching `ied_discovery` itself. Proven end-to-end (`verifyHost`
+  config structs across the public boundary. This feature deliberately has **no interactive
+  medium of its own** — it's driven by `scan_orchestration`'s worker (which calls
+  `IedDiscovery_scanSubnet` once per sweep), which is in turn driven purely by
+  `control_dispatcher`'s `START_SCAN`/`STOP_SCAN` commands now — an in-process terminal adapter
+  (`src/main_discovery_prompt.c`) used to sit in front of this for a boot-time CLI flow but was
+  removed once the control websocket covered the same ground (see this file's own `main.c`
+  Current-State bullet). Proven end-to-end (`verifyHost`
   against a real `ied_simulator` IED, including the ACSE-auth-retry symmetry) in
   `integration_tests/ied_discovery/` — no `sudo` needed. A real subnet scan itself
   (`scanSubnet`/`getifaddrs`) is machine-topology-dependent and not automatable; see that E2E
@@ -1003,6 +1189,37 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   IED Scout instance actually returns, so it would have tested the wrong precondition. Manually
   verify GoCB reference-form/`DstAddress` behavior against a real OMICRON IED Scout instance
   before relying on it in production, per this bullet's own flagged unknowns.
+  **A fourth bug, found against real production hardware (a device whose MMS server never serves
+  an SCL file, forcing it through this loader): every MMS report from such a device showed EVERY
+  data point as `"<unsupported:structure>"` with `quality: null`, while GOOSE on the same device
+  worked fine.** Root cause: `IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef`
+  (`domain/ied_model_online_loader_usecases.c`) built its output using the ACSI reference's whole
+  `"LD/LN"` prefix, unsplit, as the first `$`-segment (e.g.
+  `"VR4C1C01A1LD0/SP16GGIO5$ST$Ind"`) — handed straight to `DataSetEntry_create` as its
+  `variableName`, directly violating this file's own documented dynamic-model gotcha #1 (no
+  LD-wire-name prefix) that the call site's own comment claimed was already satisfied but wasn't.
+  Consequence: `IedModelUseCases_getDataSetMemberLeafReferences` (`ied_model`, shared by both
+  `mms_report_client`/`goose_subscriber`) tokenizes `entry->variableName` on `$` and passes the
+  first token straight to `LogicalDevice_getLogicalNode` as a bare LN name — for every
+  online-discovered member this token was actually `"LD/LN"` combined, so the LN lookup silently
+  failed, `IedModel_getDataSetMemberLeafReferences` returned an empty (not NULL) list — outwardly
+  indistinguishable from "already a leaf, nothing to decompose" — Gap-4 structure decomposition
+  was never attempted for any online-discovered DO-level member, and the raw, undecomposed
+  `MMS_STRUCTURE` reached `ipc_dispatcher`'s value codec, which has no branch for it. GOOSE wasn't
+  affected on this particular device only because its own GOOSE dataset(s) happen to be
+  leaf-level already (or don't include this structured DO) — it shares the exact same buggy
+  conversion and would hit the identical failure for any DO-level GOOSE dataset member. Fixed by
+  splitting the `"LD/LN"` prefix on `/` inside `convertAcsiRefToWireRef` and using only the LN
+  portion in the output, matching the SCL loader's own convention exactly; the misleading "No
+  LD-name prefix" comment at the `DataSetEntry_create` call site
+  (`data/ied_model_online_loader_connection.c`) was corrected to describe what the code actually
+  does now instead of asserting something false. Proven via a new
+  `tests/ied_model_online_loader/test_ied_model_online_loader_usecases.c` (a direct regression
+  test: a DO-level and a leaf-level ACSI reference each now convert to a bare-LN-prefixed wire
+  reference, plus the pre-existing malformed-input/NULL cases) — no existing E2E fixture exercises
+  Gap-4 decomposition through this loader (`integration_tests/ied_model_online_loader/`'s own
+  assertions stop at report/GOOSE target-list shape, not per-report leaf decomposition), so this
+  is unit-level-only coverage for now.
 - `scan_dispatcher/` (implemented) — an eighth feature, a later, deliberate, user-requested
   addition (see Expected-features note above): a near-verbatim structural duplicate of
   `ipc_dispatcher`'s ring-buffer + libwebsockets-service-thread transport (own port, default
@@ -1043,9 +1260,11 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   `_stopScan(handle, scanId)` (returns a `uint64_t scanId`, a simple mutex-guarded monotonic
   counter starting at 1 — no string-alloc churn, and the registry already needs a mutex for the
   active-scan array anyway), and `_snapshotDiscoveredHosts` (a thread-safe read-only snapshot of
-  one scan's currently-announced hosts, for an in-process caller like
-  `main_discovery_prompt.c` that needs the live, growing list without connecting to the
-  daemon's own websocket as a client of itself).
+  one scan's currently-announced hosts, for a LOCAL, in-process caller that needs the live,
+  growing list without connecting to the daemon's own websocket as a client of itself — no such
+  in-process caller exists today since `main_discovery_prompt.c` was removed, but the function
+  stays as public API; every current caller instead gets scan results over `scan_dispatcher`'s
+  own websocket, same as any other client).
   **Per-scan worker** (`data/scan_orchestration_worker.c`): owns a **private**
   `IedDiscoveryHandle` and its own mutex-guarded seen-set of already-announced hosts, looping
   sweep (`IedDiscovery_scanSubnet`, reused as one blocking call per sweep — deliberate
@@ -1145,17 +1364,31 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   proving they didn't fully serialize, distinct deviceIds/ports each streaming real GOOSE JSON,
   stop-one-leaves-other-running, stop-second-frees-port-for-reuse) in
   `integration_tests/device_manager/` — needs `sudo` (GOOSE, inherited transitively).
+  **`device_manager` does NOT watch connection health or auto-stop a device on connection loss** —
+  a device is torn down ONLY by an explicit `STOP_REPORTING` call. A connection-health monitor
+  (a reaper thread that auto-stopped a device on a genuine MMS disconnect or GOOSE staleness
+  transition, broadcasting a `DEVICE_STOPPED` message) was added at one point, then removed again
+  at explicit user request — reverted back to this simpler contract. On a real connection loss,
+  `mms_report_client`/`goose_subscriber`'s own existing, unmodified, retry-forever internal
+  supervisor loops (see their own Architecture bullets above) just keep reconnecting with
+  exponential backoff, exactly as they did before that feature existed — there is no
+  `device_manager`-level reaction to connection state at all, and `Orchestration_setReportConnStateCallback`/
+  `_setGooseStatusCallback` (pre-existing, generic pass-through setters on `orchestration`'s own
+  public API) have no caller anywhere in this codebase.
 - `control_dispatcher/` (implemented) — a ninth feature, the first **bidirectional** websocket
   surface in this codebase: unlike `ipc_dispatcher`/`scan_dispatcher` (push-only, confirmed via
   grep — no `LWS_CALLBACK_RECEIVE` anywhere in either), this one RECEIVES JSON commands
-  (`START_REPORTING`/`STOP_REPORTING`) over its one well-known websocket port (default **8767** —
-  next after `ipc_dispatcher`'s 8765 and `scan_dispatcher`'s 8766; a single shared control
-  channel, not per-device — only the per-device report websockets, from `ipc_dispatcher`, are
-  per-device) and pushes back JSON acks/errors, relaying them to `device_manager`. Public
-  boundary: `src/features/control_dispatcher/service/control_dispatcher_api.h` —
-  `ControlDispatcher_create(config, deviceManager, outError)` (deviceManager borrowed — caller,
-  `main.c`, owns its lifetime) / `_start` / `_stop` / `_destroy`, same create/start/stop/destroy
-  contract as `ipc_dispatcher`/`scan_dispatcher`.
+  (`START_REPORTING`/`STOP_REPORTING`/`START_SCAN`/`STOP_SCAN`) over its one well-known websocket
+  port (default **8767** — next after `ipc_dispatcher`'s 8765 and `scan_dispatcher`'s 8766; a
+  single shared control channel, not per-device — only the per-device report websockets, from
+  `ipc_dispatcher`, are per-device) and pushes back JSON acks/errors, relaying the first pair to
+  `device_manager` and the second pair to `scan_orchestration`. Public boundary:
+  `src/features/control_dispatcher/service/control_dispatcher_api.h` —
+  `ControlDispatcher_create(config, deviceManager, scanOrchestration, outError)` (both handles
+  borrowed — caller, `main.c`, owns their lifetime; both required non-NULL) / `_start` / `_stop` /
+  `_destroy`, same create/start/stop/destroy contract as `ipc_dispatcher`/`scan_dispatcher`. This
+  is the daemon's **only** interface now — `main.c` has no argv, no boot-time device, and no
+  interactive prompt anymore (see this file's own `main.c` Commands/Current-State bullets).
   **This is the first `cJSON_Parse` call in this codebase's production code** —
   `data/control_dispatcher_json_parser.c` — directly correcting the cJSON vendoring bullet's
   former "push-only... no parse counterpart in production code" claim (see that bullet, now
@@ -1177,28 +1410,39 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   (2) The dedicated worker thread (`data/control_dispatcher_worker.c`, `Semaphore_create(0)` as a
   wake signal — the exact idiom `mms_report_client_connection.c`'s own supervisor thread already
   uses) pops the request queue and runs the one genuinely slow call
-  (`DeviceManager_startReporting`/`_stopReporting`) off the lws thread entirely, then pushes the
-  JSON result onto the ring buffer and calls `ControlDispatcherWsServer_wake` (the one
-  libwebsockets call a producer thread may make directly, same rule `ipc_dispatcher`/
+  (`DeviceManager_startReporting`/`_stopReporting` for the two reporting actions;
+  `ScanOrchestration_startScan`/`_stopScan` for the two scan actions) off the lws thread entirely,
+  then pushes the JSON result onto the ring buffer and calls `ControlDispatcherWsServer_wake` (the
+  one libwebsockets call a producer thread may make directly, same rule `ipc_dispatcher`/
   `scan_dispatcher` already document). (3) the lws thread already counted in (1).
   **Request queue** (`data/control_dispatcher_request_queue.c`): bounded FIFO of `ControlRequest*`,
   its own `Semaphore(1)`-as-mutex, deliberately separate from the ring buffer's own lock (different
   producer/consumer thread pairs — queue is lws→worker, ring buffer is worker→lws). A full queue
   is `SERVER_BUSY`, built and returned directly from the lws thread — never blocks it.
   **JSON envelope** (stable contract): inbound
-  `{requestId, action: "START_REPORTING"|"STOP_REPORTING", params: {...}}` (start params: `host`
-  required non-empty, `mmsPort` optional default 102, `iedName` optional unless `sclFilePath` is
-  given (then mandatory), `interfaceId` required non-empty (no `"eth0"` default — that only ever
-  matched developer machines), `sclFilePath`/`acseAuthPassword` optional, `accessMode` optional
-  one of `"REPORT_ONLY"`/`"READ_ONLY"`/`"READ_AND_WRITE"`, default `"REPORT_ONLY"`; stop params:
-  `deviceId` required non-negative integer); outbound `{schemaVersion, requestId, action, success,
-  result, error}` — `error: {code, message, stage?, detail?}`, `code` a stable string mirroring
-  `DeviceManagerError` (`INVALID_ARGUMENT`, `HOST_ALREADY_RUNNING`, `ORCHESTRATION_FAILED`,
-  `DEVICE_NOT_FOUND`, `START_IN_PROGRESS`, `PORT_EXHAUSTED`) plus parse-side codes
+  `{requestId, action: "START_REPORTING"|"STOP_REPORTING"|"START_SCAN"|"STOP_SCAN", params: {...}}`
+  — `START_REPORTING` params: `host` required non-empty, `mmsPort` optional default 102, `iedName`
+  optional unless `sclFilePath` is given (then mandatory), `interfaceId` required non-empty (no
+  `"eth0"` default — that only ever matched developer machines), `sclFilePath`/`acseAuthPassword`
+  optional, `accessMode` optional one of `"REPORT_ONLY"`/`"READ_ONLY"`/`"READ_AND_WRITE"`, default
+  `"REPORT_ONLY"` → success result `{deviceId, wsPort}`; `STOP_REPORTING` params: `deviceId`
+  required non-negative integer → success result `{deviceId}`; `START_SCAN` params: `interfaceId`
+  required non-empty, `mmsPort` optional default 102, `sweepIntervalMs` optional (`0`/omitted =
+  `scan_orchestration`'s own default) — deliberately **no** `acseAuthPassword` field (control-
+  triggered scans are always unauthenticated, `control_dispatcher_usecases.c`'s own comment
+  explains why) → success result `{scanId}`; `STOP_SCAN` params: `scanId` required non-negative
+  integer → success result `{scanId}`. Outbound (every action): `{schemaVersion, requestId,
+  action, success, result, error}` — `error: {code, message, stage?, detail?}`. `code` is a stable
+  string: for the two reporting actions, mirrors `DeviceManagerError` (`INVALID_ARGUMENT`,
+  `HOST_ALREADY_RUNNING`, `ORCHESTRATION_FAILED`, `DEVICE_NOT_FOUND`, `START_IN_PROGRESS`,
+  `PORT_EXHAUSTED`); for the two scan actions, mirrors `ScanOrchestrationError`
+  (`INVALID_ARGUMENT`, `OUT_OF_MEMORY`, `DISPATCHER_START_FAILED`, `THREAD_CREATE_FAILED`,
+  `DISCOVERY_CREATE_FAILED`, `SCAN_NOT_FOUND`); plus parse-side codes shared by all four actions
   (`MALFORMED_REQUEST`, `UNKNOWN_ACTION`, `SERVER_BUSY`); `stage`/`detail` populated only for
-  `ORCHESTRATION_FAILED`, via the new public `OrchestrationUtils_stageToString`/
-  `_candidateStatusToString` (extracted from `main.c`'s own original private helpers so both
-  `main.c` and this feature share one copy instead of duplicating the string tables).
+  `ORCHESTRATION_FAILED` (reporting actions only — the scan actions have no equivalent staged
+  detail), via the public `OrchestrationUtils_stageToString`/`_candidateStatusToString` (extracted
+  from `main.c`'s own original private helpers so both `main.c` and this feature share one copy
+  instead of duplicating the string tables).
   **Fan-out is broadcast to every connected control client** (identical mechanism to
   `ipc_dispatcher`'s own broadcast, filterable client-side by `requestId`) — the simplest
   possible v1 design, reusing the proven ring buffer verbatim; flagged as a real tradeoff if the
@@ -1207,8 +1451,14 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   frames — the first E2E test in this repo to send a client→server frame — and receives
   responses; malformed-JSON/unknown-action cases need no privilege/simulator at all; a real
   `START_REPORTING`/`STOP_REPORTING` round trip against a real `ied_simulator` instance proves
-  the whole chain end to end) in `integration_tests/control_dispatcher/` — needs `sudo` only for
-  that last real-device case.
+  the whole chain end to end; a real `START_SCAN`/`STOP_SCAN` round trip against a real
+  `ScanOrchestrationHandle` over `lo` needs no `sudo`) in `integration_tests/control_dispatcher/`
+  — needs `sudo` only for the `START_REPORTING`/`STOP_REPORTING` real-device case.
+  **No unsolicited `DEVICE_STOPPED` push exists** — an earlier revision added one
+  (`ControlDispatcher_notifyDeviceStopped`), wired to `device_manager`'s connection-health monitor;
+  both were removed together at explicit user request (see `device_manager/`'s own Architecture
+  bullet above) — a device only ever leaves the registry via an explicit `STOP_REPORTING`
+  request/response round trip, which every connected client already gets its own direct ack for.
 
 ## The Two Workers
 - **GOOSE Sniffer** — `GooseReceiver`/`GooseSubscriber` (see `third_party/include/goose_receiver.h`,
@@ -1286,13 +1536,20 @@ GOOSE addressing precision. SCL almost always carries an explicit <GSE><Address>
     dataset entry, not a struct field. Untouched by the reference-labeling work above.
 - **Change-stream rework, at explicit user request**: the websocket output is now a pure stream
   of *changes*, with enough context for the frontend to show what changed and from what:
-  1. **GI/bootstrap snapshots never reach the websocket.** The one-shot startup GI report (and
-     GOOSE's own equivalent — the first frame ever for a target, or the first frame after a
-     STALE/INVALID_STATE→VALID recovery) is cache-seed-only now, never forwarded — see the
-     value-diff filter bullet above for the exact mechanism (`shouldForwardAndUpdateCache`
-     treating a never-cached slot as bootstrap, unconditionally, regardless of reason). A point
-     that never changes after that seed accordingly never
-     reaches the frontend at all — an explicit, accepted tradeoff, not an oversight.
+  1. **The genuine first-ever GI/bootstrap snapshot never reaches the websocket.** The one-shot
+     startup GI report (and GOOSE's own equivalent, the very first frame ever for a target) is
+     cache-seed-only, never forwarded — see the value-diff filter bullet above for the exact
+     mechanism (`shouldForwardAndUpdateCache` treating a never-cached slot as bootstrap,
+     unconditionally, regardless of reason). A point that never changes after that seed
+     accordingly never reaches the frontend at all — an explicit, accepted tradeoff, not an
+     oversight. **This is now ONLY true for that genuine first-ever observation** — the value-diff
+     cache is populated once and preserved for the client/subscriber's whole lifetime (never reset
+     on reconnect or on a STALE/INVALID_STATE→VALID recovery, see the "Fifth change in the same
+     family" bullet under `mms_report_client/`'s own Architecture entry above), so a reconnect's
+     or recovery's own fresh GI/redelivered snapshot diffs against the real, preserved last-known
+     value instead: a genuine change made while disconnected/stale correctly reaches the websocket
+     with a real `previousValue`, exactly like any other change — it is only ever suppressed if the
+     value genuinely didn't change.
   2. **`dataPoints` only ever contains points that actually changed** — this falls out
      automatically from (1): `buildEntries` already only emits forwarded entries, and
      `ipc_dispatcher` only ever serializes what it's handed. One deliberate judgment call: the
@@ -1304,15 +1561,16 @@ GOOSE addressing precision. SCL almost always carries an explicit <GSE><Address>
      whatever was cached for that exact wire position immediately before this report overwrote it
      (`MmsReportEntry.previousValue`/`GooseSubscriberEntry.previousValue`, captured in
      `shouldForwardAndUpdateCache` regardless of that call's own forward/drop outcome, since a
-     later-dragged-in candidate needs its own previous value too). Because GI/bootstrap always
-     seeds the cache first, `previousValue` is populated in essentially every real case once a
-     device has been reporting for any length of time — `NULL`/absent only in the narrow,
-     pre-existing structural case where a wire position has no cache slot at all (`slot < 0` — no
-     `memberRefCache`, or the position isn't covered by it, e.g. parts of the Dyn-RCB fallback
-     path). `ipc_dispatcher` converts `previousValue`/`previousQuality` through the exact same
+     later-dragged-in candidate needs its own previous value too). Because the very first-ever
+     GI/bootstrap observation always seeds the cache, and the cache is never reset again after
+     that (see point 1 above), `previousValue` is populated for essentially every forwarded point
+     once a device has been reporting for any length of time, reconnects included — `NULL`/absent
+     only in the narrow, pre-existing structural case where a wire position has no cache slot at
+     all (`slot < 0` — no `memberRefCache`, or the position isn't covered by it, e.g. parts of the
+     Dyn-RCB fallback path). `ipc_dispatcher` converts `previousValue`/`previousQuality` through the exact same
      value/quality codec as the current value, and the JSON writer emits `previousValue`/
-     `previousQuality` (and `label`/`previousLabel` — see the CODEDENUM/Dbpos paragraph above)
-     always present, `null` when absent, matching `quality`'s own existing convention.
+     `previousQuality` always present, `null` when absent, matching `quality`'s own existing
+     convention.
 
 ## Interaction Style
 - No fluff, no filler. Peer-to-peer technical register.

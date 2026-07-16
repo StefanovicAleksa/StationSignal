@@ -131,65 +131,6 @@ test_convert_bitString_zeroValue(void) {
     IpcDispatcherValueCodec_freeScalar(&scalar);
 }
 
-/* ---- decodeDbposLabel ---- */
-
-void
-test_decodeDbposLabel_allFourOrdinals_produceCorrectLabels(void) {
-    /* Built via Dbpos_toMmsValue (the library's own real Dbpos-encoding
-     * function), not a raw MmsValue_setBitStringFromInteger - the bitstring's
-     * on-wire bit order is an internal library detail, not something this
-     * test should assume matches a naive integer-to-bits mapping. */
-    Dbpos ordinals[4] = { DBPOS_INTERMEDIATE_STATE, DBPOS_OFF, DBPOS_ON, DBPOS_BAD_STATE };
-    const char* expected[4] = { "intermediate-state", "off", "on", "bad-state" };
-
-    for (int i = 0; i < 4; i++) {
-        MmsValue* v = Dbpos_toMmsValue(NULL, ordinals[i]);
-
-        const char* label = NULL;
-        bool ok = IpcDispatcherValueCodec_decodeDbposLabel(IED_MODEL_DA_SEMANTIC_DBPOS, v, &label);
-
-        TEST_ASSERT_TRUE_MESSAGE(ok, "expected a genuine Dbpos-typed bitstring to decode successfully");
-        TEST_ASSERT_EQUAL_STRING(expected[i], label);
-
-        MmsValue_delete(v);
-    }
-}
-
-void
-test_decodeDbposLabel_returnsFalse_whenSemanticIsNotDbpos(void) {
-    /* Proves this never guesses from the bit pattern alone - even a
-     * bit-for-bit identical bitstring must be refused without the
-     * SCL-confirmed Dbpos semantic hint (e.g. a Tcmd sharing the same wire
-     * representation - see IedModelUtils_mapBType's own doc comment). */
-    fixtureValue = Dbpos_toMmsValue(NULL, DBPOS_ON);
-
-    const char* label = NULL;
-    bool ok = IpcDispatcherValueCodec_decodeDbposLabel(IED_MODEL_DA_SEMANTIC_NONE, fixtureValue, &label);
-
-    TEST_ASSERT_FALSE(ok);
-    TEST_ASSERT_NULL(label);
-}
-
-void
-test_decodeDbposLabel_returnsFalse_onNullValue(void) {
-    const char* label = NULL;
-    bool ok = IpcDispatcherValueCodec_decodeDbposLabel(IED_MODEL_DA_SEMANTIC_DBPOS, NULL, &label);
-
-    TEST_ASSERT_FALSE(ok);
-    TEST_ASSERT_NULL(label);
-}
-
-void
-test_decodeDbposLabel_returnsFalse_onNonBitstringValue(void) {
-    fixtureValue = MmsValue_newBoolean(true);
-
-    const char* label = NULL;
-    bool ok = IpcDispatcherValueCodec_decodeDbposLabel(IED_MODEL_DA_SEMANTIC_DBPOS, fixtureValue, &label);
-
-    TEST_ASSERT_FALSE(ok);
-    TEST_ASSERT_NULL(label);
-}
-
 /* ---- decodeQuality ---- */
 
 void
@@ -244,11 +185,6 @@ main(void) {
     RUN_TEST(test_convert_unsupportedType_producesRawPlaceholder);
     RUN_TEST(test_convert_bitString_decodesAsRawUnsignedInteger);
     RUN_TEST(test_convert_bitString_zeroValue);
-
-    RUN_TEST(test_decodeDbposLabel_allFourOrdinals_produceCorrectLabels);
-    RUN_TEST(test_decodeDbposLabel_returnsFalse_whenSemanticIsNotDbpos);
-    RUN_TEST(test_decodeDbposLabel_returnsFalse_onNullValue);
-    RUN_TEST(test_decodeDbposLabel_returnsFalse_onNonBitstringValue);
 
     RUN_TEST(test_decodeQuality_good);
     RUN_TEST(test_decodeQuality_questionableWithTestFlag);

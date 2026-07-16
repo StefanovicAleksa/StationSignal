@@ -310,8 +310,26 @@ test_twoConcurrentDevices_independentPortsAndReporting_thenStopAndPortReuse(void
     TEST_ASSERT_TRUE_MESSAGE(wsA >= 0, "websocket handshake to device A's own ipc_dispatcher failed");
     TEST_ASSERT_TRUE_MESSAGE(wsB >= 0, "websocket handshake to device B's own ipc_dispatcher failed");
 
+    /* goose_subscriber bootstrap-suppresses the very first frame it ever
+     * observes for a target (cached==NULL -> silently seed, never forward -
+     * GOOSE's equivalent of MMS's GI suppression, see CLAUDE.md). This
+     * simulator's GSE MinTime/MaxTime is 10ms/5000ms (sim_server.c), so
+     * nothing guarantees a natural heartbeat lands between goose_subscriber
+     * starting reception (just now, inside DeviceManager_startReporting) and
+     * this flip - if none does, THIS flip's own resulting frame becomes the
+     * "first frame ever" and would be silently suppressed, timing out the
+     * assertion below with no further change ever occurring to reveal it.
+     * integration_tests/goose_subscriber/'s own dedicated E2E test avoids
+     * this by waiting for a VALID liveness status before flipping; this test
+     * has no per-device liveness signal to wait on (only the outward-facing
+     * ipc_dispatcher websocket), so it flips twice instead: the first flip is
+     * a throwaway seed (whether or not it's actually the bootstrap frame),
+     * the second is what's actually asserted on. */
     SimServer_setIndication(fixtureSimA, true);
     SimServer_setIndication(fixtureSimB, true);
+    Thread_sleep(500);
+    SimServer_setIndication(fixtureSimA, false);
+    SimServer_setIndication(fixtureSimB, false);
 
     TEST_ASSERT_TRUE_MESSAGE(waitForGooseFrame(wsA), "expected a real GOOSE JSON message from device A");
     TEST_ASSERT_TRUE_MESSAGE(waitForGooseFrame(wsB), "expected a real GOOSE JSON message from device B");

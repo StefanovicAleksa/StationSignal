@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>frontend prototype: scan -> click -> report</title>
+<title>frontend prototype: multi-scan + multi-device reporting</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -16,6 +16,7 @@
     max-width: 100%;
   }
   h2 { margin: 0 0 0.4em; font-size: 1.05em; }
+  h3 { margin: 0 0 0.3em; font-size: 0.95em; }
   .status { font-weight: bold; }
   .columns {
     display: flex;
@@ -39,7 +40,7 @@
     margin: 0.5em 0;
   }
   .controlsRow label { white-space: nowrap; font-size: 0.9em; }
-  input[type="text"], input[type="number"] {
+  input[type="text"], input[type="number"], select {
     background: #000;
     color: #0f0;
     border: 1px solid #444;
@@ -48,6 +49,7 @@
     font-family: inherit;
     width: 7em;
   }
+  select { width: auto; }
   button {
     background: #1a1a1a;
     color: #0f0;
@@ -57,7 +59,9 @@
     cursor: pointer;
     font-family: inherit;
   }
+  button.danger { border-color: #a00; color: #f66; }
   button:hover:not(:disabled) { background: #0a2a0a; }
+  button.danger:hover:not(:disabled) { background: #2a0a0a; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .scrollList {
     max-height: 40vh;
@@ -75,6 +79,20 @@
     border-radius: 4px;
   }
   .deviceRow:hover { background: #222; }
+  .scanPanel {
+    border: 1px solid #063;
+    border-radius: 4px;
+    padding: 0.5em;
+    margin: 0.5em 0;
+    background: #0d140d;
+  }
+  .scanPanel.external { border-color: #630; background: #140d0d; }
+  .scanPanelHead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5em;
+  }
   .logEntry {
     border-left: 4px solid #0f0;
     margin: 0.5em 0;
@@ -93,7 +111,9 @@
     border: 1px solid #333;
     border-radius: 4px;
   }
+  .reportCard.stopped { opacity: 0.5; border-color: #666; }
   .hint { color: #888; font-size: 0.85em; }
+  hr.sep { border: none; border-top: 1px solid #222; margin: 0.75em 0; }
 </style>
 </head>
 <body>
@@ -101,60 +121,111 @@
 <div class="columns">
 
   <div class="panel">
-    <h2>Scanning (scan_dispatcher, ws://127.0.0.1:8766)</h2>
-    <div id="scanWsStatus" class="status">not connected (starts once a scan runs)</div>
+    <h2>Scanning (scan_dispatcher, ws://127.0.0.1:8766 — one shared socket for every concurrent scan)</h2>
+    <div id="scanWsStatus" class="status">not connected (starts once the first scan runs)</div>
+    <div id="scanControlStatus" class="hint">control_dispatcher: connecting...</div>
 
     <div class="controlsRow">
       <label>interface <input type="text" id="f_scanInterfaceId" value="lo" size="8"></label>
       <label>mmsPort <input type="number" id="f_scanMmsPort" value="102"></label>
       <label>sweepIntervalMs <input type="number" id="f_sweepIntervalMs" value="0" title="0 = server default"></label>
-      <button id="btnStartScan">Start Scan</button>
-      <button id="btnStopScan" disabled>Stop Scan</button>
+      <button id="btnStartScan" disabled>Start New Scan</button>
     </div>
-    <div class="hint">note: scanning "lo" will never list any devices (loopback's real netmask is /8 -
-      always fails fast with SUBNET_TOO_LARGE, tolerated silently) - point this at a real LAN
-      interface to actually discover something, or test the bundled simulator directly via
-      <code>startReporting("127.0.0.1", 10202, {style:{}})</code> in the console instead.</div>
-    <div id="scanControlStatus" class="hint">control_dispatcher: connecting...</div>
-    <div id="activeScanInfo" class="hint"></div>
-
-    <div class="controlsRow">
-      <label>interfaceId used to start reporting: <input type="text" id="f_interfaceId" value="lo" size="8"></label>
+    <div class="hint">
+      Click "Start New Scan" more than once (different interface/port each time, or even the
+      same one) to prove multiple scans run concurrently — each gets its own scanId and its own
+      Stop button below, but all of them stream SCAN_RESULT messages over the one shared
+      scan_dispatcher socket, routed here by scanId. Scanning "lo" will never list any devices
+      (loopback's real netmask is /8 — always fails fast with SUBNET_TOO_LARGE, tolerated
+      silently); point a scan at a real LAN interface to actually discover something, or use the
+      "Start Reporting Manually" panel below to test devices directly by IP.
     </div>
 
-    <div id="devices" class="scrollList"></div>
+    <div id="scanPanels"></div>
   </div>
 
   <div class="panel">
-    <h2>Now Reporting (control_dispatcher, ws://127.0.0.1:8767)</h2>
+    <h2>Start Reporting Manually (control_dispatcher, START_REPORTING)</h2>
+    <div class="hint">
+      Bypasses discovery entirely — use this to test reporting on several devices at once
+      without needing a real LAN scan to find them. E.g. build/run
+      <code>integration_tests/ied_simulator</code> twice on loopback at two different ports
+      (<code>./ied_simulator 10501 &amp;</code> and <code>./ied_simulator 10502 &amp;</code>,
+      matching <code>integration_tests/device_manager</code>'s own fixture ports) with
+      interface <code>lo</code>, and start reporting on both below to prove concurrent
+      multi-device reporting.
+    </div>
+    <div class="controlsRow">
+      <label>host <input type="text" id="m_host" value="127.0.0.1" size="10"></label>
+      <label>mmsPort <input type="number" id="m_mmsPort" value="10501"></label>
+      <label>interface <input type="text" id="m_interfaceId" value="lo" size="8"></label>
+    </div>
+    <div class="controlsRow">
+      <label>iedName <input type="text" id="m_iedName" placeholder="(auto-detect)" size="10"></label>
+      <label>sclFilePath <input type="text" id="m_sclFilePath" placeholder="(discover)" size="14"></label>
+      <label>acseAuthPassword <input type="text" id="m_acseAuthPassword" placeholder="(none)" size="8"></label>
+      <label>accessMode
+        <select id="m_accessMode">
+          <option value="REPORT_ONLY" selected>REPORT_ONLY</option>
+          <option value="READ_ONLY">READ_ONLY</option>
+          <option value="READ_AND_WRITE">READ_AND_WRITE</option>
+        </select>
+      </label>
+    </div>
+    <div class="controlsRow">
+      <button id="btnManualStart" disabled>Start Reporting</button>
+      <span id="manualStartStatus" class="hint"></span>
+    </div>
+
+    <hr class="sep">
+    <h2>Now Reporting (control_dispatcher, per-device ipc_dispatcher websockets)</h2>
     <div id="controlStatus" class="status">connecting...</div>
-    <div id="reporting" class="scrollList" style="max-height: 70vh;"></div>
+    <div id="reporting" class="scrollList" style="max-height: 60vh;"></div>
   </div>
 
 </div>
 
 <script>
   const scanWsStatusEl = document.getElementById("scanWsStatus");
-  const devicesEl = document.getElementById("devices");
-  const controlStatusEl = document.getElementById("controlStatus");
   const scanControlStatusEl = document.getElementById("scanControlStatus");
-  const activeScanInfoEl = document.getElementById("activeScanInfo");
+  const scanPanelsEl = document.getElementById("scanPanels");
+  const controlStatusEl = document.getElementById("controlStatus");
   const reportingEl = document.getElementById("reporting");
   const btnStartScan = document.getElementById("btnStartScan");
-  const btnStopScan = document.getElementById("btnStopScan");
+  const btnManualStart = document.getElementById("btnManualStart");
+  const manualStartStatusEl = document.getElementById("manualStartStatus");
 
-  // key = "host:mmsPort" -> { host, mmsPort, el }
-  const discovered = new Map();
-  // key = "host:mmsPort" -> { deviceId, wsPort, ws, mmsCount, gooseCount, otherCount, el }
+  // scanId -> { interfaceId, mmsPort, panelEl, listEl, headEl, external }
+  const scans = new Map();
+  // "host:mmsPort" -> [row elements] across every scan panel that discovered it
+  const keyToRows = new Map();
+  // "host:mmsPort" -> { deviceId, wsPort, ws, mmsCount, gooseCount, otherCount, cardEl, stopBtn }
   const reporting = new Map();
+
   let requestSeq = 0;
-  // requestId -> { kind: "startReporting"|"startScan"|"stopScan", key? }
+  // requestId -> descriptor, see each send-site below for the shape used
   const pendingRequests = new Map();
-  let activeScanId = null;
 
   function nextRequestId() {
     requestSeq += 1;
     return `req-${Date.now()}-${requestSeq}`;
+  }
+
+  // Guards every outbound control_dispatcher send against a not-yet-open (or
+  // dropped mid-session) socket - controlWs/isControlWsOpen are defined
+  // further down (control_dispatcher section) but already assigned by the
+  // time any of these sends actually run, since they only fire from later
+  // user interaction, never at script-parse time. Returns false (and drops
+  // the pending request so it doesn't dangle forever) if the socket isn't
+  // open right now.
+  function sendControl(requestId, payload) {
+    if (!isControlWsOpen()) {
+      pendingRequests.delete(requestId);
+      console.error("control_dispatcher not connected - dropped", payload);
+      return false;
+    }
+    controlWs.send(JSON.stringify(payload));
+    return true;
   }
 
   function prependEntry(container, color, label, bodyText) {
@@ -169,29 +240,51 @@
     container.insertBefore(entry, container.firstChild);
   }
 
-  // ---- scan_dispatcher (8766): render discovered devices as a clickable list ----
-  // Only binds once a scan is actually running (see control_dispatcher's
-  // START_SCAN action below), so this connects lazily with retry rather than
-  // assuming the port is already up at page load.
-
-  let scanWs = null;
-
-  // Keeps the "active scan #N - ..." line in sync with scanWs's actual
-  // connection state, instead of freezing on whatever text startScan's
-  // response handler wrote once and never touching it again (the bug that
-  // made this line permanently say "waiting for scan_dispatcher to bind..."
-  // even after scan_dispatcher was already connected and streaming).
-  function updateActiveScanInfo() {
-    if (activeScanId === null) return; // stopScan's own handler owns the text once stopped
-    if (scanWs && scanWs.readyState === WebSocket.OPEN) {
-      activeScanInfoEl.textContent = `active scan #${activeScanId} - scan_dispatcher connected, listening for devices...`;
-    } else {
-      activeScanInfoEl.textContent = `active scan #${activeScanId} - waiting for scan_dispatcher to (re)connect...`;
-    }
+  function registerRow(key, rowEl) {
+    if (!keyToRows.has(key)) keyToRows.set(key, []);
+    keyToRows.get(key).push(rowEl);
+    // if this device is already reporting (discovered by a second scan, or
+    // was already started manually), reflect that immediately instead of
+    // waiting for the next state transition.
+    if (reporting.has(key)) rowEl.style.borderColor = "#0f0";
   }
 
-  function connectScanWs() {
-    if (scanWs && (scanWs.readyState === WebSocket.OPEN || scanWs.readyState === WebSocket.CONNECTING)) return;
+  function paintRows(key, color) {
+    const rows = keyToRows.get(key);
+    if (!rows) return;
+    rows.forEach((el) => { el.style.borderColor = color; });
+  }
+
+  // ---- scan_dispatcher (8766): ONE shared socket for every concurrent scan ----
+  // Routes each SCAN_RESULT by its scanId to that scan's own panel. A scanId
+  // this page didn't start itself (e.g. started from another tab/client) gets
+  // a lightweight read-only "external" panel auto-created on first sighting -
+  // this is what actually proves "multiple scans running at the same time"
+  // when the scans weren't all started from this one page.
+
+  let scanWs = null;
+  let scanWsRetryTimer = null;
+
+  // `force`: tear down and replace whatever scanWs currently is, even if it's
+  // still CONNECTING - used right after a START_SCAN success, when we know
+  // the server just bound this socket and any in-flight attempt from BEFORE
+  // that (e.g. the page-load-time connectScanWs() call below, made while
+  // nothing was listening yet - scan_dispatcher only binds on the first
+  // active scan) is stale and should not be trusted to ever resolve on its
+  // own. Without `force`, the readyState-based guard below would skip
+  // reconnecting entirely if that stale attempt happened to still be sitting
+  // in CONNECTING (not yet failed) at that exact moment, silently missing
+  // every SCAN_RESULT for however long it takes that stale attempt to time
+  // out and the passive retry loop to catch up - this is what made "the
+  // first scan never shows results, the second one works" reproducible.
+  function connectScanWs(force) {
+    if (!force && scanWs && (scanWs.readyState === WebSocket.OPEN || scanWs.readyState === WebSocket.CONNECTING)) return;
+
+    if (scanWsRetryTimer) { clearTimeout(scanWsRetryTimer); scanWsRetryTimer = null; }
+    if (scanWs && scanWs.readyState !== WebSocket.CLOSED) {
+      scanWs.onopen = scanWs.onerror = scanWs.onclose = scanWs.onmessage = null;
+      scanWs.close();
+    }
 
     scanWs = new WebSocket("ws://127.0.0.1:8766");
     scanWsStatusEl.textContent = "connecting...";
@@ -200,18 +293,15 @@
     scanWs.onopen = () => {
       scanWsStatusEl.textContent = "CONNECTED";
       scanWsStatusEl.style.color = "#0f0";
-      updateActiveScanInfo();
     };
     scanWs.onerror = () => {
       scanWsStatusEl.textContent = "ERROR (retrying)";
       scanWsStatusEl.style.color = "#f00";
-      updateActiveScanInfo();
     };
     scanWs.onclose = () => {
       scanWsStatusEl.textContent = "not connected (retrying...)";
       scanWsStatusEl.style.color = "#f80";
-      updateActiveScanInfo();
-      setTimeout(connectScanWs, 2000);
+      scanWsRetryTimer = setTimeout(connectScanWs, 500);
     };
 
     scanWs.onmessage = (e) => {
@@ -219,147 +309,270 @@
       try { parsed = JSON.parse(e.data); } catch (err) { return; }
       if (!parsed || parsed.type !== "SCAN_RESULT") return;
 
+      let scan = scans.get(parsed.scanId);
+      if (!scan) scan = createScanPanel(parsed.scanId, null, null, true);
+
       const key = `${parsed.host}:${parsed.mmsPort}`;
-      if (discovered.has(key)) return; // already listed
+      if (scan.discovered.has(key)) return; // already listed under this scan
 
       const row = document.createElement("div");
       row.className = "deviceRow";
       row.textContent = `${parsed.host}:${parsed.mmsPort}  (found ${new Date(parsed.discoveredAtMs).toLocaleTimeString()})`;
-      row.onclick = () => startReporting(parsed.host, parsed.mmsPort, row);
+      row.onclick = () => startReporting(parsed.host, parsed.mmsPort, {
+        interfaceId: scan.interfaceId || document.getElementById("m_interfaceId").value,
+        iedName: null, sclFilePath: null, acseAuthPassword: null, accessMode: "REPORT_ONLY",
+      }, key);
 
-      devicesEl.appendChild(row);
-      discovered.set(key, { host: parsed.host, mmsPort: parsed.mmsPort, el: row });
+      scan.listEl.appendChild(row);
+      scan.discovered.set(key, row);
+      registerRow(key, row);
     };
   }
   connectScanWs();
 
+  function createScanPanel(scanId, interfaceId, mmsPort, external) {
+    const panel = document.createElement("div");
+    panel.className = "scanPanel" + (external ? " external" : "");
+    panel.innerHTML = `
+      <div class="scanPanelHead">
+        <h3>scan #${scanId}${external ? " (external — not started from this page)" : ""}
+          ${interfaceId ? ` — ${interfaceId}:${mmsPort}` : ""}</h3>
+        <button class="danger stopScanBtn">Stop</button>
+      </div>
+      <div class="scanListEl scrollList" style="max-height: 20vh;"></div>
+    `;
+    scanPanelsEl.appendChild(panel);
+
+    const scan = {
+      interfaceId, mmsPort, panelEl: panel,
+      listEl: panel.querySelector(".scanListEl"),
+      discovered: new Map(),
+    };
+    scans.set(scanId, scan);
+
+    panel.querySelector(".stopScanBtn").onclick = () => stopScan(scanId);
+    return scan;
+  }
+
+  function stopScan(scanId) {
+    const scan = scans.get(scanId);
+    if (!scan) return;
+    const btn = scan.panelEl.querySelector(".stopScanBtn");
+    btn.disabled = true;
+    btn.textContent = "stopping...";
+
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "stopScan", scanId });
+    sendControl(requestId, { requestId, action: "STOP_SCAN", params: { scanId } });
+  }
+
   // ---- control_dispatcher (8767): START_REPORTING/STOP_REPORTING/START_SCAN/STOP_SCAN ----
+  // Reconnects with retry, same as scanWs above - a plain one-shot `new
+  // WebSocket(...)` created once at page load never recovers if the daemon
+  // wasn't listening yet at that instant (or restarts later): the socket
+  // fails/closes once and nothing ever calls `new WebSocket(...)` again, so
+  // the page is left permanently stuck on CLOSED even after the daemon comes
+  // up - this is the exact "never properly connects, even when it's running"
+  // symptom if the page happened to load before (or was left open across) a
+  // daemon (re)start.
 
-  const controlWs = new WebSocket("ws://127.0.0.1:8767");
+  let controlWs = null;
 
-  controlWs.onopen = () => {
-    controlStatusEl.textContent = "CONNECTED";
-    controlStatusEl.style.color = "#0f0";
-    scanControlStatusEl.textContent = "control_dispatcher: connected";
-  };
-  controlWs.onerror = () => {
-    controlStatusEl.textContent = "ERROR";
-    controlStatusEl.style.color = "#f00";
-    scanControlStatusEl.textContent = "control_dispatcher: error";
-  };
-  controlWs.onclose = () => {
-    controlStatusEl.textContent = "CLOSED";
-    controlStatusEl.style.color = "#f80";
-    scanControlStatusEl.textContent = "control_dispatcher: closed";
-  };
+  function isControlWsOpen() {
+    return controlWs && controlWs.readyState === WebSocket.OPEN;
+  }
 
-  controlWs.onmessage = (e) => {
-    let parsed;
-    try { parsed = JSON.parse(e.data); } catch (err) { return; }
-    if (!parsed) return;
+  function connectControlWs() {
+    if (controlWs && (controlWs.readyState === WebSocket.OPEN || controlWs.readyState === WebSocket.CONNECTING)) return;
 
-    const pending = pendingRequests.get(parsed.requestId);
-    pendingRequests.delete(parsed.requestId);
-    if (!pending) return;
+    controlWs = new WebSocket("ws://127.0.0.1:8767");
+    controlStatusEl.textContent = "connecting...";
+    controlStatusEl.style.color = "#0af";
 
-    if (pending.kind === "startReporting") {
-      if (parsed.success && parsed.result) {
-        beginStreaming(pending.key, parsed.result.deviceId, parsed.result.wsPort);
-      } else {
-        const dev = discovered.get(pending.key);
-        if (dev) {
-          dev.el.style.borderColor = "#f00";
-          dev.el.title = parsed.error ? parsed.error.message : "start failed";
-        }
-      }
-    } else if (pending.kind === "startScan") {
-      if (parsed.success && parsed.result) {
-        activeScanId = parsed.result.scanId;
-        updateActiveScanInfo();
-        btnStartScan.disabled = true;
-        btnStopScan.disabled = false;
-        connectScanWs();
-      } else {
-        activeScanInfoEl.textContent = `START_SCAN failed: ${parsed.error ? parsed.error.message : "unknown error"}`;
-      }
-    } else if (pending.kind === "stopScan") {
-      if (parsed.success) {
-        activeScanInfoEl.textContent = activeScanId !== null ? `scan #${activeScanId} stopped` : "";
-      } else {
-        activeScanInfoEl.textContent = `STOP_SCAN failed: ${parsed.error ? parsed.error.message : "unknown error"}`;
-      }
-      activeScanId = null;
+    controlWs.onopen = () => {
+      controlStatusEl.textContent = "CONNECTED";
+      controlStatusEl.style.color = "#0f0";
+      scanControlStatusEl.textContent = "control_dispatcher: connected";
       btnStartScan.disabled = false;
-      btnStopScan.disabled = true;
-    }
-  };
+      btnManualStart.disabled = false;
+    };
+    controlWs.onerror = () => {
+      controlStatusEl.textContent = "ERROR (retrying)";
+      controlStatusEl.style.color = "#f00";
+      scanControlStatusEl.textContent = "control_dispatcher: error";
+    };
+    controlWs.onclose = () => {
+      controlStatusEl.textContent = "not connected (retrying...)";
+      controlStatusEl.style.color = "#f80";
+      scanControlStatusEl.textContent = "control_dispatcher: closed";
+      btnStartScan.disabled = true;
+      btnManualStart.disabled = true;
+      setTimeout(connectControlWs, 2000);
+    };
+
+    controlWs.onmessage = (e) => {
+      let parsed;
+      try { parsed = JSON.parse(e.data); } catch (err) { return; }
+      if (!parsed) return;
+
+      const pending = pendingRequests.get(parsed.requestId);
+      if (!pending) return; // broadcast to every client - ignore requests this tab didn't send
+      pendingRequests.delete(parsed.requestId);
+
+      if (pending.kind === "startReporting") {
+        if (parsed.success && parsed.result) {
+          beginStreaming(pending.key, parsed.result.deviceId, parsed.result.wsPort);
+        } else {
+          paintRows(pending.key, "#f00");
+          const msg = parsed.error ? `${parsed.error.code}: ${parsed.error.message}` : "start failed";
+          if (pending.manualStatusEl) pending.manualStatusEl.textContent = msg;
+          console.error("START_REPORTING failed", pending.key, parsed.error);
+        }
+      } else if (pending.kind === "stopReporting") {
+        const rec = reporting.get(pending.key);
+        if (parsed.success) {
+          if (rec) {
+            if (rec.ws) rec.ws.close();
+            rec.cardEl.classList.add("stopped");
+            rec.cardEl.querySelector(".rStatus").textContent = "STOPPED (STOP_REPORTING ok)";
+            rec.stopBtn.remove();
+            reporting.delete(pending.key);
+          }
+          paintRows(pending.key, "#666");
+        } else {
+          if (rec) {
+            rec.stopBtn.disabled = false;
+            rec.stopBtn.textContent = "Stop Reporting";
+          }
+          console.error("STOP_REPORTING failed", pending.key, parsed.error);
+        }
+      } else if (pending.kind === "startScan") {
+        if (parsed.success && parsed.result) {
+          const scanId = parsed.result.scanId;
+          pending.placeholderPanel.remove();
+          createScanPanel(scanId, pending.interfaceId, pending.mmsPort, false);
+          connectScanWs(true);
+        } else {
+          pending.placeholderPanel.querySelector("h3").textContent =
+            `START_SCAN failed: ${parsed.error ? parsed.error.message : "unknown error"}`;
+          pending.placeholderPanel.querySelector(".stopScanBtn").remove();
+          setTimeout(() => pending.placeholderPanel.remove(), 4000);
+        }
+      } else if (pending.kind === "stopScan") {
+        const scan = scans.get(pending.scanId);
+        if (scan) {
+          if (parsed.success) {
+            scan.panelEl.remove();
+          } else {
+            const btn = scan.panelEl.querySelector(".stopScanBtn");
+            btn.disabled = false;
+            btn.textContent = "Stop";
+            console.error("STOP_SCAN failed", pending.scanId, parsed.error);
+          }
+        }
+        if (parsed.success) scans.delete(pending.scanId);
+      }
+    };
+  }
+  connectControlWs();
 
   btnStartScan.onclick = () => {
-    const requestId = nextRequestId();
-    pendingRequests.set(requestId, { kind: "startScan" });
+    const interfaceId = document.getElementById("f_scanInterfaceId").value;
+    const mmsPort = parseInt(document.getElementById("f_scanMmsPort").value, 10) || 102;
+    const sweepIntervalMs = parseInt(document.getElementById("f_sweepIntervalMs").value, 10) || 0;
 
-    controlWs.send(JSON.stringify({
+    // placeholder panel shown immediately (scanId isn't known until the
+    // response arrives) - lets you click "Start New Scan" repeatedly without
+    // waiting, proving several starts can be in flight at once.
+    const placeholderPanel = document.createElement("div");
+    placeholderPanel.className = "scanPanel";
+    placeholderPanel.innerHTML = `
+      <div class="scanPanelHead">
+        <h3>starting scan on ${interfaceId}:${mmsPort}...</h3>
+        <button class="danger stopScanBtn" disabled>Stop</button>
+      </div>
+      <div class="scrollList" style="max-height: 20vh;"></div>
+    `;
+    scanPanelsEl.appendChild(placeholderPanel);
+
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "startScan", interfaceId, mmsPort, placeholderPanel });
+    sendControl(requestId, {
       requestId,
       action: "START_SCAN",
-      params: {
-        interfaceId: document.getElementById("f_scanInterfaceId").value,
-        mmsPort: parseInt(document.getElementById("f_scanMmsPort").value, 10) || 102,
-        sweepIntervalMs: parseInt(document.getElementById("f_sweepIntervalMs").value, 10) || 0,
-      },
-    }));
-    activeScanInfoEl.textContent = "starting scan...";
+      params: { interfaceId, mmsPort, sweepIntervalMs },
+    });
   };
 
-  btnStopScan.onclick = () => {
-    if (activeScanId === null) return;
-    const requestId = nextRequestId();
-    pendingRequests.set(requestId, { kind: "stopScan" });
+  function startReporting(host, mmsPort, opts, key, manualStatusEl) {
+    key = key || `${host}:${mmsPort}`;
+    if (reporting.has(key)) {
+      if (manualStatusEl) manualStatusEl.textContent = `already reporting on ${key}`;
+      return;
+    }
 
-    controlWs.send(JSON.stringify({
-      requestId,
-      action: "STOP_SCAN",
-      params: { scanId: activeScanId },
-    }));
-    activeScanInfoEl.textContent = `stopping scan #${activeScanId}...`;
-  };
-
-  function startReporting(host, mmsPort, rowEl) {
-    const key = `${host}:${mmsPort}`;
-    if (reporting.has(key)) return; // already reporting on this one
-
-    rowEl.style.borderColor = "#0af";
-    rowEl.style.opacity = "0.6";
+    paintRows(key, "#0af");
 
     const requestId = nextRequestId();
-    pendingRequests.set(requestId, { kind: "startReporting", key });
+    pendingRequests.set(requestId, { kind: "startReporting", key, manualStatusEl });
 
-    const message = {
+    sendControl(requestId, {
       requestId,
       action: "START_REPORTING",
       params: {
-        host,
-        mmsPort,
-        iedName: null,
-        interfaceId: document.getElementById("f_interfaceId").value,
-        sclFilePath: null,
-        acseAuthPassword: null,
-        accessMode: "REPORT_ONLY",
+        host, mmsPort,
+        iedName: opts.iedName || null,
+        interfaceId: opts.interfaceId,
+        sclFilePath: opts.sclFilePath || null,
+        acseAuthPassword: opts.acseAuthPassword || null,
+        accessMode: opts.accessMode || "REPORT_ONLY",
       },
-    };
-    controlWs.send(JSON.stringify(message));
+    });
+    if (manualStatusEl) manualStatusEl.textContent = `starting ${key}...`;
+  }
+
+  btnManualStart.onclick = () => {
+    const host = document.getElementById("m_host").value.trim();
+    const mmsPort = parseInt(document.getElementById("m_mmsPort").value, 10) || 102;
+    if (!host) { manualStartStatusEl.textContent = "host is required"; return; }
+
+    startReporting(host, mmsPort, {
+      interfaceId: document.getElementById("m_interfaceId").value,
+      iedName: document.getElementById("m_iedName").value.trim(),
+      sclFilePath: document.getElementById("m_sclFilePath").value.trim(),
+      acseAuthPassword: document.getElementById("m_acseAuthPassword").value.trim(),
+      accessMode: document.getElementById("m_accessMode").value,
+    }, null, manualStartStatusEl);
+  };
+
+  function stopReporting(key) {
+    const rec = reporting.get(key);
+    if (!rec) return;
+    rec.stopBtn.disabled = true;
+    rec.stopBtn.textContent = "stopping...";
+
+    const requestId = nextRequestId();
+    pendingRequests.set(requestId, { kind: "stopReporting", key });
+    sendControl(requestId, {
+      requestId,
+      action: "STOP_REPORTING",
+      params: { deviceId: rec.deviceId },
+    });
   }
 
   // ---- per-device ipc_dispatcher websocket (wsPort returned by START_REPORTING) ----
 
   function beginStreaming(key, deviceId, wsPort) {
     if (reporting.has(key)) return;
-    const dev = discovered.get(key);
-    if (dev) dev.el.style.borderColor = "#0f0";
+    paintRows(key, "#0f0");
 
     const container = document.createElement("div");
     container.className = "reportCard";
     container.innerHTML = `
-      <div style="color:#ff0; font-weight:bold;">${key} — device ${deviceId} — ws://127.0.0.1:${wsPort}</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5em;">
+        <div style="color:#ff0; font-weight:bold;">${key} — device ${deviceId} — ws://127.0.0.1:${wsPort}</div>
+        <button class="danger rStopBtn">Stop Reporting</button>
+      </div>
       <div class="rStatus" style="color:#0af;">connecting...</div>
       <div class="rCounts" style="color:#0af;">MMS reports: 0 | GOOSE: 0 | other: 0</div>
       <div class="rLog"></div>
@@ -369,15 +582,23 @@
     const statusEl = container.querySelector(".rStatus");
     const countsEl = container.querySelector(".rCounts");
     const logEl = container.querySelector(".rLog");
-    const rec = { deviceId, wsPort, ws: null, mmsCount: 0, gooseCount: 0, otherCount: 0 };
+    const stopBtn = container.querySelector(".rStopBtn");
+    const rec = {
+      deviceId, wsPort, ws: null, mmsCount: 0, gooseCount: 0, otherCount: 0,
+      cardEl: container, stopBtn,
+    };
     reporting.set(key, rec);
+
+    stopBtn.onclick = () => stopReporting(key);
 
     const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
     rec.ws = ws;
 
     ws.onopen = () => { statusEl.textContent = "CONNECTED"; statusEl.style.color = "#0f0"; };
     ws.onerror = () => { statusEl.textContent = "ERROR"; statusEl.style.color = "#f00"; };
-    ws.onclose = () => { statusEl.textContent = "CLOSED"; statusEl.style.color = "#f80"; };
+    ws.onclose = () => {
+      if (reporting.get(key) === rec) { statusEl.textContent = "CLOSED"; statusEl.style.color = "#f80"; }
+    };
 
     ws.onmessage = (e) => {
       let parsed;

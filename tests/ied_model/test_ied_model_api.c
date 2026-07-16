@@ -228,8 +228,6 @@ makeHandle(IedModel* model, AccessMode mode) {
     handle->model = model;
     handle->accessMode = mode;
     handle->iedName = "TestIED";
-    handle->daSemantics = NULL;
-    handle->daSemanticCount = 0;
     return handle;
 }
 

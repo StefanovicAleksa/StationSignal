@@ -55,13 +55,15 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
              * least once even if its stNum numerically collides with a
              * pre-stale value (e.g. the publisher never actually restarted).
              * Safe without targetStateLock - only this thread ever touches
-             * hasForwardedStNum/lastForwardedStNum. Also forget every
-             * per-position value-diff cache slot, so the next frame delivers
-             * a FULL snapshot rather than being diffed against stale
-             * pre-outage values - this is GOOSE's equivalent of an MMS
-             * reconnect redelivering its GI snapshot. */
+             * hasForwardedStNum/lastForwardedStNum. The per-position
+             * value-diff cache (entry->memberRefCache) is deliberately NOT
+             * touched here anymore - it's populated once, on this target's
+             * very first-ever valid frame, and PRESERVED across every later
+             * recovery (never reset) - see GooseSubscriberMemberRefCache's
+             * own doc comment. The next frame's full snapshot diffs against
+             * the REAL, preserved last-known values from before the outage
+             * instead of against a wiped-clean cache. */
             entry->hasForwardedStNum = false;
-            GooseSubscriberUseCases_resetValueDiffCache(&entry->memberRefCache);
 
             if (handle->statusCallback) {
                 handle->statusCallback(handle->statusCallbackParam, entry->target->objectReference,

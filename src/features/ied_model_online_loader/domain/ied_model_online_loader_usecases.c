@@ -53,7 +53,21 @@ IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef(const char* acsiRef) {
         return NULL;
     }
     *dot = '\0';
-    const char* ldLn = copy;
+    char* ldLnCombined = copy;
+
+    /* ldLnCombined is "LD/LN" (ACSI domain names join LD+LN with "/").
+     * DataSetEntry_create's own variableName argument must be LD-prefix-free
+     * (this codebase's dynamic-model gotcha #1, see CLAUDE.md) - the LD is
+     * conveyed separately/implicitly via which LogicalNode the entry's
+     * parent dataset belongs to. Strip it here so the wire reference this
+     * function returns matches the SCL loader's own bare-LN convention. */
+    char* slash = strchr(ldLnCombined, '/');
+    if (!slash) {
+        /* Malformed - a real ACSI reference always has "LD/LN". */
+        free(copy);
+        return NULL;
+    }
+    const char* ldLn = slash + 1;
     char* chain = dot + 1;
 
     char* joined = NULL;

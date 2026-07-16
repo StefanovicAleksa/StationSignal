@@ -1,7 +1,40 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hal_time.h"
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
+
+/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
+ * the plan this landed under) - real-hardware reports of "<unsupported:structure>"
+ * on every MMS data point persisted even after the LD-prefix fix, so these log
+ * files give direct, persistent visibility into what the wire actually
+ * delivers vs. what survives Gap-4 decomposition/filtering. Opens/closes the
+ * file per call rather than holding a long-lived FILE* - keeps every write
+ * flushed immediately and needs no added locking, since each fprintf here is
+ * well under PIPE_BUF and fopen(..., "a") is append-only, so concurrent
+ * report-reader threads from different devices (device_manager can run
+ * several at once) interleave safely at the line level. */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
+
+/* Renders one MmsValue into a fixed local buffer via MmsValue_printToBuffer
+ * (third_party/include/mms_value.h - "for debugging purposes only", but
+ * exactly what's needed here since it can render an untouched MMS_STRUCTURE
+ * too, not just scalars). NULL-safe. */
+static void
+debugFormatValue(const MmsValue* value, char* buffer, size_t bufferSize) {
+    if (!value) {
+        snprintf(buffer, bufferSize, "<null>");
+        return;
+    }
+    MmsValue_printToBuffer((MmsValue*) value, buffer, (int) bufferSize);
+}
 
 /* ClientReport doesn't expose buffered-ness directly - look it up in our own
  * cached target list (keyed by rcbReference) instead of re-deriving it. */
@@ -71,12 +104,38 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     bool hasTimestamp = ClientReport_hasTimestamp(report);
     bool hasSeqNum = ClientReport_hasSeqNum(report);
 
+    /* Debug log point 1: raw report exactly as libiec61850 delivered it,
+     * before Gap-4 decomposition/value-diff filtering touch it at all. */
+    {
+        char header[256];
+        snprintf(header, sizeof(header), "==== rcbReference=%s entryCount=%d ====",
+                rcbReference ? rcbReference : "(null)", entryCount);
+        appendDebugLog("/tmp/ied_reporter_debug_mms_before.log", header);
+
+        for (int i = 0; i < entryCount; i++) {
+            MmsValue* rawValue = dataSetValues ? MmsValue_getElement(dataSetValues, i) : NULL;
+            char valueBuf[512];
+            debugFormatValue(rawValue, valueBuf, sizeof(valueBuf));
+
+            char line[896];
+            snprintf(line, sizeof(line), "  [%d] type=%s value=%s reason=%s dataReference=%s",
+                    i,
+                    rawValue ? MmsValue_getTypeString(rawValue) : "(none)",
+                    valueBuf,
+                    reasons ? ReasonForInclusion_getValueAsString(reasons[i]) : "(unknown)",
+                    (dataReferences && dataReferences[i]) ? dataReferences[i] : "(none)");
+            appendDebugLog("/tmp/ied_reporter_debug_mms_before.log", line);
+        }
+    }
+
     /* Guarded by memberRefCacheLock - buildReportRecord reads/mutates
-     * fallback->lastForwardedValues (the value-diff cache), which the
-     * supervisor thread can concurrently reset in enableOneTarget
-     * (mms_report_client_connection.c) on a (re-)enable. Without this lock
-     * the two threads race on the same MmsValue* slots - see that field's
-     * own doc comment in mms_report_client_types.h. */
+     * fallback->lastForwardedValues (the value-diff cache). enableOneTarget
+     * (mms_report_client_connection.c) no longer resets this cache on
+     * (re-)enable (the cache is populated once and preserved forever - see
+     * MmsReportClientMemberRefCacheEntry's own doc comment in
+     * mms_report_client_types.h), so this report-reader thread is currently
+     * the cache's only writer - the lock is kept anyway as cheap, uncontended
+     * insurance against any future writer reappearing on another thread. */
     Semaphore_wait(handle->memberRefCacheLock);
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             rcbReference, buffered, rptId,
@@ -94,6 +153,33 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     /* Allocation failure building the record: nothing safe to deliver - drop
      * this report rather than risk the caller dereferencing a partial one. */
     if (!record) return;
+
+    /* Debug log point 2: the decomposed/filtered record, about to be
+     * forwarded (pending only the cross-RCB dedup check below) - the direct
+     * view of whether Gap-4 decomposition actually ran for this device. */
+    {
+        char header[256];
+        snprintf(header, sizeof(header), "==== rcbReference=%s entryCount=%d ====",
+                record->rcbReference ? record->rcbReference : "(null)", record->entryCount);
+        appendDebugLog("/tmp/ied_reporter_debug_mms_after.log", header);
+
+        for (int i = 0; i < record->entryCount; i++) {
+            MmsReportEntry* entry = &record->entries[i];
+            char valueBuf[512];
+            char previousValueBuf[512];
+            debugFormatValue(entry->value, valueBuf, sizeof(valueBuf));
+            debugFormatValue(entry->previousValue, previousValueBuf, sizeof(previousValueBuf));
+
+            char line[1152];
+            snprintf(line, sizeof(line), "  [%d] reference=%s type=%s value=%s previousValue=%s",
+                    i,
+                    entry->reference ? entry->reference : "(null)",
+                    entry->value ? MmsValue_getTypeString(entry->value) : "(none)",
+                    valueBuf,
+                    previousValueBuf);
+            appendDebugLog("/tmp/ied_reporter_debug_mms_after.log", line);
+        }
+    }
 
     /* record->entryCount > 0: survived the per-RCB hybrid event filter.
      * shouldForwardAcrossRcb is the second, independent gate: even a report

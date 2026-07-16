@@ -133,6 +133,16 @@ IedModel_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datase
 }
 
 LinkedList
+IedModel_getDataSetMemberLeafWireTypes(IedModelHandle handle, const char* datasetReference, int memberIndex) {
+    return IedModelUseCases_getDataSetMemberLeafWireTypes(handle, datasetReference, memberIndex);
+}
+
+bool
+IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType actual) {
+    return IedModelUseCases_dataAttributeTypeMatchesMmsType(expected, actual);
+}
+
+LinkedList
 IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference) {
     return IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, lnReference);
 }

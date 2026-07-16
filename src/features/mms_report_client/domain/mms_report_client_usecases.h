@@ -53,15 +53,23 @@ MmsReportClientUseCases_freeReportRecord(MmsReportRecord* record);
 /*
  * Value-diff check for the event filter. cached is the last value actually
  * cached for this exact wire position (NULL means nothing has ever been
- * cached yet). Returns true (duplicate, should be dropped) only when cached
- * is non-NULL AND bit-for-bit equal (MmsValue_equals) to newValue - a NULL
- * cached value always returns false (not a duplicate), but that alone does
- * NOT mean "forward it": the caller (shouldForwardAndUpdateCache,
+ * cached yet - only expected for this RCB's very first-ever report; the
+ * cache is populated once and preserved forever after that, never reset on
+ * reconnect - see MmsReportClientMemberRefCacheEntry's own doc comment).
+ * Returns true (duplicate, should be dropped) only when cached is non-NULL
+ * AND bit-for-bit equal (MmsValue_equals) to newValue - a NULL cached value
+ * OR a NULL newValue (a wire position can legitimately carry no value in a
+ * given report - MmsValue_getElement can return NULL for some index) always
+ * returns false (not a duplicate) rather than dereferencing NULL, but that
+ * alone does NOT mean
+ * "forward it": the caller (shouldForwardAndUpdateCache,
  * mms_report_client_usecases.c) treats a NULL cache as a bootstrap event and
- * seeds the cache WITHOUT forwarding, so the startup/reconnect GI snapshot
- * never reaches the caller's report callback, only the first genuine change
- * afterward does (with a real previous value
- * to report, since the cache is now seeded).
+ * seeds the cache WITHOUT forwarding, so the very first-ever snapshot never
+ * reaches the caller's report callback, only the first genuine change
+ * afterward does (with a real previous value to report, since the cache is
+ * now seeded). Every reconnect's own fresh GI/redelivered snapshot instead
+ * diffs against the real, preserved last-known value from before the
+ * disconnect - not against a wiped-clean cache.
  */
 bool
 MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue);
@@ -72,22 +80,6 @@ MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue*
  * alongside the original rcbReference/memberReferences. NULL-safe. */
 void
 MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry);
-
-/*
- * Resets one RCB's value-diff cache in place: frees every populated slot of
- * entry->lastForwardedValues (MmsValue_delete) and sets it back to NULL,
- * mirroring the free loop inside MmsReportClientUseCases_destroyMemberRefCacheEntry
- * but WITHOUT freeing the lastForwardedValues array itself or any other field -
- * this entry keeps living, only its cached values are forgotten. Called by
- * enableOneTarget every time it successfully (re-)enables an RCB's RptEna,
- * both on the very first connect and on every reconnect (idempotent either
- * way - a freshly built cache is already all-NULL). Without this, a
- * reconnect's GI-triggered snapshot report gets diff-checked against the
- * stale pre-disconnect cache and is wrongly dropped as an unchanged
- * duplicate. NULL-safe/no-op if entry or entry->lastForwardedValues is NULL.
- */
-void
-MmsReportClientUseCases_resetValueDiffCache(MmsReportClientMemberRefCacheEntry* entry);
 
 /*
  * Cross-RCB duplicate-content suppression - see MmsReportClientCrossRcbDedupCache's

@@ -6,6 +6,12 @@
 #include "features/mms_report_client/data/mms_report_client_auth.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
+#include "hal_time.h"
+
+/* A connection must stay up at least this long before a subsequent loss
+ * resets the exponential backoff back to the initial tier - see
+ * supervisorLoop's own comment on why. */
+#define MMS_REPORT_CLIENT_STABLE_CONNECTION_MS 5000
 
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
@@ -212,37 +218,19 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     IedConnection_installReportHandler(handle->connection, target->objectReference,
             ClientReportControlBlock_getRptId(rcb), MmsReportClientReportAdapter_onReport, handle);
 
-    /* Reset this RCB's value-diff cache BEFORE issuing the write below that
-     * enables reporting - first connect included (harmless there, the cache
-     * is already all-NULL). This must happen before, not after, the write:
-     * the write can trigger a report (this client's own enable, a foreign
-     * client's concurrent GI, a buffered redelivery, ...) that libiec61850
-     * dispatches on its own report-reader thread, entirely independent of
-     * this supervisor thread's own progress. Resetting only after
-     * setRCBValues returned left a real race window - the report-reader
-     * thread could process that first report before this thread got back
-     * around to resetting a few lines later, diffing it against a STALE
-     * (pre-disconnect, on reconnect) cache instead of a cleared one, which
-     * on real hardware could surface as a burst of "everything changed"
-     * right after enabling. Resetting first closes the window structurally:
-     * no report for this RCB can be dispatched before the reset has already
-     * run. See MmsReportClientUseCases_resetValueDiffCache's own doc
-     * comment. Guarded by memberRefCacheLock - onReport
-     * (mms_report_client_report_adapter.c) can concurrently be reading/
-     * mutating the exact same lastForwardedValues slots on libiec61850's own
-     * report-reader thread; see that field's own doc comment in
-     * mms_report_client_types.h. Resetting even if the write below ends up
-     * failing is harmless - nothing can report for a not-yet-enabled RCB
-     * either way, and a later successful enable attempt re-resets it
-     * again regardless. */
-    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
-    if (cacheEntry) {
-        Semaphore_wait(handle->memberRefCacheLock);
-        MmsReportClientUseCases_resetValueDiffCache(cacheEntry);
-        Semaphore_post(handle->memberRefCacheLock);
-    }
-
-    uint32_t mask = RCB_ELEMENT_RPT_ENA;
+    /* The value-diff cache is deliberately NEVER reset here anymore - on the
+     * very first connect it's already all-NULL (fresh from buildMemberRefCache),
+     * and on every reconnect after that, the whole point is to PRESERVE the
+     * real last-known values so this enable's own GI/redelivered snapshot
+     * diffs against them instead of against a wiped-clean cache - a genuine
+     * change made while disconnected now correctly forwards with a real
+     * previousValue, and an unchanged resend is correctly suppressed by the
+     * ordinary diff check. See MmsReportClientMemberRefCacheEntry's own doc
+     * comment in mms_report_client_types.h for the full design and
+     * shouldForwardAndUpdateCache's own doc comment (mms_report_client_usecases.c)
+     * for exactly how a persistently-NULL slot past the first report is
+     * detected and logged as a bug. */
+    uint32_t mask = RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_GI;
 
     /* DatSet must be (re-)set explicitly on enable - relying on a
      * server-side default dataset (configured only via ReportControlBlock_create's
@@ -270,14 +258,27 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     }
 
     ClientReportControlBlock_setRptEna(rcb, true);
-    /* Deliberately never requests GI (unreliable on real hardware - a device
-     * has been observed tagging a GI-triggered snapshot as DATA_CHANGE too,
-     * see shouldForwardAndUpdateCache's own doc comment) and never touches
-     * TRG_OPS/BUF_TM/INTG_PD/CONF_REV - those stay exactly as the IED's own
-     * SCL config already has them. Matches goose_subscriber exactly: no
-     * artificial snapshot is ever requested, the first real observation for
-     * a position (whatever naturally produces it) silently seeds the cache
-     * instead. */
+    ClientReportControlBlock_setGI(rcb, true);
+    /* GI is requested on every enable (first connect AND every reconnect),
+     * unconditionally, purely to force an immediate, deterministic snapshot
+     * to diff the cache against - it is NEVER trusted or forwarded itself.
+     * On the very first-ever connect, this snapshot lands against the
+     * still-all-NULL cache and is silently bootstrap-seeded (see
+     * shouldForwardAndUpdateCache's own doc comment). On every reconnect
+     * after that, this same snapshot instead lands against the REAL,
+     * preserved last-known values from before the disconnect (the cache is
+     * never reset - see MmsReportClientMemberRefCacheEntry's own doc
+     * comment) - a genuine change made while disconnected is correctly
+     * forwarded with a real previousValue, an unchanged resend is correctly
+     * suppressed. Without GI, the cache would only ever be seeded/refreshed
+     * by whatever report happens to arrive first after an enable - on a
+     * device with no periodic integrity reporting and no coincidental
+     * traffic at enable time, that could leave a long gap where a real
+     * change made while disconnected goes undetected simply because nothing
+     * prompted the device to report it yet. `reason` is still never trusted
+     * for filtering (see shouldForwardAndUpdateCache's own doc comment).
+     * TRG_OPS/BUF_TM/INTG_PD/CONF_REV are still never touched - those stay
+     * exactly as the IED's own SCL config already has them. */
 
     IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
     if (err != IED_ERROR_OK) {
@@ -354,7 +355,7 @@ supervisorLoop(void* parameter) {
         IedConnection_connect(handle->connection, &err, handle->host, handle->port);
 
         if (err == IED_ERROR_OK) {
-            handle->currentBackoffMs = 0;
+            uint64_t connectedAtMs = Hal_getTimeInMs();
             enableAllTargets(handle);
 
             /* Stay in this connected phase, consuming every wake, until a
@@ -368,9 +369,8 @@ supervisorLoop(void* parameter) {
              * over from the connect that just succeeded. Treating any single
              * wake as "go reconnect" (the old bare `continue` here) re-ran
              * enableAllTargets() - a second, entirely redundant RptEna
-             * (enable) cycle per RCB - for one real connect, with no connection
-             * having actually been lost, racing report delivery against
-             * MmsReportClientUseCases_resetValueDiffCache. Confirmed as a
+             * (enable) cycle per RCB - for one real connect, with no
+             * connection having actually been lost. Confirmed as a
              * real-hardware root cause (see CLAUDE.md) of a duplicate-report
              * flood after reconnect. */
             for (;;) {
@@ -387,7 +387,22 @@ supervisorLoop(void* parameter) {
             /* Reaching here past the inner loop means either stopRequested
              * (checked again below) or a genuine loss - a fresh association
              * means the server forgot our prior RptEna/report-handler
-             * registration, so fall through to backoff + retry. */
+             * registration, so fall through to backoff + retry.
+             *
+             * Only reset the backoff to the initial tier if THIS connection
+             * actually stayed up for a meaningful stretch
+             * (MMS_REPORT_CLIENT_STABLE_CONNECTION_MS) - resetting
+             * unconditionally on every momentary success (the old behavior)
+             * meant a real, flaky link that connects then bounces right back
+             * (unlike the clean loopback simulator, which never does this)
+             * got stuck retrying at the initial ~1s tier forever instead of
+             * escalating, letting enableAllTargets' full reset+GI cycle
+             * (and everything it can spuriously forward - see
+             * mms_report_client_usecases.c's valuesAreSemanticallyEqual doc
+             * comment) fire repeatedly in a tight burst right after connect. */
+            if (Hal_getTimeInMs() - connectedAtMs >= MMS_REPORT_CLIENT_STABLE_CONNECTION_MS) {
+                handle->currentBackoffMs = 0;
+            }
         }
 
         if (handle->stopRequested) break;

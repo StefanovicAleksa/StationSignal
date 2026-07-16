@@ -4,6 +4,7 @@
 #include "features/ied_model/domain/ied_model_usecases.h"
 #include "iec61850_dynamic_model.h"
 #include "iec61850_common.h"
+#include "mms_common.h"
 
 /* ---- recursive tree walkers over the built model ---- */
 
@@ -535,6 +536,170 @@ IedModelUseCases_getDataSetMemberLeafSemantics(IedModelHandle handle, const char
 
     free(variableNameCopy);
     return result;
+}
+
+/* Wire-type-lookup sibling of collectLeafReferencesByFc -
+ * identical traversal (same FC filtering, same CONSTRUCTED-attribute recursion),
+ * but appends each genuinely terminal leaf's own already-known
+ * DataAttributeType (set once at SCL-load time via IedModelUtils_mapBType,
+ * stored directly on the DataAttribute node - see struct sDataAttribute in
+ * iec61850_model.h) instead of building a reference string. Order matches
+ * collectLeafReferencesByFc's own traversal exactly (same walk), so results
+ * stay index-aligned with IedModelUseCases_getDataSetMemberLeafReferences's
+ * own output for the same (datasetReference, memberIndex) - this is what lets
+ * mms_report_client/goose_subscriber cross-check each decomposed leaf's
+ * ACTUAL wire type against its EXPECTED (SCL-declared) type before trusting
+ * the reference-to-value zip (see IedModelUseCases_dataAttributeTypeMatchesMmsType's
+ * own doc comment for why: same-count-different-order mismatches between this
+ * daemon's locally-resolved leaf order and a real device's actual wire order
+ * are NOT caught by the pre-existing count-only fallback). */
+static void
+collectLeafWireTypesByFc(ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) return;
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            DataAttributeType* boxed = malloc(sizeof(DataAttributeType));
+            if (boxed) {
+                *boxed = ((DataAttribute*) node)->type;
+                LinkedList_add(result, boxed);
+            }
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberLeafWireTypes(IedModelHandle handle, const char* datasetReference,
+        int memberIndex) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference || memberIndex < 0) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    DataSetEntry* entry = DataSet_getFirstEntry(dataSet);
+    for (int i = 0; entry && i < memberIndex; i++) entry = DataSetEntry_getNext(entry);
+    if (!entry || !entry->logicalDeviceName || !entry->variableName) return result;
+
+    char* variableNameCopy = strdup(entry->variableName);
+    if (!variableNameCopy) return result;
+
+    char* lnToken = strtok(variableNameCopy, "$");
+    char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+    char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+    char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+    if (!doToken || daToken) {
+        /* Already leaf-level, or an unexpectedly-shaped variableName -
+         * nothing to decompose either way (mirrors
+         * IedModelUseCases_getDataSetMemberLeafReferences's identical check). */
+        free(variableNameCopy);
+        return result;
+    }
+
+    FunctionalConstraint fc = FunctionalConstraint_fromString(fcToken);
+    LogicalDevice* ld = IedModel_getDevice(handle->model, entry->logicalDeviceName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* doNode = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+
+    if (doNode && ModelNode_getType(doNode) == DataObjectModelType) {
+        LinkedList doChildren = ModelNode_getChildren(doNode);
+        if (doChildren) {
+            LinkedList element = LinkedList_getNext(doChildren);
+            while (element) {
+                collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+                element = LinkedList_getNext(element);
+            }
+            LinkedList_destroyStatic(doChildren);
+        }
+    }
+
+    free(variableNameCopy);
+    return result;
+}
+
+/*
+ * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType against
+ * its ACTUAL wire-decoded MmsType, before mms_report_client/goose_subscriber
+ * trust a Gap-4 decomposition zip. Exists because the pre-existing
+ * count-only fallback (see IedModelUseCases_getDataSetMemberLeafReferences's
+ * own doc comment on the wire-order assumption) cannot catch a
+ * same-count-but-different-ORDER mismatch between this daemon's
+ * locally-resolved leaf order (SCL <DOType> XML child order) and a real
+ * device's actual runtime attribute order - confirmed against real
+ * production hardware: a DPC's "Pos" structured attribute had its stVal/t
+ * sub-elements zipped to the wrong reference labels (a UTC_TIME value landed
+ * on the "stVal" reference, a BOOLEAN landed on "t") because both orderings
+ * happened to have the same leaf count. Only implements CONFIDENT, well-
+ * established groupings - per this codebase's "don't guess IEC 61850
+ * semantics" rule (same conservative posture IedModelUtils_mapBType itself
+ * already takes for an unrecognized bType), anything not explicitly listed
+ * below always matches (no check), rather than risk a false-positive
+ * rejection of a genuinely well-ordered structure.
+ */
+bool
+IedModelUseCases_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType actual) {
+    switch (expected) {
+        case IEC61850_BOOLEAN:
+            return actual == MMS_BOOLEAN;
+        case IEC61850_TIMESTAMP:
+            return actual == MMS_UTC_TIME;
+        case IEC61850_QUALITY:
+        case IEC61850_CODEDENUM:
+        case IEC61850_CHECK:
+        case IEC61850_GENERIC_BITSTRING:
+        case IEC61850_OPTFLDS:
+        case IEC61850_TRGOPS:
+            return actual == MMS_BIT_STRING;
+        case IEC61850_INT8:
+        case IEC61850_INT16:
+        case IEC61850_INT32:
+        case IEC61850_INT64:
+        case IEC61850_INT128:
+        case IEC61850_INT8U:
+        case IEC61850_INT16U:
+        case IEC61850_INT24U:
+        case IEC61850_INT32U:
+        case IEC61850_FLOAT32:
+        case IEC61850_FLOAT64:
+        case IEC61850_ENUMERATED:
+            return actual == MMS_INTEGER || actual == MMS_UNSIGNED || actual == MMS_FLOAT;
+        case IEC61850_VISIBLE_STRING_32:
+        case IEC61850_VISIBLE_STRING_64:
+        case IEC61850_VISIBLE_STRING_65:
+        case IEC61850_VISIBLE_STRING_129:
+        case IEC61850_VISIBLE_STRING_255:
+        case IEC61850_UNICODE_STRING_255:
+            return actual == MMS_VISIBLE_STRING || actual == MMS_STRING;
+        default:
+            /* IEC61850_UNKNOWN_TYPE, IEC61850_OCTET_STRING_*, IEC61850_ENTRY_TIME,
+             * IEC61850_PHYCOMADDR, IEC61850_CURRENCY, IEC61850_CONSTRUCTED - not
+             * confident enough to assert a specific MmsType, so never reject. */
+            return true;
+    }
 }
 
 /* Walks every direct child (Data Object) of `ln`, collecting "$"-joined leaf

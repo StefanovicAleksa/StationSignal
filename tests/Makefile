@@ -31,6 +31,7 @@ CFLAGS  := -g -Wall -I$(SRC) -idirafter $(THIRD_PARTY_INCLUDE)
 LDFLAGS := -L$(THIRD_PARTY_LIB) -lunity
 
 TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
+         test_ied_model_online_loader_usecases \
          test_mms_report_client_utils test_mms_report_client_usecases test_mms_report_client_api \
          test_goose_subscriber_utils test_goose_subscriber_usecases test_goose_subscriber_api \
          test_scl_bootstrap_usecases test_scl_bootstrap_utils \
@@ -69,6 +70,13 @@ test_ied_model_api: ied_model/test_ied_model_api.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
 
+# usecases.c (convertAcsiRefToWireRef) is pure string manipulation - no
+# third-party includes at all, per its own header doc comment - so this is
+# the one test binary in this Makefile needing no third-party lib beyond unity.
+test_ied_model_online_loader_usecases: ied_model_online_loader/test_ied_model_online_loader_usecases.c \
+		$(IED_MODEL_ONLINE_LOADER)/domain/ied_model_online_loader_usecases.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
 # utils.c only touches MmsValue construction/cloning - needs iec61850+hal, no mxml.
 test_mms_report_client_utils: mms_report_client/test_mms_report_client_utils.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c
@@ -76,10 +84,16 @@ test_mms_report_client_utils: mms_report_client/test_mms_report_client_utils.c \
 
 # usecases.c builds MmsReportRecord from real MmsValue instances (public
 # constructors) but never opens a socket or touches IedConnection/ClientReport.
+# Pulls in ied_model too: the Gap-4 decomposition wire-type check calls
+# IedModel_dataAttributeTypeMatchesMmsType (see decomposedLeafTypesMatch).
 test_mms_report_client_usecases: mms_report_client/test_mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
-		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(IED_MODEL)/service/ied_model_api.c \
+		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
 
 # api.c pulls in the full stack for argument-validation-only wiring tests
 # (never calls _start() with real report targets, no real connection attempted).
@@ -103,10 +117,16 @@ test_goose_subscriber_utils: goose_subscriber/test_goose_subscriber_utils.c \
 
 # usecases.c builds GooseSubscriberRecord from real MmsValue instances (public
 # constructors) but never opens a socket or touches GooseSubscriber/GooseReceiver.
+# Pulls in ied_model too: the Gap-4 decomposition wire-type check calls
+# IedModel_dataAttributeTypeMatchesMmsType (see decomposedLeafTypesMatch).
 test_goose_subscriber_usecases: goose_subscriber/test_goose_subscriber_usecases.c \
 		$(GOOSE_SUBSCRIBER)/domain/goose_subscriber_usecases.c \
-		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
+		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
+		$(IED_MODEL)/service/ied_model_api.c \
+		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
 
 # api.c pulls in the full stack for argument-validation-only wiring tests
 # (never calls _start() with real GOOSE targets, no real raw socket opened).

@@ -1,10 +1,24 @@
+#include <stdio.h>
 #include <stdlib.h>
+#include "hal_time.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_mms_adapter.h"
 #include "features/ipc_dispatcher/domain/ipc_dispatcher_usecases.h"
 #include "features/ipc_dispatcher/utils/ipc_dispatcher_value_codec.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_json_writer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ring_buffer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
+
+/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
+ * the plan this landed under) - see the identical helper's own comment in
+ * mms_report_client_report_adapter.c for the full reasoning (duplicated here
+ * rather than shared, per this codebase's own cross-feature convention). */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
 
 void
 IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReportRecord* record) {
@@ -105,6 +119,10 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
         char* json = IpcDispatcherJsonWriter_write(message);
         IpcDispatcherUseCases_freeMessage(message);
         if (json) {
+            /* Debug log point 3: the exact JSON string handed to the ring
+             * buffer for websocket delivery. */
+            appendDebugLog("/tmp/ied_reporter_debug_mms_websocket.log", json);
+
             IpcDispatcherRingBuffer_push(handle->ringBuffer, json); /* ownership -> ring buffer */
             IpcDispatcherWsServer_wake(handle->wsServer);
         }

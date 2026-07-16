@@ -147,7 +147,7 @@ test_write_hasQualityFalse_emitsJsonNull(void) {
 }
 
 void
-test_write_previousValueQualityLabel_allPopulated(void) {
+test_write_previousValueQuality_allPopulated(void) {
     fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "rcb", true, false, false, 0, 1);
     fixtureMessage->dataPoints[0].reference = strdup("LD0/LLN0$ST$Pos$stVal");
     fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_UINT64;
@@ -160,10 +160,6 @@ test_write_previousValueQualityLabel_allPopulated(void) {
     fixtureMessage->dataPoints[0].previousValue.value.u64 = 1;
     fixtureMessage->dataPoints[0].hasPreviousQuality = true;
     fixtureMessage->dataPoints[0].previousQuality.validity = IPC_QUALITY_INVALID;
-    fixtureMessage->dataPoints[0].hasLabel = true;
-    fixtureMessage->dataPoints[0].label = "on";
-    fixtureMessage->dataPoints[0].hasPreviousLabel = true;
-    fixtureMessage->dataPoints[0].previousLabel = "off";
 
     fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
     fixtureParsed = cJSON_Parse(fixtureJson);
@@ -178,19 +174,16 @@ test_write_previousValueQualityLabel_allPopulated(void) {
     cJSON* previousQuality = cJSON_GetObjectItem(point, "previousQuality");
     TEST_ASSERT_FALSE(cJSON_IsNull(previousQuality));
     TEST_ASSERT_EQUAL_STRING("INVALID", cJSON_GetObjectItem(previousQuality, "validity")->valuestring);
-
-    TEST_ASSERT_EQUAL_STRING("on", cJSON_GetObjectItem(point, "label")->valuestring);
-    TEST_ASSERT_EQUAL_STRING("off", cJSON_GetObjectItem(point, "previousLabel")->valuestring);
 }
 
 void
-test_write_previousValueQualityLabel_allAbsent_emitJsonNull(void) {
+test_write_previousValueQuality_allAbsent_emitJsonNull(void) {
     fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "rcb", true, false, false, 0, 1);
     fixtureMessage->dataPoints[0].reference = strdup("ref");
     fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_BOOL;
     fixtureMessage->dataPoints[0].value.value.b = true;
-    /* hasPreviousValue/hasPreviousQuality/hasLabel/hasPreviousLabel all
-     * default false via buildMessage's calloc. */
+    /* hasPreviousValue/hasPreviousQuality both default false via
+     * buildMessage's calloc. */
 
     fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
     fixtureParsed = cJSON_Parse(fixtureJson);
@@ -200,8 +193,6 @@ test_write_previousValueQualityLabel_allAbsent_emitJsonNull(void) {
 
     TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "previousValue")));
     TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "previousQuality")));
-    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "label")));
-    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "previousLabel")));
 }
 
 void
@@ -228,8 +219,8 @@ main(void) {
     RUN_TEST(test_write_goose_noBufferedField);
     RUN_TEST(test_write_hasTimestampFalse_omitsTimestampMsField);
     RUN_TEST(test_write_hasQualityFalse_emitsJsonNull);
-    RUN_TEST(test_write_previousValueQualityLabel_allPopulated);
-    RUN_TEST(test_write_previousValueQualityLabel_allAbsent_emitJsonNull);
+    RUN_TEST(test_write_previousValueQuality_allPopulated);
+    RUN_TEST(test_write_previousValueQuality_allAbsent_emitJsonNull);
     RUN_TEST(test_write_nullSourceReference_emitsJsonNull);
     RUN_TEST(test_write_returnsNull_onNullMessage);
 

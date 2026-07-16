@@ -30,6 +30,11 @@ freeTargetEntries(GooseSubscriberHandle handle) {
         free(cache->memberLeafCounts);
         free(cache->leafSlotOffsets);
 
+        if (cache->memberLeafWireTypes) {
+            for (int j = 0; j < cache->memberCount; j++) free(cache->memberLeafWireTypes[j]);
+            free(cache->memberLeafWireTypes);
+        }
+
         if (cache->lastForwardedValues) {
             for (int k = 0; k < cache->totalLeafSlots; k++) {
                 if (cache->lastForwardedValues[k]) MmsValue_delete(cache->lastForwardedValues[k]);
@@ -72,6 +77,37 @@ linkedListToStringArray(LinkedList list, int* outCount) {
         element = LinkedList_getNext(element);
     }
     LinkedList_destroyStatic(list);
+
+    *outCount = count;
+    return array;
+}
+
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * DataAttributeType* (see IedModel_getDataSetMemberLeafWireTypes). Mirrors
+ * mms_report_client_api.c's identical helper exactly. */
+static DataAttributeType*
+linkedListToWireTypeArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    DataAttributeType* array = calloc((size_t) count, sizeof(DataAttributeType));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        DataAttributeType* boxed = (DataAttributeType*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
 
     *outCount = count;
     return array;
@@ -129,6 +165,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->memberCount = 0;
     cache->memberLeafReferences = NULL;
     cache->memberLeafCounts = NULL;
+    cache->memberLeafWireTypes = NULL;
     cache->leafSlotOffsets = NULL;
     cache->totalLeafSlots = 0;
     cache->lastForwardedValues = NULL;
@@ -148,6 +185,11 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     int* leafCounts = calloc((size_t) count, sizeof(int));
     int* leafOffsets = calloc((size_t) count, sizeof(int));
     int totalLeafSlots = 0;
+    /* Parallel to leafRefsArray/leafCounts - each decomposed member's own
+     * per-leaf EXPECTED DataAttributeType, cross-checked in collectCandidates
+     * before a decomposition zip is trusted. See
+     * GooseSubscriberMemberRefCache.memberLeafWireTypes's own doc comment. */
+    DataAttributeType** leafWireTypesArray = calloc((size_t) count, sizeof(DataAttributeType*));
     IedModelDaSemantic** leafSemArray = calloc((size_t) count, sizeof(IedModelDaSemantic*));
     int* leafSemCounts = calloc((size_t) count, sizeof(int));
 
@@ -159,6 +201,18 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
                     &leafCount);
             leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
             leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+            if (leafWireTypesArray) {
+                int leafWireTypeCount = 0;
+                DataAttributeType* wireTypes = linkedListToWireTypeArray(
+                        IedModel_getDataSetMemberLeafWireTypes(iedModel, entry->target->datasetReference, m),
+                        &leafWireTypeCount);
+                /* Only trust this member's wire-types array if its count
+                 * matches leafCount - see mms_report_client_api.c's identical
+                 * guard for why. */
+                leafWireTypesArray[m] = (wireTypes && leafWireTypeCount == leafCount) ? wireTypes : NULL;
+                if (wireTypes && leafWireTypeCount != leafCount) free(wireTypes);
+            }
 
             if (leafSemArray && leafSemCounts) {
                 int leafSemCount = 0;
@@ -180,6 +234,15 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
         leafRefsArray = NULL;
         leafCounts = NULL;
         leafOffsets = NULL;
+        free(leafWireTypesArray); /* nothing populated yet in this branch */
+        leafWireTypesArray = NULL;
+        if (leafSemArray) {
+            for (int m = 0; m < count; m++) free(leafSemArray[m]);
+            free(leafSemArray);
+        }
+        leafSemArray = NULL;
+        free(leafSemCounts);
+        leafSemCounts = NULL;
     }
 
     /* Zero-initialized so every slot starts NULL (never forwarded yet). */
@@ -218,6 +281,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->memberCount = count;
     cache->memberLeafReferences = leafRefsArray;
     cache->memberLeafCounts = leafCounts;
+    cache->memberLeafWireTypes = leafWireTypesArray;
     cache->leafSlotOffsets = leafOffsets;
     cache->totalLeafSlots = totalLeafSlots;
     cache->lastForwardedValues = lastForwardedValues;
