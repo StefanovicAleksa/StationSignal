@@ -23,6 +23,24 @@ appendDebugLog(const char* path, const char* text) {
     fclose(f);
 }
 
+/* TEMPORARY diagnostic aid - see mms_report_client_connection.c's own
+ * identical-purpose log (SEND side of this same investigation). Logs what
+ * the server actually sends back per buffered report - seqNum and EntryID -
+ * for direct correlation: if these never advance past what enableOneTarget
+ * requested to resume from across a burst of reports that look like a
+ * redelivered backlog, that confirms the server (or our own unconditional GI
+ * request) isn't honoring EntryID resumption. Remove once root-caused. */
+#define MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH "ied_reporter_debug_entryid.log"
+
+static void
+hexDump(const uint8_t* bytes, int size, char* out, size_t outSize) {
+    size_t pos = 0;
+    for (int i = 0; i < size && pos + 3 < outSize; i++) {
+        pos += (size_t) snprintf(out + pos, outSize - pos, "%02X", bytes[i]);
+    }
+    out[pos] = '\0';
+}
+
 /* Renders one MmsValue into a fixed local buffer via MmsValue_printToBuffer
  * (third_party/include/mms_value.h - "for debugging purposes only", but
  * exactly what's needed here since it can render an untouched MMS_STRUCTURE
@@ -103,6 +121,23 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     MmsValue* entryId = ClientReport_getEntryId(report);
     bool hasTimestamp = ClientReport_hasTimestamp(report);
     bool hasSeqNum = ClientReport_hasSeqNum(report);
+
+    if (buffered) {
+        char line[384];
+        if (entryId) {
+            char hex[256];
+            hexDump(MmsValue_getOctetStringBuffer(entryId), MmsValue_getOctetStringSize(entryId),
+                    hex, sizeof(hex));
+            snprintf(line, sizeof(line), "RECV rcb=%s entryId=%s hasSeqNum=%d seqNum=%u entryCount=%d",
+                    rcbReference ? rcbReference : "(null)", hex, hasSeqNum,
+                    hasSeqNum ? ClientReport_getSeqNum(report) : 0, entryCount);
+        } else {
+            snprintf(line, sizeof(line), "RECV rcb=%s entryId=(none) hasSeqNum=%d seqNum=%u entryCount=%d",
+                    rcbReference ? rcbReference : "(null)", hasSeqNum,
+                    hasSeqNum ? ClientReport_getSeqNum(report) : 0, entryCount);
+        }
+        appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
+    }
 
     /* Debug log point 1: raw report exactly as libiec61850 delivered it,
      * before Gap-4 decomposition/value-diff filtering touch it at all. */

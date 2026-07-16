@@ -13,6 +13,38 @@
  * supervisorLoop's own comment on why. */
 #define MMS_REPORT_CLIENT_STABLE_CONNECTION_MS 5000
 
+/* TEMPORARY diagnostic aid - investigating a real-hardware report that
+ * EntryID resumption (see enableOneTarget's own comment below) doesn't stop
+ * a buffered RCB's backlog from being redelivered on reconnect when a value
+ * genuinely changed while disconnected. Logs exactly what EntryID this
+ * client sends on enable, for direct correlation against what
+ * mms_report_client_report_adapter.c's own identical diagnostic logs on
+ * receipt - if the server's own seqNum/entryId on the redelivered reports
+ * never advances past what we requested to resume from, the server (or our
+ * own GI request, sent unconditionally alongside EntryID on every enable) is
+ * not honoring the resume. Remove once root-caused. Same
+ * fopen(...,"a")-per-call, no-added-locking-needed idiom as the other
+ * appendDebugLog helpers already in this feature (mms_report_client_api.c/
+ * _usecases.c/_report_adapter.c). */
+static void
+appendDebugLog(const char* path, const char* text) {
+    FILE* f = fopen(path, "a");
+    if (!f) return;
+    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
+    fclose(f);
+}
+
+#define MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH "ied_reporter_debug_entryid.log"
+
+static void
+hexDump(const uint8_t* bytes, int size, char* out, size_t outSize) {
+    size_t pos = 0;
+    for (int i = 0; i < size && pos + 3 < outSize; i++) {
+        pos += (size_t) snprintf(out + pos, outSize - pos, "%02X", bytes[i]);
+    }
+    out[pos] = '\0';
+}
+
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
  * call IedConnection_getState or any blocking IedConnection_* function from
@@ -232,6 +264,36 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * detected and logged as a bug. */
     uint32_t mask = RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_GI;
 
+    /* Proactively request OptFlds.EntryID for every buffered RCB, rather
+     * than relying on however the device happens to already be configured -
+     * a real device was found sending ZERO EntryID across every single
+     * report (confirmed via a temporary diagnostic log: 2581/2581 received
+     * reports had no EntryID at all), making the EntryID-resumption
+     * mechanism below structurally impossible against it regardless of how
+     * correct our own resumption logic is, since there is never anything to
+     * cache and resume from. ORs RPT_OPT_ENTRY_ID into whatever OptFlds bits
+     * the device already has configured (read via
+     * ClientReportControlBlock_getOptFlds, which reflects the device's own
+     * current config since `rcb` was just populated from a real
+     * IedConnection_getRCBValues call above) - never clobbers the rest, same
+     * minimal-footprint posture as everywhere else in this function. Only
+     * writes it back (and only then adds RCB_ELEMENT_OPT_FLDS to the mask)
+     * if the bit isn't already set, to avoid touching this attribute on
+     * every single reconnect once the device has accepted it once - unlike
+     * DatSet/RptEna, OptFlds isn't expected to reset itself across
+     * associations. The alternative (a site-side SCL/engineering-tool config
+     * change enabling entryID="true" on the device itself) is noted in
+     * CLAUDE.md's own mms_report_client bullet - this client-side approach
+     * was chosen instead so the daemon works against a device's default
+     * configuration without requiring a site visit/reconfiguration first. */
+    if (target->buffered) {
+        int currentOptFlds = ClientReportControlBlock_getOptFlds(rcb);
+        if (!(currentOptFlds & RPT_OPT_ENTRY_ID)) {
+            ClientReportControlBlock_setOptFlds(rcb, currentOptFlds | RPT_OPT_ENTRY_ID);
+            mask |= RCB_ELEMENT_OPT_FLDS;
+        }
+    }
+
     /* DatSet must be (re-)set explicitly on enable - relying on a
      * server-side default dataset (configured only via ReportControlBlock_create's
      * dataSetName at server build time) is fragile: libiec61850's own
@@ -302,6 +364,18 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             if (cacheEntry->lastEntryId) {
                 ClientReportControlBlock_setEntryId(rcb, cacheEntry->lastEntryId);
                 mask |= RCB_ELEMENT_ENTRY_ID;
+
+                char hex[256];
+                hexDump(MmsValue_getOctetStringBuffer(cacheEntry->lastEntryId),
+                        MmsValue_getOctetStringSize(cacheEntry->lastEntryId), hex, sizeof(hex));
+                char line[384];
+                snprintf(line, sizeof(line), "SEND rcb=%s entryId=%s", target->objectReference, hex);
+                appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
+            } else {
+                char line[256];
+                snprintf(line, sizeof(line), "SEND rcb=%s entryId=(none - first enable, full resume)",
+                        target->objectReference);
+                appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
             }
             Semaphore_post(handle->memberRefCacheLock);
         }

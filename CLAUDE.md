@@ -914,6 +914,37 @@ them to the consuming API layer. This file governs this repo (root = the daemon 
   without it the server never includes an EntryID in the report at all, so there is nothing to
   resume from; no other E2E test asserts on `entryId`, so this was a safe additive change to the
   shared simulator.
+- **The EntryID-resumption fix above turned out to be a structural no-op against the same real
+  device that originally surfaced it, root-caused via a temporary `ied_reporter_debug_entryid.log`
+  diagnostic (`data/mms_report_client_connection.c`'s/`_report_adapter.c`'s own `appendDebugLog`
+  calls, added specifically to settle this — still in place as of this writing, pending
+  real-hardware confirmation that the fix below actually gets the device sending EntryID now;
+  remove once confirmed)**: every single received report
+  (2581/2581 in one capture, across every RCB) carried no EntryID at all, confirmed by a new
+  per-report log line showing `entryId=(none)`/`hasSeqNum=0` unconditionally — meaning
+  `MmsReportClientMemberRefCacheEntry.lastEntryId` could never be populated, so
+  `RCB_ELEMENT_ENTRY_ID` never made it into the enable mask, and every reconnect kept falling
+  back to a full backlog resume regardless of how correct the resumption logic itself was. Root
+  cause: this RCB's `OptFlds.EntryID` simply isn't enabled in the device's own current
+  configuration, and `enableOneTarget` never asked for it — `OptFlds` (unlike `RptEna`/`GI`/
+  `DatSet`) was one of the attributes this feature deliberately left untouched, relying on
+  whatever the device already had configured. Fixed, at explicit user request, by having
+  `enableOneTarget` proactively OR `RPT_OPT_ENTRY_ID` into a buffered RCB's OptFlds on enable
+  (`ClientReportControlBlock_getOptFlds`/`_setOptFlds`, `RCB_ELEMENT_OPT_FLDS` in the mask) —
+  read the device's current OptFlds first and only add the one bit, never clobbering whatever
+  else is already configured (seqNum/timeStamp/dataSet/reasonCode/etc., all left exactly as they
+  are), and only written back (only added to the mask) if the bit isn't already set, since
+  OptFlds isn't expected to reset itself across reconnects the way `RptEna` does. Deliberate
+  choice over the alternative (a site-side SCL/engineering-tool config change enabling
+  `entryID="true"` directly on the device) specifically so this daemon degrades gracefully
+  against a device's out-of-the-box configuration instead of requiring a site visit first,
+  matching this project's broader goal of working robustly across different real-world
+  environments without assuming ideal IED configuration. The site-config alternative remains a
+  valid, arguably more "intended" fix and is worth knowing about if the client-side OR-in
+  approach ever proves insufficient (e.g. a device that outright rejects a client-initiated
+  OptFlds write) — in that case `RCB_ELEMENT_OPT_FLDS`/`setOptFlds` would fail the same way any
+  other `IedConnection_setRCBValues` element can, surfaced through the existing generic
+  error-and-log path, not a special case of its own.
 - `goose_subscriber/` (implemented) — subscribes to every GOOSE Control Block on one IED via
   `ied_model` (`IedModel_getGooseSubscriptionTargets`, never re-parses SCL, never discovers
   GoCBs over the wire), applying `GooseSubscriber_setDstMac`/`setAppId` filters from SCL's
