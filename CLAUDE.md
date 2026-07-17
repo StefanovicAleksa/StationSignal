@@ -21,6 +21,14 @@ file only describes current-state facts.
   or guess a permanent build command, ask before assuming one. `sudo` is only required once a
   client asks the daemon to actually report on a device over GOOSE (raw socket) — the process
   itself starts and idles fine without it.
+  - `./setup_project.sh` regenerates `third_party/lib/{libiec61850.a,libhal.a}` and
+    `third_party/include/` from the vendored source in the `third_party_src/libiec61850` git
+    submodule (`git submodule update --init` if not yet checked out). **Not run automatically
+    and not part of the normal build** — `third_party/{include,lib}` as currently committed is
+    the source of truth (see the "Don't touch `third_party/`" Hard Rule). Only run it if you
+    genuinely need to rebuild from source (different CMake flags, a version bump, or debugging
+    by stepping into library source), and review the resulting `git diff third_party/` before
+    committing it.
   - `main.c` takes **no arguments** and has no terminal/CLI surface — it's a pure background
     process-runner. It creates `device_manager` + `scan_orchestration` + `control_dispatcher`,
     starts the one always-on control websocket (default `127.0.0.1:8767`), and blocks until
@@ -411,7 +419,7 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
 - **No cyclic polling**, on either worker — polling defeats the reporter's whole reason for existing (event-driven, low-latency). **One narrow, deliberate exception**: `goose_subscriber`'s liveness thread polls `GooseSubscriber_isValid()` at a low rate purely to detect *staleness* (a publisher going silent) — GOOSE is connectionless and has no push signal for that. It never gates or delays actual record delivery, which stays 100% event-driven via `GooseListener`; it only detects the absence of frames, structurally unobservable any other way in a connectionless protocol.
 - **No over-the-wire tree discovery.** Parse `.scd`/`.icd` at boot to know what to subscribe to — runtime discovery is slow and fragile against flaky IEDs. **One narrow, deliberate exception**: `ied_model_online_loader` walks a live server's MMS ACSI directory services to reconstruct an equivalent `IedModel` purely as a **fallback**, engaged only via `Orchestration_runFromOnlineDiscovery` when `scl_bootstrap` has already failed with `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (a connectable IED — e.g. OMICRON IED Scout's "Simulate IED" mode — that never serves an SCL file). Never a silent, automatic substitute inside `Orchestration_run` itself — without it, a device with no file services is entirely unreportable, full stop. See that feature's own Architecture bullet. GOOSE addressing precision is also degraded when this fallback is used: SCL almost always carries an explicit `<GSE><Address>`, filtering tightly at the socket level; discovery only gets this if the device exposes the optional `DstAddress` GoCB attribute, and reception still works without it (matches on `gocbRef` in the frame) but the NIC sees more traffic before software filtering.
 - **No dangling connections.** Explicit pooling, keep-alives, exponential backoff on MMS — IEDs drop connections under load.
-- **Don't touch `third_party/`** — pre-built and vendored; if headers seem to be missing something, say so, don't hand-edit.
+- **Don't touch `third_party/`** — pre-built and vendored; if headers seem to be missing something, say so, don't hand-edit. `third_party_src/` is a separate directory of git submodules (`cJSON`/`libiec61850`/`libwebsockets`/`mxml`/`Unity`, each pinned to a specific upstream commit, not checked out by default until `git submodule update --init`), used only by `setup_project.sh` to regenerate `third_party/` if ever genuinely needed — the normal build never touches it either, but it's the one place hand-editing/rebuilding from source is the point, not a violation of this rule.
 - **Don't add dependencies without asking** — dependency surface is deliberately minimal.
 - **If unsure of exact IEC 61850 semantics** (FC codes, DA types, BRCB trigger options), say so and cite the spec section or the relevant `third_party/include` header — don't guess.
 

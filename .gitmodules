@@ -1,0 +1,15 @@
+[submodule "third_party_src/libiec61850"]
+	path = third_party_src/libiec61850
+	url = https://github.com/mz-automation/libiec61850.git
+[submodule "third_party_src/cJSON"]
+	path = third_party_src/cJSON
+	url = https://github.com/DaveGamble/cJSON.git
+[submodule "third_party_src/mxml"]
+	path = third_party_src/mxml
+	url = https://github.com/michaelrsweet/mxml.git
+[submodule "third_party_src/Unity"]
+	path = third_party_src/Unity
+	url = https://github.com/ThrowTheSwitch/Unity.git
+[submodule "third_party_src/libwebsockets"]
+	path = third_party_src/libwebsockets
+	url = https://github.com/warmcat/libwebsockets.git
