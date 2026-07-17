@@ -67,9 +67,22 @@ interruptibleSleep(struct sScanOrchestrationWorker* worker, uint32_t totalMs) {
     }
 }
 
+/* scan_dispatcher only binds on this scan's 0->1 transition, so the client can't have a live
+ * connection to it before START_SCAN's ack arrives - it force-reconnects only after receiving
+ * that ack (see ws_test_scan.html's connectScanWs(force) comment). Both dispatcher ws_servers use
+ * "start-from-now" ring-buffer cursors (no backlog replay - see CLAUDE.md), so if the first sweep
+ * below publishes a found host before that reconnect's WS handshake completes, the event is lost
+ * to that client forever (ScanOrchestrationUseCases_isHostNew dedup means it won't be republished
+ * on a later sweep) - reproducible every time against a fast/local responder. This grace delay
+ * only runs before the very first sweep, giving a well-behaved client's reconnect (typically
+ * single-digit ms on loopback) time to land first. */
+#define SCAN_ORCHESTRATION_INITIAL_SWEEP_GRACE_MS 300
+
 static void*
 sweepLoop(void* parameter) {
     struct sScanOrchestrationWorker* worker = (struct sScanOrchestrationWorker*) parameter;
+
+    interruptibleSleep(worker, SCAN_ORCHESTRATION_INITIAL_SWEEP_GRACE_MS);
 
     while (!worker->stopRequested) {
         IedDiscoveryError err;
