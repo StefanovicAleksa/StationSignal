@@ -364,10 +364,27 @@ freeFlattenedArrays(FlattenedArrayList* list) {
  * Hard Rule) - Quality's and Timestamp's wire encodings are standardized and
  * identical across every CDC, unlike e.g. a CODEDENUM's Dbpos-vs-Tcmd
  * ambiguity, which is deliberately still never guessed anywhere in this
- * codebase. Whatever's left (the CDC-specific value field(s), e.g. stVal) is
- * assigned positionally among the remaining, unconsumed wire slots, in
- * order - the same trust-the-order assumption as before, just narrowed to
- * only the slot(s) that can't be resolved unambiguously by type.
+ * codebase.
+ *
+ * Whatever's left after q/t (the CDC-specific value field(s), e.g. a DPC's
+ * "stVal"/"stSeld") is next matched by `expectedTypes[refIdx]` (that leaf's
+ * own SCL-declared DataAttributeType, from IedModel_getDataSetMemberLeafWireTypes
+ * - may be NULL if the caller has none cached, e.g. every test fixture that
+ * doesn't set memberLeafWireTypes) against IedModel_dataAttributeTypeMatchesMmsType,
+ * but ONLY when the expected type identifies exactly one remaining,
+ * not-yet-claimed wire element - this is what actually fixed a real
+ * production mislabeling (a DPC Pos's "stVal"/"stSeld" swapped: stVal is
+ * IEC61850_CODEDENUM -> MMS_BIT_STRING, stSeld is IEC61850_BOOLEAN ->
+ * MMS_BOOLEAN, mutually exclusive per IedModelUseCases_dataAttributeTypeMatchesMmsType,
+ * so this always resolves that pair correctly once wire types are cached).
+ * A tie (two or more remaining candidates share a broad type category, or
+ * the expected type isn't confidently modeled at all - see that function's
+ * own doc comment) is deliberately left unresolved here rather than guessed.
+ *
+ * Whatever's STILL left after both passes is assigned positionally among the
+ * remaining, unconsumed wire slots, in order - the same trust-the-order
+ * assumption as before, just narrowed to only the slot(s) that can't be
+ * resolved unambiguously by type.
  *
  * Returns false (caller must not trust this decomposition - fall back to the
  * raw, non-decomposed entry, same as an outright count mismatch) if a "q" or
@@ -377,7 +394,7 @@ freeFlattenedArrays(FlattenedArrayList* list) {
  */
 static bool
 reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* flattened, int count,
-        MmsValue** outReordered) {
+        const DataAttributeType* expectedTypes, MmsValue** outReordered) {
     bool* wireUsed = calloc((size_t) count, sizeof(bool));
     if (!wireUsed) return false;
 
@@ -410,7 +427,31 @@ reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* 
             }
             if (!outReordered[refIdx]) ok = false;
         }
-        /* else: deferred to the positional fill-in pass below */
+        /* else: matched by expected type below if unambiguous, otherwise
+         * deferred to the positional fill-in pass further below */
+    }
+
+    if (ok && expectedTypes) {
+        for (int refIdx = 0; refIdx < count; refIdx++) {
+            if (outReordered[refIdx]) continue;
+            DataAttributeType expected = expectedTypes[refIdx];
+
+            int matchIdx = -1;
+            int matchCount = 0;
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (IedModel_dataAttributeTypeMatchesMmsType(expected, MmsValue_getType(flattened[w]))) {
+                    matchCount++;
+                    matchIdx = w;
+                }
+            }
+            if (matchCount == 1) {
+                outReordered[refIdx] = flattened[matchIdx];
+                wireUsed[matchIdx] = true;
+            }
+            /* matchCount == 0 or > 1: genuinely ambiguous or unresolvable by
+             * type - leave for the positional pass below, same as before. */
+        }
     }
 
     if (ok) {
@@ -440,13 +481,17 @@ reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* 
 /*
  * The per-leaf EXPECTED-vs-ACTUAL type cross-check that used to live here
  * (decomposedLeafTypesMatch, via IedModel_dataAttributeTypeMatchesMmsType)
- * was removed at explicit user request - confirmed via real-hardware
- * debug logging to reject genuine decompositions (flattenedCount matched
- * memberLeafCounts[i] exactly, but the type check still failed), blocking
- * Gap-4 decomposition outright for a device it should otherwise work on.
- * collectCandidates below now uses reorderFlattenedToMatchReferences instead
- * (see its own doc comment) - not a positional-vs-nothing choice anymore,
- * but positional-with-q/t-corrected-by-type.
+ * as a reject-gate was removed at explicit user request - confirmed via
+ * real-hardware debug logging to reject genuine decompositions
+ * (flattenedCount matched memberLeafCounts[i] exactly, but the type check
+ * still failed), blocking Gap-4 decomposition outright for a device it
+ * should otherwise work on. collectCandidates below now uses
+ * reorderFlattenedToMatchReferences instead (see its own doc comment):
+ * memberLeafWireTypes is passed straight through to it and consulted there
+ * as a disambiguation signal for the reorder (only accepted when it
+ * uniquely identifies one remaining wire candidate), never to reject the
+ * whole decomposition - the real fix for the stVal/stSeld-class mislabeling
+ * this cross-check was originally meant to catch.
  */
 static void
 collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
@@ -472,18 +517,19 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
              * exactly, but the type check still failed), blocking Gap-4
              * decomposition outright for a device it should otherwise work
              * on. memberLeafWireTypes/IedModel_dataAttributeTypeMatchesMmsType
-             * are left in place (still populated, just unconsulted here)
-             * rather than torn out, since removing them changes nothing
-             * behaviorally now. Removing the gate exposed a real
-             * mislabeling bug for that same device (q/stVal swapped) -
-             * reorderFlattenedToMatchReferences (its own doc comment above)
-             * fixes that directly instead of re-adding a reject-on-mismatch
-             * gate. */
+             * are instead handed to reorderFlattenedToMatchReferences (its
+             * own doc comment above), which consults them purely to
+             * disambiguate the reorder - never to reject the decomposition -
+             * fixing a real mislabeling bug (q/stVal swapped on one device,
+             * stVal/stSeld swapped on another) instead of re-adding a
+             * reject-on-mismatch gate. */
             if (flattened && flattenedCount == memberRefCache->memberLeafCounts[i]) {
                 MmsValue** reordered = malloc(sizeof(MmsValue*) * (size_t) flattenedCount);
+                const DataAttributeType* expectedTypes = memberRefCache->memberLeafWireTypes
+                        ? memberRefCache->memberLeafWireTypes[i] : NULL;
                 bool reorderOk = reordered
                         && reorderFlattenedToMatchReferences(memberRefCache->memberLeafReferences[i], flattened,
-                                flattenedCount, reordered);
+                                flattenedCount, expectedTypes, reordered);
                 if (reorderOk) {
                     trackFlattenedArray(flattenedArrays, flattened);
                     for (int k = 0; k < flattenedCount; k++) {

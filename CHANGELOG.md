@@ -843,3 +843,50 @@ unaffected. This closes the race structurally (the publish literally cannot happ
 grace period elapses) rather than trying to detect or work around a client that hasn't reconnected
 yet, which `scan_orchestration` has no visibility into (it doesn't know or care how many clients
 are attached to `scan_dispatcher`, by design — see that feature's own "purely transport" bullet).
+
+## `reorderFlattenedToMatchReferences`'s positional fallback swapped `stVal`/`stSeld` on a decomposed DPC `Pos`
+
+**Symptom, reported from the live frontend report table for a real IED** (`VR4C1A1LD0/SCSWI2$ST$Pos`):
+a data point labeled `...ST$Pos$stSeld` was showing an enumerated-looking small-int transition
+(`2 -> 0`) — the value shape of a DPC's `stVal` (Dbpos), not a select-status boolean — while the
+row labeled `...ST$Pos$stVal` showed a plain boolean. Confirmed present in both the MMS report
+path and the GOOSE path for the same device, ruling out a protocol-specific bug and pointing at
+shared logic both paths call into.
+
+**Root cause**: `reorderFlattenedToMatchReferences` — duplicated verbatim in both
+`mms_report_client_usecases.c` and `goose_subscriber_usecases.c`, originally added to fix an
+earlier, related incident (a DPC's `stVal`/`t` swapped — see that function's own doc comment) —
+only resolves two DA names by their fixed, CDC-independent wire type: `"q"` (13-bit
+`MMS_BIT_STRING`) and `"t"` (`MMS_UTC_TIME`). Every other DA name, including a DPC's `stVal`
+(Dbpos, `IEC61850_CODEDENUM` → `MMS_BIT_STRING`) and `stSeld` (`IEC61850_BOOLEAN` → `MMS_BOOLEAN`),
+fell through to a purely positional fallback pass with **no type check at all**: whatever wire-order
+slots were left over got assigned to whatever reference-order slots were left over, in order. When
+the reporting IED's real per-report/per-frame wire encoding order for `Pos`'s two non-q/t ST-FC
+siblings didn't match this daemon's locally-resolved SCL `<DOType>`-declared order (both orderings
+have the same leaf count, so the existing count-only mismatch guard couldn't catch it), `stVal` and
+`stSeld` silently swapped values.
+
+The fix for exactly this class of mismatch already existed and was already computed once per
+target and cached (`memberLeafWireTypes`, via `IedModel_getDataSetMemberLeafWireTypes` +
+`IedModel_dataAttributeTypeMatchesMmsType`) — but per both files' own comments, it had been pulled
+out as a **reject-gate** (it was rejecting genuine decompositions on real hardware, see the earlier
+`ied_model_online_loader` incident above) and left "in place, just unconsulted." `IEC61850_BOOLEAN`
+only ever matches `MMS_BOOLEAN` and `IEC61850_CODEDENUM` only ever matches `MMS_BIT_STRING`
+(`ied_model_usecases.c`'s `IedModelUseCases_dataAttributeTypeMatchesMmsType`) — mutually exclusive,
+so this already-computed data was sufficient to disambiguate `stVal` vs `stSeld` without guessing
+any new IEC 61850 semantics.
+
+**Fix**: both copies of `reorderFlattenedToMatchReferences` now consult `memberLeafWireTypes` again,
+but purely as a disambiguation signal for the reorder, never as a reject condition — a leaf's
+expected type is only used to pick which remaining wire value belongs to it when that type
+uniquely identifies exactly one remaining, not-yet-claimed candidate. A tie (two or more remaining
+candidates share a broad type category, or the type isn't confidently modeled at all — see that
+function's own doc comment) is deliberately left to the unchanged positional fallback rather than
+guessed, so this generalizes the existing q/t-only handling to the whole class of same-count/
+different-order mismatches instead of special-casing `stVal`/`stSeld` by name. New regression
+tests (`test_buildReportRecord_decomposition_stValAndStSeld_reorderedByTypeNotPosition` in
+`tests/mms_report_client/`, mirrored in `tests/goose_subscriber/`) build a 4-leaf `Pos`-shaped
+decomposition (`stVal`/`q`/`t`/`stSeld`) with the wire order deliberately swapped end-to-end
+relative to the model order, and assert each leaf lands on its correct reference — verified to fail
+with the exact reported symptom (`stVal`'s reference receiving a boolean instead of its own
+bitstring) before this fix, and pass after.

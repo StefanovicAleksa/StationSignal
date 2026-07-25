@@ -154,14 +154,19 @@ typedef struct {
 
     /* Parallel to memberLeafReferences (same shape) - each decomposed
      * member's own per-leaf EXPECTED DataAttributeType, from
-     * IedModel_getDataSetMemberLeafWireTypes, cross-checked in
-     * collectCandidates against the ACTUAL wire-decoded MmsType before a
-     * decomposition zip is trusted - see
+     * IedModel_getDataSetMemberLeafWireTypes. Passed into
+     * reorderFlattenedToMatchReferences (goose_subscriber_usecases.c) as a
+     * disambiguation signal for the reorder - only used to resolve which
+     * remaining wire value belongs to a leaf when its expected type uniquely
+     * identifies exactly one remaining candidate; NEVER used to reject the
+     * decomposition outright - see
      * MmsReportClientMemberRefCacheEntry.memberLeafWireTypes's own doc
      * comment (mms_report_client_types.h) for the real-hardware finding this
-     * guards against; identical rationale applies to GOOSE, which carries
-     * the same structured DA types. May be NULL (degrades to "no type
-     * check, trust the zip") if allocation failed at build time. */
+     * guards against (confirmed twice: q/stVal swapped on one device,
+     * stVal/stSeld swapped on another); identical rationale applies to
+     * GOOSE, which carries the same structured DA types. May be NULL
+     * (degrades to "no type check, trust positional order") if allocation
+     * failed at build time. */
     DataAttributeType** memberLeafWireTypes;
 
     /* Value-diff cache. One slot per *expanded leaf* position: a

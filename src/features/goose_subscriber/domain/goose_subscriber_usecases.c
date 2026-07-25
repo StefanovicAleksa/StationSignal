@@ -286,14 +286,19 @@ freeFlattenedArrays(FlattenedArrayList* list) {
  * reorderFlattenedToMatchReferences exactly; see that function's own doc
  * comment for the full real-hardware finding (a device whose
  * GetVariableAccessAttributes type-description order doesn't match its own
- * report/GOOSE encoding order) and the Quality(13-bit bitstring)/
- * Timestamp(UTC_TIME)-by-type, everything-else-positional resolution
- * strategy - GOOSE frames carry the same structured DA types as MMS
- * reports, so this is the same exposure.
+ * report/GOOSE encoding order), the Quality(13-bit bitstring)/
+ * Timestamp(UTC_TIME)-by-fixed-type pass, the expectedTypes-by-
+ * IedModel_dataAttributeTypeMatchesMmsType pass (only accepted when it
+ * uniquely identifies one remaining wire candidate - this is what resolves
+ * a DPC's "stVal"/"stSeld" correctly, since IEC61850_CODEDENUM only ever
+ * matches MMS_BIT_STRING and IEC61850_BOOLEAN only ever matches
+ * MMS_BOOLEAN), and the everything-else-positional fallback - GOOSE frames
+ * carry the same structured DA types as MMS reports, so this is the same
+ * exposure.
  */
 static bool
 reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* flattened, int count,
-        MmsValue** outReordered) {
+        const DataAttributeType* expectedTypes, MmsValue** outReordered) {
     bool* wireUsed = calloc((size_t) count, sizeof(bool));
     if (!wireUsed) return false;
 
@@ -326,7 +331,31 @@ reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* 
             }
             if (!outReordered[refIdx]) ok = false;
         }
-        /* else: deferred to the positional fill-in pass below */
+        /* else: matched by expected type below if unambiguous, otherwise
+         * deferred to the positional fill-in pass further below */
+    }
+
+    if (ok && expectedTypes) {
+        for (int refIdx = 0; refIdx < count; refIdx++) {
+            if (outReordered[refIdx]) continue;
+            DataAttributeType expected = expectedTypes[refIdx];
+
+            int matchIdx = -1;
+            int matchCount = 0;
+            for (int w = 0; w < count; w++) {
+                if (wireUsed[w] || !flattened[w]) continue;
+                if (IedModel_dataAttributeTypeMatchesMmsType(expected, MmsValue_getType(flattened[w]))) {
+                    matchCount++;
+                    matchIdx = w;
+                }
+            }
+            if (matchCount == 1) {
+                outReordered[refIdx] = flattened[matchIdx];
+                wireUsed[matchIdx] = true;
+            }
+            /* matchCount == 0 or > 1: genuinely ambiguous or unresolvable by
+             * type - leave for the positional pass below, same as before. */
+        }
     }
 
     if (ok) {
@@ -348,13 +377,15 @@ reorderFlattenedToMatchReferences(char* const* leafReferences, MmsValue* const* 
 /*
  * The per-leaf EXPECTED-vs-ACTUAL type cross-check that used to live here
  * (decomposedLeafTypesMatch, via IedModel_dataAttributeTypeMatchesMmsType)
- * was removed at explicit user request - mirrors the identical removal in
- * mms_report_client_usecases.c, confirmed via real-hardware debug logging to
- * reject genuine decompositions (flattenedCount matched memberLeafCounts[i]
- * exactly, but the type check still failed). Removing the gate exposed a
- * real mislabeling bug for that same device (q/stVal swapped) -
- * reorderFlattenedToMatchReferences above fixes that directly instead of
- * re-adding a reject-on-mismatch gate.
+ * as a reject-gate was removed at explicit user request - mirrors the
+ * identical removal in mms_report_client_usecases.c, confirmed via
+ * real-hardware debug logging to reject genuine decompositions
+ * (flattenedCount matched memberLeafCounts[i] exactly, but the type check
+ * still failed). memberLeafWireTypes is instead handed to
+ * reorderFlattenedToMatchReferences above, which consults it purely to
+ * disambiguate the reorder - never to reject the decomposition - fixing a
+ * real mislabeling bug (q/stVal swapped on one device, stVal/stSeld swapped
+ * on another) instead of re-adding a reject-on-mismatch gate.
  */
 static void
 collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* memberRefCache,
@@ -373,9 +404,11 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
 
             if (flattened && flattenedCount == memberRefCache->memberLeafCounts[i]) {
                 MmsValue** reordered = malloc(sizeof(MmsValue*) * (size_t) flattenedCount);
+                const DataAttributeType* expectedTypes = memberRefCache->memberLeafWireTypes
+                        ? memberRefCache->memberLeafWireTypes[i] : NULL;
                 bool reorderOk = reordered
                         && reorderFlattenedToMatchReferences(memberRefCache->memberLeafReferences[i], flattened,
-                                flattenedCount, reordered);
+                                flattenedCount, expectedTypes, reordered);
                 if (reorderOk) {
                     trackFlattenedArray(flattenedArrays, flattened);
                     for (int k = 0; k < flattenedCount; k++) {

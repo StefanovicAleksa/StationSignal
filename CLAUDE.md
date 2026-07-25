@@ -160,8 +160,9 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   every `<IED name="...">` for `orchestration`'s IED-name auto-detection.
   `IedModel_getReportableAttributeReferencesForLogicalNode` returns every FC=ST/MX leaf under one
   LN, used by `mms_report_client`'s dynamic-dataset synthesis. `IedModel_getDataSetMemberLeafWireTypes`
-  + `IedModel_dataAttributeTypeMatchesMmsType` give Gap-4 decomposition a per-leaf type cross-check
-  alongside the count check. `IedModel_wrapDynamicModel(model, iedName, mode)` wraps an
+  + `IedModel_dataAttributeTypeMatchesMmsType` give Gap-4 decomposition's reorder step a per-leaf
+  expected-vs-actual type signal (disambiguation only, never a reject gate — see that step's own
+  bullet below) alongside the count check. `IedModel_wrapDynamicModel(model, iedName, mode)` wraps an
   already-built dynamic `IedModel*` (from `ied_model_online_loader`) the same way
   `IedModel_loadFromFile` wraps an SCL-parsed one, so every accessor behaves identically. Hardened
   against real-world SCL variation: hex-parsed VLAN-ID/APPID, `<GSE>` MinTime/MaxTime,
@@ -215,9 +216,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
   See "Current State" above for the pending confirmation and its debug log.
-  **Gap-4 decomposition**: a structured attribute's wire value is flattened and zipped against a
-  locally-resolved SCL reference list, guarded by a count check AND a per-leaf type-compatibility
-  check — falls back to the raw entry on any mismatch.
+  **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered
+  (`reorderFlattenedToMatchReferences`) to match a locally-resolved SCL reference list — "q"/"t"
+  are matched by their fixed, CDC-independent wire type; any other leaf (e.g. a DPC's `stVal`/
+  `stSeld`) is matched by its own expected-vs-actual type (`memberLeafWireTypes`/
+  `IedModel_dataAttributeTypeMatchesMmsType`) only when that uniquely identifies one remaining
+  wire value, otherwise left to positional order — confirmed against real hardware that a
+  same-leaf-count-different-order mismatch (undetectable by count alone) silently swaps two
+  same-shaped siblings (`stVal`/`t` on one device, `stVal`/`stSeld` on another) if left purely
+  positional. Falls back to the raw (non-decomposed) entry only on an outright count mismatch or
+  an unresolvable q/t match — never on a same-count reorder.
   **ACSE password auth** applied unconditionally from the first connect, covering every reconnect.
   Proven end-to-end in `integration_tests/mms_report_client/`. Full incident history (rollback
   races, reconnect storms, GI removal-then-reinstatement, three real-hardware bugs) is in

@@ -133,18 +133,23 @@ typedef struct {
      * NULL unless raw member i decomposes, otherwise an owned array of
      * memberLeafCounts[i] DataAttributeTypes from
      * IedModel_getDataSetMemberLeafWireTypes) - each decomposed leaf's own
-     * EXPECTED (SCL-declared) type, cross-checked in collectCandidates
-     * against the ACTUAL wire-decoded MmsType of the flattened value landing
-     * at that same index, via IedModel_dataAttributeTypeMatchesMmsType,
-     * before the decomposition zip is trusted. Confirmed against real
-     * production hardware that memberLeafCounts matching alone is not
-     * sufficient - a real device's actual wire order for a structured
-     * attribute (e.g. a DPC's "Pos") does not have to match this daemon's
-     * locally-resolved SCL <DOType> order, and a same-count-different-order
-     * mismatch silently mislabels every leaf with no error. May be NULL
-     * (degrades to "no type check, trust the zip" - the old behavior) if
-     * allocation failed at build time, same OOM posture as every other field
-     * here. */
+     * EXPECTED (SCL-declared) type. Passed into
+     * reorderFlattenedToMatchReferences (mms_report_client_usecases.c) as a
+     * disambiguation signal for the reorder - a leaf's expected type is only
+     * ever used to resolve which remaining wire value belongs to it when
+     * that type uniquely identifies exactly one remaining candidate (via
+     * IedModel_dataAttributeTypeMatchesMmsType); it is NEVER used to reject
+     * the decomposition outright (an earlier reject-on-mismatch gate here
+     * was removed at explicit user request - see that function's own doc
+     * comment). Confirmed against real production hardware that
+     * memberLeafCounts matching alone is not sufficient - a real device's
+     * actual wire order for a structured attribute (e.g. a DPC's "Pos") does
+     * not have to match this daemon's locally-resolved SCL <DOType> order,
+     * and a same-count-different-order mismatch silently mislabels every
+     * leaf with no error (confirmed twice: q/stVal swapped on one device,
+     * stVal/stSeld swapped on another). May be NULL (degrades to "no type
+     * check, trust positional order" - the old behavior) if allocation
+     * failed at build time, same OOM posture as every other field here. */
     DataAttributeType** memberLeafWireTypes;
 
     /* Value-diff cache (see this struct's own doc comment above - always

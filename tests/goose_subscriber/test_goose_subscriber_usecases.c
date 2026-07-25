@@ -624,6 +624,95 @@ test_buildRecord_ungroupableEntry_fallsBackToSoloDiffCheck(void) {
 }
 
 void
+test_buildRecord_decomposition_stValAndStSeld_reorderedByTypeNotPosition(void) {
+    /* Regression test for a real production bug: a DPC "Pos"'s stVal (Dbpos,
+     * IEC61850_CODEDENUM -> a 2-bit MMS_BIT_STRING) and stSeld
+     * (IEC61850_BOOLEAN -> MMS_BOOLEAN) got their reference/value pairs
+     * swapped in the live GOOSE stream whenever the publishing device's real
+     * frame encoding order for those two non-q/t siblings didn't match this
+     * daemon's locally-resolved SCL <DOType> order - both orderings have the
+     * same leaf count, so the old code's blind positional fallback (used for
+     * anything besides "q"/"t") silently mispaired them. Wire order here
+     * deliberately swaps stVal/stSeld's ends relative to leafRefs0's model
+     * order, while q/t still resolve correctly via their own fixed wire
+     * type - mirrors mms_report_client's identical regression test exactly. */
+    char* leafRefs0[4] = {
+        "Breaker1CB1/XSWI1.Pos$stVal", "Breaker1CB1/XSWI1.Pos$q",
+        "Breaker1CB1/XSWI1.Pos$t", "Breaker1CB1/XSWI1.Pos$stSeld",
+    };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 4 };
+    DataAttributeType wireTypes0[4] = {
+        IEC61850_CODEDENUM, IEC61850_QUALITY, IEC61850_TIMESTAMP, IEC61850_BOOLEAN,
+    };
+    DataAttributeType* memberLeafWireTypes[1] = { wireTypes0 };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.memberLeafWireTypes = memberLeafWireTypes;
+
+    /* Wire/frame encoding order: stSeld, q, t, stVal - the two ambiguous
+     * non-q/t siblings sit at opposite ends versus leafRefs0's model order. */
+    MmsValue* stSeldWire = MmsValue_newBoolean(false);
+    MmsValue* qWire = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(qWire, 0);
+    MmsValue* tWire = MmsValue_newUtcTimeByMsTime(1700000000000ULL);
+    MmsValue* stValWire = MmsValue_newBitString(2);
+    MmsValue_setBitStringFromInteger(stValWire, 2); /* Dbpos "on" */
+
+    MmsValue* structVal = MmsValue_createEmptyStructure(4);
+    MmsValue_setElement(structVal, 0, stSeldWire);
+    MmsValue_setElement(structVal, 1, qWire);
+    MmsValue_setElement(structVal, 2, tWire);
+    MmsValue_setElement(structVal, 3, stValWire);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, record->entryCount,
+            "all four leaves of a well-ordered (count-matching) decomposition must still forward");
+
+    bool sawStVal = false, sawStSeld = false;
+    for (int i = 0; i < record->entryCount; i++) {
+        GooseSubscriberEntry* entry = &record->entries[i];
+        if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$stVal") == 0) {
+            sawStVal = true;
+            TEST_ASSERT_EQUAL_INT_MESSAGE(MMS_BIT_STRING, MmsValue_getType(entry->value),
+                    "stVal must carry the real Dbpos bitstring value, not stSeld's boolean");
+            TEST_ASSERT_EQUAL_INT(2, MmsValue_getBitStringSize(entry->value));
+            TEST_ASSERT_EQUAL_UINT32(2, MmsValue_getBitStringAsInteger(entry->value));
+        } else if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$stSeld") == 0) {
+            sawStSeld = true;
+            TEST_ASSERT_EQUAL_INT_MESSAGE(MMS_BOOLEAN, MmsValue_getType(entry->value),
+                    "stSeld must carry the real boolean value, not stVal's Dbpos bitstring");
+            TEST_ASSERT_FALSE(MmsValue_getBoolean(entry->value));
+        } else if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$q") == 0) {
+            TEST_ASSERT_EQUAL_INT(MMS_BIT_STRING, MmsValue_getType(entry->value));
+            TEST_ASSERT_EQUAL_INT(13, MmsValue_getBitStringSize(entry->value));
+        } else if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$t") == 0) {
+            TEST_ASSERT_EQUAL_INT(MMS_UTC_TIME, MmsValue_getType(entry->value));
+        } else {
+            TEST_FAIL_MESSAGE("unexpected entry reference");
+        }
+    }
+    TEST_ASSERT_TRUE(sawStVal);
+    TEST_ASSERT_TRUE(sawStSeld);
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
 test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void) {
     char* leafRefs0[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
     char** memberLeafReferences[1] = { leafRefs0 };
@@ -1218,6 +1307,7 @@ main(void) {
     RUN_TEST(test_buildRecord_decomposesStructuredEntry_intoFlatLeaves);
     RUN_TEST(test_buildRecord_decomposition_countMismatch_fallsBackToRawEntry);
     RUN_TEST(test_buildRecord_decomposition_withWireTypesPresent_stillDecomposesWhenTypesMatch);
+    RUN_TEST(test_buildRecord_decomposition_stValAndStSeld_reorderedByTypeNotPosition);
 
     RUN_TEST(test_buildRecord_firstEverValue_isSuppressed_andSeedsCache);
     RUN_TEST(test_buildRecord_unchangedValue_isDroppedAfterSeed);
