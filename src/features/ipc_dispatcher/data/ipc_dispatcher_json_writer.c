@@ -130,3 +130,20 @@ IpcDispatcherJsonWriter_write(const IpcMessage* message) {
 
     return json;
 }
+
+char*
+IpcDispatcherJsonWriter_writeConnectionStatus(MmsReportClientConnState state) {
+    if (state != MMS_REPORT_CLIENT_CONNECTION_REJECTED) return NULL;
+
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return NULL;
+
+    cJSON_AddNumberToObject(root, "schemaVersion", 1);
+    cJSON_AddStringToObject(root, "type", "CONNECTION_STATUS");
+    cJSON_AddStringToObject(root, "status", "CONNECTION_REJECTED");
+
+    char* json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    return json;
+}

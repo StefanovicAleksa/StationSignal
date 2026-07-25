@@ -104,6 +104,14 @@ DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int m
         return DEVICE_MANAGER_ERR_ORCHESTRATION_FAILED;
     }
 
+    /* Surfaces a rejected MMS report-client connection (e.g. wrong/missing
+     * ACSE password on the actual report association, discovered only after
+     * SCL bootstrap already succeeded) as a CONNECTION_STATUS push on this
+     * device's own stream - see orchestration_api.h's own doc comment on this
+     * wrapper. Must be called before DeviceManagerBootstrapPolicy_run/
+     * Orchestration_run, same as every Orchestration_set*Callback. */
+    Orchestration_wireConnStatusToIpcDispatcher(orchestrationHandle);
+
     OrchestrationErrorDetail detail;
     memset(&detail, 0, sizeof(detail));
     OrchestrationError runError = DeviceManagerBootstrapPolicy_run(orchestrationHandle, host, mmsPort,

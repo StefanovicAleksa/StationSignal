@@ -227,6 +227,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   positional. Falls back to the raw (non-decomposed) entry only on an outright count mismatch or
   an unresolvable q/t match — never on a same-count reorder.
   **ACSE password auth** applied unconditionally from the first connect, covering every reconnect.
+  **`MMS_REPORT_CLIENT_CONNECTION_REJECTED`**: a distinct `MmsReportClientConnState` value fired by
+  `supervisorLoop` when `IedConnection_connect` returns `IED_ERROR_CONNECTION_REJECTED` — libiec61850
+  collapses every non-success connect outcome (wrong ACSE password, plain TCP refusal/timeout, any
+  other AARE-level reject) onto this one code, so it's an honest "didn't connect, for some
+  rejection-shaped reason" signal, not a precise "wrong password" diagnosis; retries continue
+  unconditionally regardless of this state — diagnostic-only. **Edge-triggered** via
+  `connectionRejectedSignaled` on `sMmsReportClientHandle`: fires once per rejection streak, reset on
+  the next successful connect — without this a device stuck rejecting every attempt would push an
+  identical notification every backoff cycle forever. See `ipc_dispatcher`'s own bullet below for
+  where this state surfaces on the wire.
   Proven end-to-end in `integration_tests/mms_report_client/`. Full incident history (rollback
   races, reconnect storms, GI removal-then-reinstatement, three real-hardware bugs) is in
   `CHANGELOG.md`.
@@ -266,13 +276,32 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   tail. **Never** invoked automatically inside `Orchestration_run` — `device_manager`'s bootstrap
   policy calls it explicitly, only as a one-shot retry after `Orchestration_run` fails with
   exactly `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND`. See "No over-the-wire tree discovery" Hard
-  Rule. Proven end-to-end against a real `ied_simulator` IED in `integration_tests/orchestration/`
-  (needs `sudo`).
+  Rule. **`Orchestration_wireConnStatusToIpcDispatcher(handle)`** wires the connState slot
+  (otherwise caller-supplied via `Orchestration_setReportConnStateCallback`, mutually exclusive
+  with it) to `ipc_dispatcher`'s own `IpcDispatcher_onConnStateChange` — see that feature's own
+  bullet below for what it does with it. Must be called before `Orchestration_run*`, same as every
+  other setter. Proven end-to-end against a real `ied_simulator` IED in
+  `integration_tests/orchestration/` (needs `sudo`), including a device that accepts one
+  `acseAuthPassword` for SCL fetch but rejects a different one on the report client's own
+  association — `Orchestration_run` still returns `ORCHESTRATION_OK` in that case (by design: the
+  report client's own reconnect loop is what surfaces the problem, not `Orchestration_run` itself),
+  so `test_authRequired_bootstrapSucceedsButReportClientRejected_deliversConnectionStatusPush`
+  asserts the `CONNECTION_STATUS` push arrives instead.
 - `ipc_dispatcher/` — relays normalized `MmsReportRecord`/`GooseSubscriberRecord` data out over a
   websocket, hosted internally only (`127.0.0.1`, no TLS). Push-only. Public boundary:
-  `src/features/ipc_dispatcher/service/ipc_dispatcher_api.h`. Its two callback-adapters are
+  `src/features/ipc_dispatcher/service/ipc_dispatcher_api.h`. Its MMS/GOOSE callback-adapters are
   registered by `src/orchestration/` itself unconditionally — no way to register a second
   consumer (each record's ownership transfers to the one registered consumer, which destroys it).
+  **`ipc_dispatcher_conn_state_adapter`** is a third adapter, `IpcDispatcher_onConnStateChange`,
+  but unlike the other two it's opt-in, not automatic: `orchestration_api.h`'s own
+  `connStateCallback` slot is caller-supplied in general, so
+  `Orchestration_wireConnStatusToIpcDispatcher(handle)` exists purely as a convenience wrapper
+  routing it here without the caller needing to depend on `ipc_dispatcher`'s header directly —
+  `device_manager_api.c` calls it before every `Orchestration_run*`. Pushes a `CONNECTION_STATUS`
+  message (`{schemaVersion, type: "CONNECTION_STATUS", status: "CONNECTION_REJECTED"}`) only for
+  `MMS_REPORT_CLIENT_CONNECTION_REJECTED` — every other `MmsReportClientConnState` is a no-op, since
+  this stream isn't meant to surface routine `CONNECTING`/`CONNECTED`/backoff churn, only the one
+  diagnostic state a caller can act on (see `mms_report_client`'s own bullet above).
   **Quality (`q`) pairing**: `IpcDispatcherUseCases_pairQuality` walks up each value's ancestor
   prefixes one `$`-segment at a time (not a single last-`$` strip — required for deeply nested
   CONSTRUCTED-DA chains, e.g. a CMV's `q` several segments above its terminal leaf) to find its

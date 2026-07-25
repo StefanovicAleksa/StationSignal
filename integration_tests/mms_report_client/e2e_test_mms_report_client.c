@@ -59,6 +59,7 @@
 #define TEST_PORT_RECONNECT 10210
 #define TEST_PORT_CROSS_RCB_DEDUP 10211
 #define TEST_PORT_ENTRY_ID_RESUME 10212
+#define TEST_PORT_AUTH_REJECTED_CALLBACK 10213
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -101,10 +102,15 @@ static volatile int connectedCount;
  * this guards against (mms_report_client_connection.c). */
 static volatile int brcbMainEnableCount;
 
+/* Set once onConnState observes MMS_REPORT_CLIENT_CONNECTION_REJECTED - see
+ * test_authRequired_wrongPassword_firesConnectionRejectedCallback. */
+static volatile bool sawConnectionRejected;
+
 static void
 onConnState(void* userParam, MmsReportClientConnState state) {
     (void) userParam;
     if (state == MMS_REPORT_CLIENT_CONNECTED) connectedCount++;
+    if (state == MMS_REPORT_CLIENT_CONNECTION_REJECTED) sawConnectionRejected = true;
 }
 
 static void
@@ -210,6 +216,7 @@ setUp(void) {
     dynamicRcbFailed = false;
     connectedCount = 0;
     brcbMainEnableCount = 0;
+    sawConnectionRejected = false;
 }
 
 void
@@ -361,6 +368,51 @@ test_authRequired_wrongPassword_neverConnects(void) {
 
     TEST_ASSERT_FALSE_MESSAGE(waitUntil(&rcbEnabled),
             "expected the wrong ACSE password to never let the supervisor thread connect");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves the MMS_REPORT_CLIENT_CONNECTION_REJECTED connState transition
+ * (mms_report_client_connection.c's supervisorLoop) actually fires when the
+ * supervisor thread's IedConnection_connect() comes back
+ * IED_ERROR_CONNECTION_REJECTED - the mechanism the daemon's per-device
+ * CONNECTION_STATUS push (ipc_dispatcher) and, in turn, the API/frontend's
+ * "this device may need a password" UX are built on. Same wrong-password
+ * harness as test_authRequired_wrongPassword_neverConnects, but observes the
+ * connState callback instead of just the RCB status callback.
+ */
+void
+test_authRequired_wrongPassword_firesConnectionRejectedCallback(void) {
+    SimServer sim = SimServer_create();
+    SimServer_requireAuthentication(sim, TEST_PASSWORD);
+    SimServer_start(sim, TEST_PORT_AUTH_REJECTED_CALLBACK);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+    config.acseAuthPassword = "wrong-password";
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_AUTH_REJECTED_CALLBACK,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setConnectionStateCallback(client, onConnState, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&sawConnectionRejected),
+            "expected a rejected connect attempt to fire MMS_REPORT_CLIENT_CONNECTION_REJECTED");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -985,6 +1037,7 @@ main(void) {
     RUN_TEST(test_dataChangeOnServer_triggersReportWithNewValue);
     RUN_TEST(test_authRequired_correctPassword_connectsAndEnablesRcb);
     RUN_TEST(test_authRequired_wrongPassword_neverConnects);
+    RUN_TEST(test_authRequired_wrongPassword_firesConnectionRejectedCallback);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);

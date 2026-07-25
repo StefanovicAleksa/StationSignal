@@ -81,4 +81,19 @@ IpcDispatcher_onMmsReport(void* userParam, const MmsReportRecord* record);
 void
 IpcDispatcher_onGooseRecord(void* userParam, const GooseSubscriberRecord* record);
 
+/*
+ * Callback-adapter matching MmsReportClientConnStateCallback's signature
+ * exactly. Callers should not register this directly - use
+ * Orchestration_wireConnStatusToIpcDispatcher(orchestrationHandle) instead,
+ * which wires this up without requiring the caller to depend on this header
+ * at all (see orchestration_api.h's own top comment on why reaching into
+ * ipc_dispatcher directly is off-limits for callers outside orchestration).
+ * userParam MUST be the IpcDispatcherHandle. Pushes a CONNECTION_STATUS
+ * message onto this device's stream for MMS_REPORT_CLIENT_CONNECTION_REJECTED
+ * only; every other state is a no-op (see
+ * IpcDispatcherJsonWriter_writeConnectionStatus's own doc comment).
+ */
+void
+IpcDispatcher_onConnStateChange(void* userParam, MmsReportClientConnState state);
+
 #endif /* IPC_DISPATCHER_API_H_ */

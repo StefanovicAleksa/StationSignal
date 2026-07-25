@@ -2,6 +2,7 @@
 #define IPC_DISPATCHER_JSON_WRITER_H_
 
 #include "features/ipc_dispatcher/domain/ipc_dispatcher_types.h"
+#include "features/mms_report_client/service/mms_report_client_api.h"
 
 /*
  * IpcMessage -> JSON text via cJSON. The only file in this feature that
@@ -36,5 +37,20 @@
  * Returns NULL if message is NULL or on allocation failure. */
 char*
 IpcDispatcherJsonWriter_write(const IpcMessage* message);
+
+/*
+ * Additive envelope, same "type" discriminator convention as above:
+ *
+ *   { "schemaVersion": 1, "type": "CONNECTION_STATUS", "status": "CONNECTION_REJECTED" }
+ *
+ * Only ever emitted for MMS_REPORT_CLIENT_CONNECTION_REJECTED - every other
+ * MmsReportClientConnState value returns NULL (no-op): this stream deliberately
+ * doesn't surface routine CONNECTING/CONNECTED/backoff churn, only the one
+ * diagnostic state a caller can act on. See MmsReportClientConnState's own doc
+ * comment (mms_report_client_types.h) for exactly what CONNECTION_REJECTED does
+ * and does not mean. Caller owns the returned string (free()).
+ */
+char*
+IpcDispatcherJsonWriter_writeConnectionStatus(MmsReportClientConnState state);
 
 #endif /* IPC_DISPATCHER_JSON_WRITER_H_ */

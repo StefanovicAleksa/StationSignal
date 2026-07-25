@@ -52,6 +52,12 @@ Orchestration_setReportConnStateCallback(OrchestrationHandle handle,
 }
 
 void
+Orchestration_wireConnStatusToIpcDispatcher(OrchestrationHandle handle) {
+    if (!handle) return;
+    Orchestration_setReportConnStateCallback(handle, IpcDispatcher_onConnStateChange, handle->ipcDispatcher);
+}
+
+void
 Orchestration_setRcbStatusCallback(OrchestrationHandle handle,
         MmsReportClientRcbStatusCallback callback, void* userParam) {
     if (!handle) return;

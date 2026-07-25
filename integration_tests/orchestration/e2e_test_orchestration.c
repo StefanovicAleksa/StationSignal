@@ -51,6 +51,10 @@
 #define TEST_WS_PORT 18790
 #define ONLINE_DISCOVERY_TEST_PORT 10402
 #define ONLINE_DISCOVERY_TEST_WS_PORT 18791
+#define AUTH_MISMATCH_TEST_PORT 10403
+#define AUTH_MISMATCH_TEST_WS_PORT 18792
+#define AUTH_MISMATCH_PASSWORD_CORRECT "correct-password"
+#define AUTH_MISMATCH_PASSWORD_WRONG "wrong-password"
 #define TEST_INTERFACE "lo"
 #define IED_NAME "Reporter1"
 #define EXPECTED_RCB_REF "Reporter1LD1/LLN0.BR.brcbMain"
@@ -409,12 +413,113 @@ test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves the daemon's fix for a real, pre-existing gap: scl_bootstrap and
+ * mms_report_client each make their own independent MMS association to the
+ * same IED, so a device that accepts one acseAuthPassword for SCL fetch but
+ * rejects a DIFFERENT one on the actual report connection (an unusual but
+ * real device configuration - device_manager_api.c never lets the two
+ * diverge over the control channel, but Orchestration_create's own config
+ * can, and this is the only way to reproduce the scenario in a test) used to
+ * fail completely silently: Orchestration_run returned ORCHESTRATION_OK
+ * (MmsReportClient_start returns OK immediately, before any real connect
+ * attempt happens), and the device just never reported, with no error
+ * anywhere. This test proves Orchestration_wireConnStatusToIpcDispatcher
+ * closes that gap: the rejected report-client connection now pushes a
+ * CONNECTION_STATUS/CONNECTION_REJECTED message on this device's own stream,
+ * and no MMS_REPORT ever arrives.
+ *
+ * REQUIRES CAP_NET_RAW (goose_subscriber is unconditionally started too, same
+ * as every other test in this file) - run with sudo.
+ */
+void
+test_authRequired_bootstrapSucceedsButReportClientRejected_deliversConnectionStatusPush(void) {
+    SimServer sim = SimServer_create();
+    SimServer_setFilestoreBasepath(sim, "fixtures/served_files/");
+    SimServer_requireAuthentication(sim, AUTH_MISMATCH_PASSWORD_CORRECT);
+    SimServer_start(sim, AUTH_MISMATCH_TEST_PORT);
+    Thread_sleep(200);
+
+    OrchestrationConfig config;
+    OrchestrationConfig_defaults(&config);
+    config.ipcDispatcherConfig.port = AUTH_MISMATCH_TEST_WS_PORT;
+    config.bootstrapConfig.acseAuthPassword = AUTH_MISMATCH_PASSWORD_CORRECT;
+    config.reportClientConfig.acseAuthPassword = AUTH_MISMATCH_PASSWORD_WRONG;
+
+    OrchestrationError createError;
+    OrchestrationHandle handle = Orchestration_create(&config, &createError);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(ORCHESTRATION_OK, createError);
+
+    Orchestration_wireConnStatusToIpcDispatcher(handle);
+    Orchestration_setRcbStatusCallback(handle, onRcbStatus, NULL);
+    Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
+
+    LinkedList hosts = makeHostList("127.0.0.1");
+
+    OrchestrationErrorDetail detail;
+    OrchestrationError runError = Orchestration_run(handle, hosts, AUTH_MISMATCH_TEST_PORT, IED_NAME,
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+    LinkedList_destroyStatic(hosts);
+
+    TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
+            "expected Orchestration_run to still report success even though the report client's own "
+            "connection will be rejected - this is the pre-existing silent-failure gap this test proves");
+
+    int ws = connectAndUpgrade(AUTH_MISMATCH_TEST_WS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to orchestration's own ipc_dispatcher failed");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&gooseValid),
+            "expected the frame adapter to observe a VALID GOOSE feed within the timeout - GOOSE has no "
+            "ACSE/MMS association at all, so it's unaffected by the report client's own separate auth");
+
+    bool sawConnectionRejected = false;
+    bool sawReport = false;
+
+    for (int i = 0; i < 10 && !sawConnectionRejected; i++) {
+        if (!waitReadable(ws, 3000)) break;
+        char* json = readOneTextFrame(ws);
+        if (!json) break;
+
+        cJSON* parsed = cJSON_Parse(json);
+        free(json);
+        if (!parsed) continue;
+
+        cJSON* type = cJSON_GetObjectItem(parsed, "type");
+        if (type && type->valuestring && strcmp(type->valuestring, "MMS_REPORT") == 0) {
+            sawReport = true;
+        } else if (type && type->valuestring && strcmp(type->valuestring, "CONNECTION_STATUS") == 0) {
+            cJSON* status = cJSON_GetObjectItem(parsed, "status");
+            if (status && status->valuestring && strcmp(status->valuestring, "CONNECTION_REJECTED") == 0) {
+                sawConnectionRejected = true;
+            }
+        }
+
+        cJSON_Delete(parsed);
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(sawConnectionRejected,
+            "expected a CONNECTION_STATUS/CONNECTION_REJECTED push after the report client's own wrong "
+            "password was rejected");
+    TEST_ASSERT_FALSE_MESSAGE(sawReport,
+            "expected no MMS_REPORT to ever arrive - the report client's own connection is never "
+            "actually authenticated");
+    TEST_ASSERT_FALSE_MESSAGE(rcbEnabled,
+            "expected brcbMain to never enable - the report client's own connection is never established");
+
+    close(ws);
+    Orchestration_destroy(handle);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_fullSequence_bootstrapModelReportAndGoose_endToEnd);
     RUN_TEST(test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd);
+    RUN_TEST(test_authRequired_bootstrapSucceedsButReportClientRejected_deliversConnectionStatusPush);
 
     return UNITY_END();
 }

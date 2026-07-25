@@ -945,3 +945,50 @@ updated `IedDiscovery_verifyHost` e2e tests (now asserting `IED_DISCOVERY_HOST_A
 instead of the old, wrong `NOT_MMS_DEVICE` for the no-password and wrong-password cases) fully
 prove the classification against a real device; `scanSubnet`'s own loop change is a small, directly
 verifiable diff on top of that already-proven logic.
+
+## `START_REPORTING` gave no signal when a device's own MMS association rejected the connection
+
+**Symptom**: `scl_bootstrap` and `mms_report_client` each make their own independent MMS
+association to the same IED — a device can accept one `acseAuthPassword` for SCL fetch but reject
+it (or require a different one) for the actual report association. When that second,
+`mms_report_client`-side association was rejected, `Orchestration_run` still returned
+`ORCHESTRATION_OK` (`MmsReportClient_start` returns OK immediately, before any real connect
+attempt happens) and the supervisor thread's exponential-backoff reconnect loop just kept retrying
+forever, silently — with no signal anywhere on the per-device output stream. A technician staring
+at a device that will never produce a single report had no way to tell "wrong password" apart from
+"device is slow to come up" or "nothing's actually wrong yet."
+
+**Root cause**: `MmsReportClientConnState` (`mms_report_client_types.h`) had only
+`DISCONNECTED`/`CONNECTING`/`CONNECTED`/`RECONNECT_BACKOFF` — none of which distinguish an
+outright rejected association from an ordinary in-progress reconnect. `supervisorLoop`
+(`mms_report_client_connection.c`) already branches on `IedConnection_connect`'s returned
+`IedClientError` internally for backoff timing, but never surfaced the specific
+`IED_ERROR_CONNECTION_REJECTED` outcome to any caller-visible state.
+
+**Fix**: added `MMS_REPORT_CLIENT_CONNECTION_REJECTED` to `MmsReportClientConnState`. Note
+libiec61850 collapses every non-success connect outcome (wrong ACSE password, a plain TCP
+refusal/timeout, any other AARE-level reject) onto the identical `IED_ERROR_CONNECTION_REJECTED`
+code, so this is an honest "didn't connect, for some rejection-shaped reason" signal, not a
+precise "wrong password" diagnosis — retries continue unconditionally regardless of this state; it
+is diagnostic-only. **Edge-triggered**, via a new `connectionRejectedSignaled` flag on
+`sMmsReportClientHandle`: fires once per rejection streak, reset back to `false` the moment a
+connect attempt next succeeds — without this, a device stuck rejecting every attempt would push an
+identical notification every single backoff cycle forever (as often as ~1s at the initial tier).
+
+That state was then wired all the way to the per-device `ipc_dispatcher` stream as plain additive
+plumbing: `IpcDispatcherJsonWriter_writeConnectionStatus` emits a new `CONNECTION_STATUS` envelope
+(`{schemaVersion, type: "CONNECTION_STATUS", status: "CONNECTION_REJECTED"}`) — deliberately a
+no-op (returns `NULL`) for every other `MmsReportClientConnState` value, since this stream isn't
+meant to surface routine `CONNECTING`/`CONNECTED`/backoff churn, only the one diagnostic state a
+caller can actually act on. A new `ipc_dispatcher_conn_state_adapter.c`/`.h` pair mirrors the
+existing MMS/GOOSE adapters' shape (push onto the ring buffer, wake the lws thread). `orchestration`
+gained `Orchestration_wireConnStatusToIpcDispatcher(handle)`, a convenience wrapper around the
+existing (but previously always caller-supplied) `Orchestration_setReportConnStateCallback` slot,
+so `device_manager` can route connState to `ipc_dispatcher` without depending on its header
+directly (mirrors how report/GOOSE data is already wired). `device_manager_api.c` calls it
+unconditionally before every `Orchestration_run*`, same as every other `Orchestration_set*Callback`
+call site.
+
+Proven end-to-end (a real wrong-password `mms_report_client` connect attempt observed via the
+connState callback, and the same at the full control-channel/websocket level) in
+`integration_tests/mms_report_client/` and `integration_tests/orchestration/`.

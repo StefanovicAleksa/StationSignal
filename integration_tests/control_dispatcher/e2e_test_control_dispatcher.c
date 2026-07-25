@@ -44,6 +44,9 @@
 #define DM_WS_PORT_RANGE_START 19600
 #define DM_WS_PORT_RANGE_END 19699
 #define EXPECTED_GOCB_REF "Reporter1LD1/LLN0$GO$gcbInd"
+#define TEST_MMS_PORT_AUTH_WRONG 10504
+#define TEST_MMS_PORT_AUTH_CORRECT 10505
+#define TEST_PASSWORD "secret123"
 
 /* ---- hand-rolled minimal RFC6455 client: connect+upgrade, send a MASKED
  * client->server text frame, and read one unmasked server->client text
@@ -392,6 +395,107 @@ test_startReporting_thenStopReporting_realRoundTrip(void) {
     close(ws);
 }
 
+/*
+ * Proves the full control-channel round trip for a password-protected device
+ * with NO password supplied - the standard technician flow (host/interfaceId
+ * only, no sclFilePath, so scl_bootstrap runs its normal network-discovery
+ * SCL fetch) hitting a device that requires ACSE auth. This exact failure
+ * mode already worked correctly at the scl_bootstrap/orchestration layer
+ * (proven by scl_bootstrap's and orchestration's own E2E suites) but was
+ * never exercised at the full control-channel JSON level before - this is
+ * the gap the API's AUTH_REQUIRED classification (ied_reporter_api's
+ * errors.go) is built to detect from exactly this response shape.
+ *
+ * No CAP_NET_RAW needed - bootstrap fails and the whole pipeline is torn
+ * down before goose_subscriber's stage is ever reached.
+ */
+void
+test_startReporting_missingPassword_returnsAccessDeniedAtBootstrapStage(void) {
+    fixtureSim = SimServer_create();
+    SimServer_setFilestoreBasepath(fixtureSim, "fixtures/served_files/");
+    SimServer_requireAuthentication(fixtureSim, TEST_PASSWORD);
+    SimServer_start(fixtureSim, TEST_MMS_PORT_AUTH_WRONG);
+    Thread_sleep(200);
+
+    int ws = connectAndUpgrade(TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to control_dispatcher failed");
+
+    char startCommand[512];
+    snprintf(startCommand, sizeof(startCommand),
+            "{\"requestId\":\"req-start-noauth\",\"action\":\"START_REPORTING\","
+            "\"params\":{\"host\":\"127.0.0.1\",\"mmsPort\":%d,\"iedName\":\"%s\",\"interfaceId\":\"%s\"}}",
+            TEST_MMS_PORT_AUTH_WRONG, IED_NAME, TEST_INTERFACE);
+    TEST_ASSERT_TRUE(sendTextFrame(ws, startCommand));
+
+    cJSON* startResponse = waitForResponse(ws, "req-start-noauth");
+    TEST_ASSERT_NOT_NULL_MESSAGE(startResponse, "expected a START_REPORTING response");
+    TEST_ASSERT_FALSE_MESSAGE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(startResponse, "success")),
+            "expected START_REPORTING to fail with no acseAuthPassword against a password-protected device");
+
+    cJSON* error = cJSON_GetObjectItemCaseSensitive(startResponse, "error");
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("ORCHESTRATION_FAILED", cJSON_GetObjectItemCaseSensitive(error, "code")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("SCL bootstrap", cJSON_GetObjectItemCaseSensitive(error, "stage")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("access denied (auth required/rejected)",
+            cJSON_GetObjectItemCaseSensitive(error, "detail")->valuestring);
+
+    cJSON_Delete(startResponse);
+    close(ws);
+}
+
+/*
+ * Companion happy path: the same password-protected device, this time with
+ * the correct acseAuthPassword supplied - proves the full control-channel
+ * round trip still succeeds end to end for a password-protected device.
+ *
+ * REQUIRES CAP_NET_RAW (same as test_startReporting_thenStopReporting_realRoundTrip -
+ * a successful START_REPORTING always reaches goose_subscriber's stage) - run
+ * with sudo.
+ */
+void
+test_startReporting_correctPassword_succeeds(void) {
+    fixtureSim = SimServer_create();
+    SimServer_setFilestoreBasepath(fixtureSim, "fixtures/served_files/");
+    SimServer_requireAuthentication(fixtureSim, TEST_PASSWORD);
+    SimServer_start(fixtureSim, TEST_MMS_PORT_AUTH_CORRECT);
+    Thread_sleep(200);
+
+    int ws = connectAndUpgrade(TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to control_dispatcher failed");
+
+    char startCommand[512];
+    snprintf(startCommand, sizeof(startCommand),
+            "{\"requestId\":\"req-start-auth\",\"action\":\"START_REPORTING\","
+            "\"params\":{\"host\":\"127.0.0.1\",\"mmsPort\":%d,\"iedName\":\"%s\",\"interfaceId\":\"%s\","
+            "\"acseAuthPassword\":\"%s\"}}",
+            TEST_MMS_PORT_AUTH_CORRECT, IED_NAME, TEST_INTERFACE, TEST_PASSWORD);
+    TEST_ASSERT_TRUE(sendTextFrame(ws, startCommand));
+
+    cJSON* startResponse = waitForResponse(ws, "req-start-auth");
+    TEST_ASSERT_NOT_NULL_MESSAGE(startResponse, "expected a START_REPORTING response");
+    TEST_ASSERT_TRUE_MESSAGE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(startResponse, "success")),
+            "START_REPORTING with the correct acseAuthPassword failed - if error.stage is "
+            "GOOSE_SUBSCRIBER_START, this test needs CAP_NET_RAW (run with sudo)");
+
+    cJSON* result = cJSON_GetObjectItemCaseSensitive(startResponse, "result");
+    TEST_ASSERT_NOT_NULL(result);
+    double deviceId = cJSON_GetObjectItemCaseSensitive(result, "deviceId")->valuedouble;
+    cJSON_Delete(startResponse);
+
+    char stopCommand[128];
+    snprintf(stopCommand, sizeof(stopCommand),
+            "{\"requestId\":\"req-stop-auth\",\"action\":\"STOP_REPORTING\",\"params\":{\"deviceId\":%.0f}}",
+            deviceId);
+    TEST_ASSERT_TRUE(sendTextFrame(ws, stopCommand));
+
+    cJSON* stopResponse = waitForResponse(ws, "req-stop-auth");
+    TEST_ASSERT_NOT_NULL_MESSAGE(stopResponse, "expected a STOP_REPORTING response");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(stopResponse, "success")));
+    cJSON_Delete(stopResponse);
+
+    close(ws);
+}
+
 void
 test_startScan_thenStopScan_realRoundTrip(void) {
     /* No sudo needed - a scan sweep is TCP-only (see CLAUDE.md's
@@ -438,6 +542,8 @@ main(void) {
     RUN_TEST(test_malformedJson_returnsMalformedRequestError);
     RUN_TEST(test_unknownAction_returnsUnknownActionError);
     RUN_TEST(test_startReporting_thenStopReporting_realRoundTrip);
+    RUN_TEST(test_startReporting_missingPassword_returnsAccessDeniedAtBootstrapStage);
+    RUN_TEST(test_startReporting_correctPassword_succeeds);
     RUN_TEST(test_startScan_thenStopScan_realRoundTrip);
 
     return UNITY_END();

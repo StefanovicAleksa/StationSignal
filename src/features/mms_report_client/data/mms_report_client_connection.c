@@ -519,6 +519,7 @@ supervisorLoop(void* parameter) {
         IedConnection_connect(handle->connection, &err, handle->host, handle->port);
 
         if (err == IED_ERROR_OK) {
+            handle->connectionRejectedSignaled = false;
             uint64_t connectedAtMs = Hal_getTimeInMs();
             enableAllTargets(handle);
 
@@ -567,6 +568,18 @@ supervisorLoop(void* parameter) {
             if (Hal_getTimeInMs() - connectedAtMs >= MMS_REPORT_CLIENT_STABLE_CONNECTION_MS) {
                 handle->currentBackoffMs = 0;
             }
+        } else if (err == IED_ERROR_CONNECTION_REJECTED && !handle->connectionRejectedSignaled
+                && handle->connStateCallback) {
+            /* Edge-triggered - see connectionRejectedSignaled's own doc comment
+             * (mms_report_client_types.h) for why this only fires once per rejection
+             * streak rather than every backoff cycle. Note onStateChanged (above)
+             * already unconditionally fired MMS_REPORT_CLIENT_DISCONNECTED for this
+             * same failed attempt via IED_STATE_CLOSED, synchronously during the
+             * IedConnection_connect() call just above - this is an intentional,
+             * harmless second callback invocation carrying more specific
+             * information, not a duplicate-report bug. */
+            handle->connectionRejectedSignaled = true;
+            handle->connStateCallback(handle->connStateCallbackParam, MMS_REPORT_CLIENT_CONNECTION_REJECTED);
         }
 
         if (handle->stopRequested) break;
@@ -620,6 +633,7 @@ MmsReportClientConnection_start(MmsReportClientHandle handle) {
     handle->connectionLostSignal = false;
     handle->supervisorExited = false;
     handle->currentBackoffMs = 0;
+    handle->connectionRejectedSignaled = false;
 
     handle->supervisorThread = Thread_create(supervisorLoop, handle, false);
     if (!handle->supervisorThread) {

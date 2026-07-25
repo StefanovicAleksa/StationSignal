@@ -292,6 +292,23 @@ or, for GOOSE:
 A single MMS report or GOOSE frame from the device can fan out into one message here with
 multiple `dataPoints` if several dataset members changed together.
 
+### Connection status
+
+A third, rarer message type can arrive on this same stream:
+
+```json
+{ "schemaVersion": 1, "type": "CONNECTION_STATUS", "status": "CONNECTION_REJECTED" }
+```
+
+Sent once when the device's own MMS report-client association gets rejected (wrong/missing
+`acseAuthPassword`, or any other AARE-level reject — the daemon can't tell these apart, see the
+Gotchas section), even though `START_REPORTING` itself already succeeded (this can happen when a
+device accepts a different password for SCL fetch than for the actual report connection). The
+daemon keeps retrying with exponential backoff regardless — this message is diagnostic only, not
+an indication reporting has stopped for good. Sent once per rejection streak, not once per retry;
+if the device later accepts a connection, this state clears silently (no corresponding "resolved"
+push — the report stream itself resuming is the signal).
+
 ---
 
 ## 4. Scan-result stream — `ws://127.0.0.1:8766`
@@ -394,11 +411,12 @@ until you explicitly stop it.
   exposed directly. Don't put it on a network boundary as-is.
 - **Broadcast fan-out on the control channel.** If two clients are connected to `:8767`
   simultaneously, both see every response, not just the requester — filter on `requestId`.
-- **No unsolicited pushes anywhere.** No "device disconnected," no "scan finished" (scans don't
-  finish on their own — they run until you `STOP_SCAN`). Silence on a stream means "nothing
-  changed," not "something's wrong" — and conversely, the daemon does not tell you if a device's
-  connection actually dropped; you'd only notice by the report stream going quiet.
-  the underlying MMS/GOOSE connection state.
+- **No unsolicited pushes anywhere, with one exception.** No "device disconnected," no "scan
+  finished" (scans don't finish on their own — they run until you `STOP_SCAN`). Silence on a
+  stream means "nothing changed," not "something's wrong" — and the daemon does not tell you if a
+  device's connection actually dropped; you'd only notice by the report stream going quiet. The
+  one exception is `CONNECTION_STATUS`/`CONNECTION_REJECTED` (§3) — a real, if coarse, "this device
+  isn't accepting our connection" signal, distinct from ordinary silence.
 - **RFC6455 framing required.** A raw TCP socket sending bare JSON will not work on any of these
   ports — use a real websocket client.
 - **`sclFilePath` is a path on the daemon's own filesystem**, not something you upload — if

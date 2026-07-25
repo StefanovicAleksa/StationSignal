@@ -57,6 +57,20 @@ Orchestration_create(const OrchestrationConfig* config, OrchestrationError* outE
  */
 void Orchestration_setReportConnStateCallback(OrchestrationHandle handle,
         MmsReportClientConnStateCallback callback, void* userParam);
+
+/*
+ * Convenience wrapper for the one caller-side use case that needs the
+ * connState slot but has no callback of its own to supply: routes
+ * MmsReportClientConnState transitions to ipc_dispatcher's own
+ * IpcDispatcher_onConnStateChange (CONNECTION_STATUS push on the per-device
+ * stream), the same way report/GOOSE data is always wired to ipc_dispatcher -
+ * without exposing ipc_dispatcher's handle/header to the caller (see this
+ * header's own top comment on why that boundary matters). Mutually exclusive
+ * with Orchestration_setReportConnStateCallback - the underlying connState
+ * slot is singular; whichever was called most recently before Orchestration_run()
+ * wins. Must be called before Orchestration_run(), same as every setter here.
+ */
+void Orchestration_wireConnStatusToIpcDispatcher(OrchestrationHandle handle);
 void Orchestration_setRcbStatusCallback(OrchestrationHandle handle,
         MmsReportClientRcbStatusCallback callback, void* userParam);
 void Orchestration_setGooseStatusCallback(OrchestrationHandle handle,

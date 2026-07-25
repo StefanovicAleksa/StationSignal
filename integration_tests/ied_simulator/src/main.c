@@ -10,6 +10,11 @@
  * third-party IEC 61850 client tool) can observe reports in real time.
  * Not used by the automated E2E test, which links sim_server.c directly and
  * drives SimServer itself instead of spawning this process.
+ *
+ * Optional argv[2]: if given, requires ACSE password auth (SimServer_requireAuthentication)
+ * with this password - lets an out-of-process test harness (e.g. ied_reporter_api's own
+ * integration tests, which build and spawn this binary rather than linking sim_server.c
+ * directly) exercise a password-protected device end to end.
  */
 
 #define DEFAULT_PORT 10202
@@ -21,6 +26,7 @@ main(int argc, char** argv) {
     if (argc > 1) port = atoi(argv[1]);
 
     SimServer sim = SimServer_create();
+    if (argc > 2) SimServer_requireAuthentication(sim, argv[2]);
     SimServer_start(sim, port);
 
     printf("[ied_simulator] Reporter1 listening on port %d. Ctrl-C to stop.\n", port);

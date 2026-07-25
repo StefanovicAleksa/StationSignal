@@ -28,7 +28,18 @@ typedef enum {
     MMS_REPORT_CLIENT_DISCONNECTED = 0,
     MMS_REPORT_CLIENT_CONNECTING,
     MMS_REPORT_CLIENT_CONNECTED,
-    MMS_REPORT_CLIENT_RECONNECT_BACKOFF
+    MMS_REPORT_CLIENT_RECONNECT_BACKOFF,
+
+    /* IedConnection_connect() did not reach CONNECTED - see supervisorLoop's own
+     * comment (mms_report_client_connection.c) for exactly what this does and does
+     * NOT mean: libiec61850 collapses every non-success connect outcome (a wrong
+     * ACSE password, a plain TCP refusal/timeout, any other AARE-level reject) onto
+     * the identical IED_ERROR_CONNECTION_REJECTED code, so this state is an honest
+     * "didn't connect, for some rejection-shaped reason" signal, not a precise
+     * "wrong password" diagnosis. Edge-triggered: fired once per rejection streak,
+     * not once per backoff cycle - see connectionRejectedSignaled below. Retries
+     * continue unconditionally regardless of this state; it is diagnostic-only. */
+    MMS_REPORT_CLIENT_CONNECTION_REJECTED
 } MmsReportClientConnState;
 
 /*
@@ -362,6 +373,14 @@ struct sMmsReportClientHandle {
     Semaphore wakeSignal;
     Thread supervisorThread;
     uint32_t currentBackoffMs;
+
+    /* Edge-detection flag for MMS_REPORT_CLIENT_CONNECTION_REJECTED: true once
+     * connStateCallback has been fired with that state since the last successful
+     * IedConnection_connect() - reset back to false the moment a connect attempt
+     * next succeeds. Without this, a device stuck rejecting every attempt would
+     * push an identical CONNECTION_STATUS notification every single backoff cycle
+     * forever (as often as ~1s at the initial tier) - see supervisorLoop. */
+    bool connectionRejectedSignaled;
 
     /* Binary mutex (Semaphore_create(1)) guarding every memberRefCache
      * entry's lastForwardedValues slots. Historically also guarded the

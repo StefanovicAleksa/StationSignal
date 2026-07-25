@@ -4,6 +4,7 @@
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_mms_adapter.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_goose_adapter.h"
+#include "features/ipc_dispatcher/data/ipc_dispatcher_conn_state_adapter.h"
 
 void
 IpcDispatcherConfig_defaults(IpcDispatcherConfig* config) {
@@ -102,4 +103,9 @@ IpcDispatcher_onMmsReport(void* userParam, const MmsReportRecord* record) {
 void
 IpcDispatcher_onGooseRecord(void* userParam, const GooseSubscriberRecord* record) {
     IpcDispatcherGooseAdapter_handleRecord((IpcDispatcherHandle) userParam, record);
+}
+
+void
+IpcDispatcher_onConnStateChange(void* userParam, MmsReportClientConnState state) {
+    IpcDispatcherConnStateAdapter_handleConnStateChange((IpcDispatcherHandle) userParam, state);
 }
