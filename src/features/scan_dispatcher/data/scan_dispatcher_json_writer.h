@@ -17,8 +17,15 @@
  *     "scanId": 1,
  *     "host": "192.168.1.50",
  *     "mmsPort": 102,
- *     "discoveredAtMs": 1751520000123
+ *     "discoveredAtMs": 1751520000123,
+ *     "authRequired": false
  *   }
+ *
+ * authRequired: true means this candidate answered MMS but the (unauthenticated)
+ * association was specifically access-denied, not that nothing is there - it's
+ * still a real IEC 61850 device, just not fully verifiable without credentials
+ * (see ied_discovery's IED_DISCOVERY_HOST_ACCESS_DENIED). Connect to it via
+ * START_REPORTING's own acseAuthPassword.
  *
  * Known caveat: cJSON numbers are double-backed, so scanId/discoveredAtMs
  * beyond 2^53 lose precision - harmless at these magnitudes (a monotonic

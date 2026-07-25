@@ -57,7 +57,7 @@ typedef struct {
  * change after a scan has already started does not retroactively apply to it.
  */
 typedef void (*ScanOrchestrationDeviceFoundCallback)(void* userParam, uint64_t scanId,
-        const char* host, int mmsPort);
+        const char* host, int mmsPort, bool authRequired);
 
 struct sScanOrchestrationRegistry; /* opaque, defined in data/scan_orchestration_registry.c */
 

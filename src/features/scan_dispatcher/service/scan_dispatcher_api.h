@@ -62,6 +62,7 @@ ScanDispatcher_destroy(ScanDispatcherHandle handle);
  * not currently running.
  */
 void
-ScanDispatcher_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort);
+ScanDispatcher_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort,
+        bool authRequired);
 
 #endif /* SCAN_DISPATCHER_API_H_ */

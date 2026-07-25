@@ -3,7 +3,8 @@
 #include "features/scan_dispatcher/domain/scan_dispatcher_usecases.h"
 
 ScanDeviceFoundEvent*
-ScanDispatcherUseCases_assembleEvent(uint64_t scanId, const char* host, int mmsPort, uint64_t discoveredAtMs) {
+ScanDispatcherUseCases_assembleEvent(uint64_t scanId, const char* host, int mmsPort, uint64_t discoveredAtMs,
+        bool authRequired) {
     if (!host || !host[0]) return NULL;
 
     ScanDeviceFoundEvent* event = calloc(1, sizeof(ScanDeviceFoundEvent));
@@ -18,6 +19,7 @@ ScanDispatcherUseCases_assembleEvent(uint64_t scanId, const char* host, int mmsP
     event->scanId = scanId;
     event->mmsPort = mmsPort;
     event->discoveredAtMs = discoveredAtMs;
+    event->authRequired = authRequired;
 
     return event;
 }

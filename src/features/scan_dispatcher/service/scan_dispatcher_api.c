@@ -92,6 +92,7 @@ ScanDispatcher_destroy(ScanDispatcherHandle handle) {
 }
 
 void
-ScanDispatcher_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort) {
-    ScanDispatcherAdapter_publishDeviceFound(handle, scanId, host, mmsPort);
+ScanDispatcher_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort,
+        bool authRequired) {
+    ScanDispatcherAdapter_publishDeviceFound(handle, scanId, host, mmsPort, authRequired);
 }

@@ -6,10 +6,12 @@
 #include "features/scan_dispatcher/data/scan_dispatcher_ws_server.h"
 
 void
-ScanDispatcherAdapter_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort) {
+ScanDispatcherAdapter_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort,
+        bool authRequired) {
     if (!handle || !handle->running) return;
 
-    ScanDeviceFoundEvent* event = ScanDispatcherUseCases_assembleEvent(scanId, host, mmsPort, Hal_getTimeInMs());
+    ScanDeviceFoundEvent* event = ScanDispatcherUseCases_assembleEvent(scanId, host, mmsPort, Hal_getTimeInMs(),
+            authRequired);
     if (!event) return;
 
     char* json = ScanDispatcherJsonWriter_write(event);

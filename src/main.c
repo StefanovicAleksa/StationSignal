@@ -43,9 +43,10 @@ onSignal(int sig) {
 }
 
 static void
-onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort) {
+onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort, bool authRequired) {
     (void) userParam;
-    printf("[scan] found %s:%d (scan #%llu)\n", host, mmsPort, (unsigned long long) scanId);
+    printf("[scan] found %s:%d (scan #%llu)%s\n", host, mmsPort, (unsigned long long) scanId,
+            authRequired ? " [auth required]" : "");
 }
 
 /*

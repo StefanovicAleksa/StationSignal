@@ -14,6 +14,7 @@ ScanDispatcherJsonWriter_write(const ScanDeviceFoundEvent* event) {
     cJSON_AddStringToObject(root, "host", event->host ? event->host : "");
     cJSON_AddNumberToObject(root, "mmsPort", event->mmsPort);
     cJSON_AddNumberToObject(root, "discoveredAtMs", (double) event->discoveredAtMs);
+    cJSON_AddBoolToObject(root, "authRequired", event->authRequired);
 
     char* json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

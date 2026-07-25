@@ -28,7 +28,7 @@ tearDown(void) {
 
 void
 test_write_roundTripsAllFields(void) {
-    ScanDeviceFoundEvent event = { 7, (char*) "192.168.1.50", 102, 1700000000000ULL };
+    ScanDeviceFoundEvent event = { 7, (char*) "192.168.1.50", 102, 1700000000000ULL, false };
 
     fixtureJson = ScanDispatcherJsonWriter_write(&event);
     TEST_ASSERT_NOT_NULL(fixtureJson);
@@ -45,6 +45,20 @@ test_write_roundTripsAllFields(void) {
     TEST_ASSERT_EQUAL_STRING("192.168.1.50", cJSON_GetObjectItem(fixtureParsed, "host")->valuestring);
     TEST_ASSERT_TRUE(cJSON_GetObjectItem(fixtureParsed, "mmsPort")->valuedouble == 102.0);
     TEST_ASSERT_TRUE(cJSON_GetObjectItem(fixtureParsed, "discoveredAtMs")->valuedouble == 1700000000000.0);
+    TEST_ASSERT_FALSE(cJSON_IsTrue(cJSON_GetObjectItem(fixtureParsed, "authRequired")));
+}
+
+void
+test_write_authRequiredTrue_roundTrips(void) {
+    ScanDeviceFoundEvent event = { 7, (char*) "192.168.1.50", 102, 1700000000000ULL, true };
+
+    fixtureJson = ScanDispatcherJsonWriter_write(&event);
+    TEST_ASSERT_NOT_NULL(fixtureJson);
+
+    fixtureParsed = cJSON_Parse(fixtureJson);
+    TEST_ASSERT_NOT_NULL(fixtureParsed);
+
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItem(fixtureParsed, "authRequired")));
 }
 
 void
@@ -57,6 +71,7 @@ main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_write_roundTripsAllFields);
+    RUN_TEST(test_write_authRequiredTrue_roundTrips);
     RUN_TEST(test_write_returnsNull_onNullEvent);
 
     return UNITY_END();

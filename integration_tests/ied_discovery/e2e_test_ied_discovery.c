@@ -74,7 +74,7 @@ test_verifyHost_notTcpReachable_whenNothingListening(void) {
 }
 
 void
-test_verifyHost_authRequiredNoPasswordConfigured_notMmsDevice(void) {
+test_verifyHost_authRequiredNoPasswordConfigured_accessDenied(void) {
     SimServer sim = SimServer_create();
     SimServer_requireAuthentication(sim, "secret123");
     SimServer_start(sim, TEST_PORT);
@@ -85,7 +85,7 @@ test_verifyHost_authRequiredNoPasswordConfigured_notMmsDevice(void) {
     IedDiscoveryError err;
     IedDiscoveryHostStatus status = IedDiscovery_verifyHost(handle, LIVE_HOST, TEST_PORT, &err);
 
-    TEST_ASSERT_EQUAL(IED_DISCOVERY_HOST_NOT_MMS_DEVICE, status);
+    TEST_ASSERT_EQUAL(IED_DISCOVERY_HOST_ACCESS_DENIED, status);
 
     IedDiscovery_destroy(handle);
     SimServer_stop(sim);
@@ -115,7 +115,7 @@ test_verifyHost_authRequiredCorrectPassword_confirmed(void) {
 }
 
 void
-test_verifyHost_authRequiredWrongPassword_notMmsDevice(void) {
+test_verifyHost_authRequiredWrongPassword_accessDenied(void) {
     SimServer sim = SimServer_create();
     SimServer_requireAuthentication(sim, "secret123");
     SimServer_start(sim, TEST_PORT);
@@ -129,7 +129,7 @@ test_verifyHost_authRequiredWrongPassword_notMmsDevice(void) {
     IedDiscoveryError err;
     IedDiscoveryHostStatus status = IedDiscovery_verifyHost(handle, LIVE_HOST, TEST_PORT, &err);
 
-    TEST_ASSERT_EQUAL(IED_DISCOVERY_HOST_NOT_MMS_DEVICE, status);
+    TEST_ASSERT_EQUAL(IED_DISCOVERY_HOST_ACCESS_DENIED, status);
 
     IedDiscovery_destroy(handle);
     SimServer_stop(sim);
@@ -142,9 +142,9 @@ main(void) {
 
     RUN_TEST(test_verifyHost_confirmsRealDevice);
     RUN_TEST(test_verifyHost_notTcpReachable_whenNothingListening);
-    RUN_TEST(test_verifyHost_authRequiredNoPasswordConfigured_notMmsDevice);
+    RUN_TEST(test_verifyHost_authRequiredNoPasswordConfigured_accessDenied);
     RUN_TEST(test_verifyHost_authRequiredCorrectPassword_confirmed);
-    RUN_TEST(test_verifyHost_authRequiredWrongPassword_notMmsDevice);
+    RUN_TEST(test_verifyHost_authRequiredWrongPassword_accessDenied);
 
     return UNITY_END();
 }

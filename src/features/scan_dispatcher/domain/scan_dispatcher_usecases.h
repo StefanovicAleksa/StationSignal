@@ -12,7 +12,8 @@
  * allocation failure or a NULL/empty host. Caller owns the result:
  * ScanDispatcherUseCases_freeEvent. */
 ScanDeviceFoundEvent*
-ScanDispatcherUseCases_assembleEvent(uint64_t scanId, const char* host, int mmsPort, uint64_t discoveredAtMs);
+ScanDispatcherUseCases_assembleEvent(uint64_t scanId, const char* host, int mmsPort, uint64_t discoveredAtMs,
+        bool authRequired);
 
 /* Frees an event built above, including its owned host string. NULL-safe. */
 void

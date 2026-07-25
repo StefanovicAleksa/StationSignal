@@ -890,3 +890,58 @@ decomposition (`stVal`/`q`/`t`/`stSeld`) with the wire order deliberately swappe
 relative to the model order, and assert each leaf lands on its correct reference — verified to fail
 with the exact reported symptom (`stVal`'s reference receiving a boolean instead of its own
 bitstring) before this fix, and pass after.
+
+## `IedDiscovery_scanSubnet` silently dropped password-protected IEDs from START_SCAN results
+
+**Symptom**: a password-protected IED (confirmed with a simulated `SimAuth` fixture) never
+appeared in `START_SCAN`'s discovery results at all, even with the daemon otherwise healthy and
+the device reachable on the network — indistinguishable from no device being at that address.
+This broke the documented scan → discover → connect workflow for any such device: a technician
+has no way to click "connect" on a device that never shows up.
+
+**Root cause**: `IedDiscoveryMmsProbe_associate` (`ied_discovery_mms_probe.c`) already computed
+an internal `accessDenied` classification in its static helper `tryAssociateOnce`
+(`err == IED_ERROR_ACCESS_DENIED || err == IED_ERROR_CONNECTION_REJECTED`) — the same heuristic
+`scl_bootstrap_mms_session.c` uses — but discarded it, returning only a bare `bool`. Downstream,
+`IedDiscoveryHostStatus` (`ied_discovery_types.h`) only had three values, and its own doc comment
+admitted `IED_DISCOVERY_HOST_NOT_MMS_DEVICE` conflated two genuinely different outcomes: "nothing
+here is speaking MMS at all" and "a real device rejected our (unauthenticated) association
+attempt." `IedDiscovery_scanSubnet` (`ied_discovery_api.c`) only added a host to its result list
+when the probe's bare bool was `true`, so an access-denied device fell into exactly the same
+bucket as empty air on that address and was silently excluded — the same shape of bug
+`scl_bootstrap`'s own `SclBootstrapCandidateStatus`/`SCL_BOOTSTRAP_CANDIDATE_ACCESS_DENIED` had
+already been built to avoid for SCL-fetch, just never applied to `ied_discovery`.
+
+**Fix**: `IedDiscoveryMmsProbe_associate` gained a trailing `bool* outAccessDenied` out-param
+(mirroring `tryAssociateOnce`'s own existing out-param idiom), set true iff the final attempt
+(post-retry, if one was made) failed specifically due to access denial — false whenever the
+function itself returns `true`. `IedDiscoveryHostStatus` gained a new, distinct
+`IED_DISCOVERY_HOST_ACCESS_DENIED` value (`NOT_MMS_DEVICE`'s doc comment corrected to no longer
+conflate the two); `IedDiscovery_verifyHost` now returns it via a 3-way branch in `verifyOneHost`.
+`IedDiscovery_scanSubnet` now includes a host whenever it either fully associated *or* was
+access-denied, returning a `LinkedList` of a new owned `IedDiscoveredHost{host, authRequired}`
+struct instead of bare `char*` IPs (freed via a new `IedDiscovery_destroyHostList`, since a bare
+`LinkedList_destroyDeep(list, free)` is no longer sufficient — each element now owns its own
+`host` string one level down).
+
+That `authRequired` bit was then threaded, as plain additive plumbing (no new logic), all the way
+to the wire: `ScanOrchestrationDeviceFoundCallback`'s signature, `scan_orchestration_worker.c`'s
+`sweepLoop` (publish + callback call sites), `ScanDeviceFoundEvent`, `ScanDispatcherUseCases_assembleEvent`,
+`ScanDispatcher_publishDeviceFound`/`ScanDispatcherAdapter_publishDeviceFound`, and finally
+`ScanDispatcherJsonWriter_write`'s `SCAN_RESULT` envelope, which gained one new field:
+`authRequired: false|true`. No `schemaVersion` bump — this repo has no precedent for bumping it on
+a purely additive field. `docs/AGENT_API_GUIDE.md`'s SCAN_RESULT section and Flow B's worked
+example were updated to match.
+
+**Deliberately left alone**: `START_SCAN` itself still has no `acseAuthPassword` field — letting a
+scan pre-authenticate (so a correctly-credentialed device would show up as fully `CONFIRMED`
+instead of `authRequired: true`) is a separate, later enhancement, not part of this fix. This bug
+is fully addressed by `authRequired` alone: even with zero credentials ever supplied to a scan, a
+password-protected device now surfaces as a real, connectable-via-`START_REPORTING` candidate
+instead of silently vanishing. `IedDiscovery_scanSubnet`'s own real-subnet-sweep behavior against
+an access-denied host was not given new automated coverage, consistent with this codebase's
+existing, everywhere-else avoidance of topology-dependent `getifaddrs`/real-scan tests — the
+updated `IedDiscovery_verifyHost` e2e tests (now asserting `IED_DISCOVERY_HOST_ACCESS_DENIED`
+instead of the old, wrong `NOT_MMS_DEVICE` for the no-password and wrong-password cases) fully
+prove the classification against a real device; `scanSubnet`'s own loop change is a small, directly
+verifiable diff on top of that already-proven logic.

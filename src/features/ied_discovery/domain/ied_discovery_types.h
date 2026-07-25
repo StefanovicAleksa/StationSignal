@@ -29,11 +29,28 @@ typedef enum {
     IED_DISCOVERY_HOST_NOT_TCP_REACHABLE,
 
     /* TCP was reachable, but the real MMS/ACSE association (phase 2) failed
-     * or was rejected (including after an auth retry, if configured) - so
-     * whatever answered isn't a real IEC 61850 MMS device, or requires
-     * credentials this handle doesn't have. */
-    IED_DISCOVERY_HOST_NOT_MMS_DEVICE
+     * for a reason other than access control - whatever answered isn't a
+     * real IEC 61850 MMS device. */
+    IED_DISCOVERY_HOST_NOT_MMS_DEVICE,
+
+    /* TCP was reachable and a real MMS/ACSE association was attempted, but it
+     * was specifically access-denied (even after an auth retry, if
+     * configured) - this IS a real IEC 61850 MMS device, it just needs
+     * credentials this handle doesn't have (or has wrong). Distinct from
+     * NOT_MMS_DEVICE so a caller (e.g. scan_orchestration) can still surface
+     * it as a discovered candidate needing auth, rather than dropping it. */
+    IED_DISCOVERY_HOST_ACCESS_DENIED
 } IedDiscoveryHostStatus;
+
+/* One scanSubnet result element - a host that either fully associated or was
+ * specifically access-denied (see IED_DISCOVERY_HOST_ACCESS_DENIED above).
+ * Owned; free the containing list via IedDiscovery_destroyHostList, not a
+ * bare free()/LinkedList_destroyDeep(list, free). */
+typedef struct {
+    char* host;         /* owned */
+    bool  authRequired; /* true iff this host was access-denied rather than
+                            fully associated */
+} IedDiscoveredHost;
 
 typedef struct {
     uint32_t tcpProbeTimeoutMs;      /* default 500 - phase 1 per-candidate bound */

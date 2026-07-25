@@ -35,14 +35,19 @@ tryAssociateOnce(const char* host, int port, uint32_t connectTimeoutMs, const ch
 
 bool
 IedDiscoveryMmsProbe_associate(const char* host, int port, uint32_t connectTimeoutMs,
-        const char* ownedAuthPassword) {
+        const char* ownedAuthPassword, bool* outAccessDenied) {
     bool accessDenied = false;
+    if (outAccessDenied) *outAccessDenied = false;
+
     if (tryAssociateOnce(host, port, connectTimeoutMs, NULL, &accessDenied)) return true;
 
     if (accessDenied && ownedAuthPassword) {
         bool retryAccessDenied = false;
-        return tryAssociateOnce(host, port, connectTimeoutMs, ownedAuthPassword, &retryAccessDenied);
+        bool ok = tryAssociateOnce(host, port, connectTimeoutMs, ownedAuthPassword, &retryAccessDenied);
+        if (outAccessDenied) *outAccessDenied = !ok && retryAccessDenied;
+        return ok;
     }
 
+    if (outAccessDenied) *outAccessDenied = accessDenied;
     return false;
 }

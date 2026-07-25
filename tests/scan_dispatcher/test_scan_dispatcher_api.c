@@ -129,7 +129,7 @@ test_start_returnsInvalidArgument_onNullHandle(void) {
 
 void
 test_publishDeviceFound_doesNotCrash_onNullHandle(void) {
-    ScanDispatcher_publishDeviceFound(NULL, 1, "127.0.0.1", 102);
+    ScanDispatcher_publishDeviceFound(NULL, 1, "127.0.0.1", 102, false);
 }
 
 void
@@ -143,7 +143,7 @@ test_publishDeviceFound_isNoOp_whenNotRunning(void) {
 
     /* Not started - must not crash even though this reaches into the ring
      * buffer/ws-server fields. */
-    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "127.0.0.1", 102);
+    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "127.0.0.1", 102, false);
 }
 
 int

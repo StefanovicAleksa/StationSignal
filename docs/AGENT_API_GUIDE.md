@@ -309,7 +309,8 @@ torn down when the last one stops (1→0). Push-only.
   "scanId": 1,
   "host": "10.0.0.5",
   "mmsPort": 102,
-  "discoveredAtMs": 1752700700000
+  "discoveredAtMs": 1752700700000,
+  "authRequired": false
 }
 ```
 
@@ -320,6 +321,11 @@ active at once.
 A discovered host here is only a **candidate** — it passed a TCP probe and a real (immediately
 closed) MMS association, but nothing about its SCL/model has been fetched. To actually report on
 it, send `START_REPORTING` with its `host`/`mmsPort`.
+
+`authRequired: true` means this candidate answered MMS but the (unauthenticated) association
+attempt was specifically access-denied, not that nothing is there — it's still a real IEC 61850
+device, just not reachable without credentials. It's still worth showing to an operator: send
+`START_REPORTING` with the same `host`/`mmsPort` plus the correct `acseAuthPassword` to connect.
 
 ---
 
@@ -352,9 +358,9 @@ established (the initial snapshot is bootstrap-suppressed, per §2).
 
 → connect ws://127.0.0.1:8766, listen:
 ← {"schemaVersion":1,"type":"SCAN_RESULT","scanId":1,"host":"10.0.0.7","mmsPort":102,
-    "discoveredAtMs":...}
+    "discoveredAtMs":...,"authRequired":false}
 ← {"schemaVersion":1,"type":"SCAN_RESULT","scanId":1,"host":"10.0.0.9","mmsPort":102,
-    "discoveredAtMs":...}
+    "discoveredAtMs":...,"authRequired":true}
 
 → control (8767): {"requestId":"r2","action":"START_REPORTING",
     "params":{"host":"10.0.0.7","mmsPort":102,"interfaceId":"eth0"}}

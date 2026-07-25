@@ -185,7 +185,7 @@ test_deviceFound_arrivesAsScanResultJson(void) {
     fixtureSocket = connectAndUpgrade(TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(fixtureSocket >= 0, "websocket handshake failed");
 
-    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "127.0.0.1", 102);
+    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "127.0.0.1", 102, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived within timeout");
     char* json = readOneTextFrame(fixtureSocket);
@@ -200,6 +200,7 @@ test_deviceFound_arrivesAsScanResultJson(void) {
     TEST_ASSERT_EQUAL_STRING("127.0.0.1", cJSON_GetObjectItem(parsed, "host")->valuestring);
     TEST_ASSERT_TRUE(cJSON_GetObjectItem(parsed, "mmsPort")->valuedouble == 102.0);
     TEST_ASSERT_NOT_NULL(cJSON_GetObjectItem(parsed, "discoveredAtMs"));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItem(parsed, "authRequired")));
 
     cJSON_Delete(parsed);
     free(json);
@@ -218,8 +219,8 @@ test_multipleDeviceFound_arriveInOrder(void) {
     fixtureSocket = connectAndUpgrade(TEST_PORT + 1);
     TEST_ASSERT_TRUE_MESSAGE(fixtureSocket >= 0, "websocket handshake failed");
 
-    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.1", 102);
-    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.2", 102);
+    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.1", 102, false);
+    ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.2", 102, false);
 
     TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "first frame did not arrive");
     char* first = readOneTextFrame(fixtureSocket);

@@ -44,6 +44,9 @@ typedef struct {
     char* host;             /* owned copy */
     int mmsPort;
     uint64_t discoveredAtMs;
+    bool authRequired;      /* true iff this candidate answered MMS but the association was
+                                access-denied rather than fully succeeding - see ied_discovery's
+                                IED_DISCOVERY_HOST_ACCESS_DENIED */
 } ScanDeviceFoundEvent;
 
 /*

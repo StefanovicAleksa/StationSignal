@@ -72,9 +72,12 @@ verifyOneHost(IedDiscoveryHandle handle, const char* host, int mmsPort) {
 
     if (!tcpOk) return IED_DISCOVERY_HOST_NOT_TCP_REACHABLE;
 
+    bool accessDenied = false;
     bool associated = IedDiscoveryMmsProbe_associate(host, mmsPort, handle->config.mmsConnectTimeoutMs,
-            handle->ownedAuthPassword);
-    return associated ? IED_DISCOVERY_HOST_CONFIRMED : IED_DISCOVERY_HOST_NOT_MMS_DEVICE;
+            handle->ownedAuthPassword, &accessDenied);
+    if (associated) return IED_DISCOVERY_HOST_CONFIRMED;
+    if (accessDenied) return IED_DISCOVERY_HOST_ACCESS_DENIED;
+    return IED_DISCOVERY_HOST_NOT_MMS_DEVICE;
 }
 
 IedDiscoveryHostStatus
@@ -140,10 +143,19 @@ IedDiscovery_scanSubnet(IedDiscoveryHandle handle, const char* interfaceId, int 
     while (element) {
         const char* host = (const char*) LinkedList_getData(element);
 
-        if (reachable[index]
-                && IedDiscoveryMmsProbe_associate(host, mmsPort, handle->config.mmsConnectTimeoutMs,
-                        handle->ownedAuthPassword)) {
-            LinkedList_add(confirmed, IedDiscoveryUtils_safeStringDup(host));
+        if (reachable[index]) {
+            bool accessDenied = false;
+            bool associated = IedDiscoveryMmsProbe_associate(host, mmsPort,
+                    handle->config.mmsConnectTimeoutMs, handle->ownedAuthPassword, &accessDenied);
+
+            if (associated || accessDenied) {
+                IedDiscoveredHost* entry = malloc(sizeof(*entry));
+                if (entry) {
+                    entry->host = IedDiscoveryUtils_safeStringDup(host);
+                    entry->authRequired = accessDenied;
+                    LinkedList_add(confirmed, entry);
+                }
+            }
         }
 
         element = LinkedList_getNext(element);
@@ -155,6 +167,20 @@ IedDiscovery_scanSubnet(IedDiscoveryHandle handle, const char* interfaceId, int 
 
     if (outError) *outError = IED_DISCOVERY_OK;
     return confirmed;
+}
+
+static void
+freeDiscoveredHostElement(void* data) {
+    IedDiscoveredHost* entry = data;
+    if (!entry) return;
+    free(entry->host);
+    free(entry);
+}
+
+void
+IedDiscovery_destroyHostList(LinkedList list) {
+    if (!list) return;
+    LinkedList_destroyDeep(list, freeDiscoveredHostElement);
 }
 
 void

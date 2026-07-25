@@ -40,10 +40,15 @@ IedDiscovery_create(const IedDiscoveryConfig* config, IedDiscoveryError* outErro
  * IedDiscovery_verifyHost: a cheap bounded-concurrency TCP probe first, then
  * a real MMS/ACSE association for TCP survivors only. Blocking/synchronous.
  *
- * Returns a LinkedList of heap char* IPs, CONFIRMED devices only (both
- * stages passed) - a subnet with zero confirmed devices is a valid,
- * non-NULL, empty list, not an error. Caller owns the list:
- * LinkedList_destroyDeep(list, free).
+ * Returns a LinkedList of owned IedDiscoveredHost* - a host is included
+ * either if it fully associated (authRequired = false) or if the real
+ * MMS/ACSE association was specifically access-denied (authRequired = true,
+ * see IED_DISCOVERY_HOST_ACCESS_DENIED) - both are real IEC 61850 MMS
+ * devices, the latter just needs credentials this handle doesn't have (or
+ * has wrong). A subnet with zero such devices is a valid, non-NULL, empty
+ * list, not an error. Caller owns the list: IedDiscovery_destroyHostList(list),
+ * not a bare LinkedList_destroyDeep(list, free) - each element owns its own
+ * host string.
  *
  * NULL + *outError for: bad interfaceId/mmsPort, interface not found/down/
  * no-IPv4 (IED_DISCOVERY_ERR_INTERFACE_NOT_FOUND), or the subnet's host
@@ -65,6 +70,11 @@ IedDiscovery_scanSubnet(IedDiscoveryHandle handle, const char* interfaceId, int 
 IedDiscoveryHostStatus
 IedDiscovery_verifyHost(IedDiscoveryHandle handle, const char* host, int mmsPort,
         IedDiscoveryError* outError);
+
+/* Frees a LinkedList returned by IedDiscovery_scanSubnet, including each
+ * element's owned host string. Safe to call with NULL. */
+void
+IedDiscovery_destroyHostList(LinkedList list);
 
 /* Frees the handle. */
 void

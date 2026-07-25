@@ -97,7 +97,9 @@ sweepLoop(void* parameter) {
         if (results) {
             LinkedList el = LinkedList_getNext(results);
             while (el && !worker->stopRequested) {
-                const char* host = (const char*) LinkedList_getData(el);
+                IedDiscoveredHost* discovered = (IedDiscoveredHost*) LinkedList_getData(el);
+                const char* host = discovered->host;
+                bool authRequired = discovered->authRequired;
 
                 Semaphore_wait(worker->seenSetLock);
                 bool isNew = ScanOrchestrationUseCases_isHostNew(
@@ -113,15 +115,17 @@ sweepLoop(void* parameter) {
                  * loop iteration") - avoids delivering a found event after a
                  * stop was already requested mid-sweep. */
                 if (isNew && !worker->stopRequested) {
-                    ScanDispatcher_publishDeviceFound(worker->scanDispatcher, worker->scanId, host, worker->mmsPort);
+                    ScanDispatcher_publishDeviceFound(worker->scanDispatcher, worker->scanId, host,
+                            worker->mmsPort, authRequired);
                     if (worker->foundCallback) {
-                        worker->foundCallback(worker->foundCallbackParam, worker->scanId, host, worker->mmsPort);
+                        worker->foundCallback(worker->foundCallbackParam, worker->scanId, host,
+                                worker->mmsPort, authRequired);
                     }
                 }
 
                 el = LinkedList_getNext(el);
             }
-            LinkedList_destroyDeep(results, free);
+            IedDiscovery_destroyHostList(results);
         }
 
         interruptibleSleep(worker, worker->sweepIntervalMs);

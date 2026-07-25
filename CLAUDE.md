@@ -307,10 +307,20 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   verify every host on a subnet, capped by `IedDiscoveryConfig.maxHosts`) and
   `IedDiscovery_verifyHost` (verify one host). Optionally gated behind ACSE password auth (one
   retry) via `IedDiscoveryConfig.acseAuthPassword`. Driven purely by `scan_orchestration`'s worker.
-  Proven end-to-end (`verifyHost` against a real `ied_simulator` IED, including the
-  ACSE-auth-retry symmetry) in `integration_tests/ied_discovery/` — no `sudo` needed. A real
-  subnet scan is machine-topology-dependent and not automatable; see that E2E test's Commands
-  bullet for the one deterministic `getifaddrs` case covered.
+  **A host whose real MMS/ACSE association is specifically access-denied (not merely
+  non-responsive/non-MMS) is still a discovered device, not a dropped one**: `IedDiscoveryMmsProbe_associate`
+  reports this distinction via an `outAccessDenied` out-param (previously computed internally then
+  discarded — a real password-protected IED with no/wrong credentials configured was
+  indistinguishable from nothing being at that address at all, silently vanishing from every scan).
+  `IedDiscoveryHostStatus` now has a distinct `IED_DISCOVERY_HOST_ACCESS_DENIED` value (`verifyHost`'s
+  return), and `IedDiscovery_scanSubnet` returns a `LinkedList` of owned `IedDiscoveredHost{host,
+  authRequired}` (not bare `char*` IPs) — a host is included if it either fully associated or was
+  access-denied. Caller owns the list via `IedDiscovery_destroyHostList`, not a bare
+  `LinkedList_destroyDeep(list, free)`. Proven end-to-end (`verifyHost` against a real
+  `ied_simulator` IED, including the ACSE-auth-retry symmetry and the access-denied/no-password and
+  wrong-password cases) in `integration_tests/ied_discovery/` — no `sudo` needed. A real subnet scan
+  is machine-topology-dependent and not automatable; see that E2E test's Commands bullet for the one
+  deterministic `getifaddrs` case covered.
 - `ied_model_online_loader/` — builds a complete `IedModelHandle` by walking a live IED's own MMS
   ACSI directory/model-discovery services, for devices that associate fine but never serve an SCL
   file (confirmed against a real OMICRON IED Scout "Simulate IED" instance). The **one** narrow,
@@ -340,10 +350,13 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   precedent for a cross-feature "shared" directory. Public boundary:
   `src/features/scan_dispatcher/service/scan_dispatcher_api.h` — create/start/stop/destroy mirror
   `ipc_dispatcher`'s contract, plus one typed publish entry point,
-  `ScanDispatcher_publishDeviceFound(handle, scanId, host, mmsPort)`. Has **no knowledge of
-  scans, interfaces, or reference-counting** — purely transport; `scan_orchestration` decides when
-  to start/stop it. JSON envelope: `{schemaVersion, type: "SCAN_RESULT", scanId, host, mmsPort,
-  discoveredAtMs}`. Proven end-to-end in `integration_tests/scan_dispatcher/` — no `sudo` needed.
+  `ScanDispatcher_publishDeviceFound(handle, scanId, host, mmsPort, authRequired)`. Has **no
+  knowledge of scans, interfaces, or reference-counting** — purely transport; `scan_orchestration`
+  decides when to start/stop it. JSON envelope: `{schemaVersion, type: "SCAN_RESULT", scanId, host,
+  mmsPort, discoveredAtMs, authRequired}` — `authRequired: true` means `ied_discovery` classified
+  this host as access-denied (a real device needing credentials) rather than fully associated; still
+  additive under `schemaVersion: 1`, no version bump. Proven end-to-end in
+  `integration_tests/scan_dispatcher/` — no `sudo` needed.
 - `src/scan_orchestration/` — a top-level sibling of `src/features/`, sequencing `ied_discovery`
   (left entirely untouched) and `scan_dispatcher` into a continuous, background,
   reference-counted, multi-scan-capable service. Public boundary:

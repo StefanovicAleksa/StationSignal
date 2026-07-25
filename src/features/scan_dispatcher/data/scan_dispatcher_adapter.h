@@ -13,6 +13,7 @@
  * No-op if handle is NULL or not currently running.
  */
 void
-ScanDispatcherAdapter_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort);
+ScanDispatcherAdapter_publishDeviceFound(ScanDispatcherHandle handle, uint64_t scanId, const char* host, int mmsPort,
+        bool authRequired);
 
 #endif /* SCAN_DISPATCHER_ADAPTER_H_ */

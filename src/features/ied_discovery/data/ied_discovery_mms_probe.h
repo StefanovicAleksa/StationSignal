@@ -22,9 +22,18 @@
  *
  * Returns true only if a real MMS/ACSE association actually succeeded
  * (with or without the retry).
+ *
+ * outAccessDenied (may be NULL): set to true iff the final attempt (the
+ * retry, if one was made; otherwise the only attempt) failed specifically
+ * because of an ACSE-level access rejection - i.e. this is a real IEC 61850
+ * MMS device that needs credentials, not "nothing here". Always set to false
+ * whenever this function returns true. Only meaningful once the function has
+ * returned - the first attempt is always unauthenticated, so a transient
+ * access-denial on that attempt alone doesn't mean the overall outcome is
+ * denied.
  */
 bool
 IedDiscoveryMmsProbe_associate(const char* host, int port, uint32_t connectTimeoutMs,
-        const char* ownedAuthPassword);
+        const char* ownedAuthPassword, bool* outAccessDenied);
 
 #endif /* IED_DISCOVERY_MMS_PROBE_H_ */
