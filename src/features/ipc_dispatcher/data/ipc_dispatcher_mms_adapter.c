@@ -56,19 +56,34 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
     if (valueCount > 0 && pointRefs && pointValues && pointHasQuality && pointQuality
             && pointHasPreviousValue && pointPreviousValue && pointHasPreviousQuality && pointPreviousQuality
             && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel) {
+        int out = 0;
         for (int k = 0; k < valueCount; k++) {
             int vi = valueIdx[k];
-            pointRefs[k] = refs[vi];
-            pointValues[k] = IpcDispatcherValueCodec_convert(record->entries[vi].value);
+            int qi = qualityIdx[k];
 
-            pointHasPreviousValue[k] = record->entries[vi].previousValue != NULL;
-            if (pointHasPreviousValue[k]) {
-                pointPreviousValue[k] = IpcDispatcherValueCodec_convert(record->entries[vi].previousValue);
+            /* Suppress a value only present because a DIFFERENT sibling DA
+             * under the same DO/SDO changed (e.g. a DPC's "t"/"stSeld" riding
+             * along with an unrelated "stVal" change) - see
+             * IpcDispatcherUseCases_shouldIncludeValuePoint's own doc comment.
+             * record->entries[] itself (mms_report_client's group-extension
+             * membership) is untouched; this is purely an outbound filter. */
+            bool qualityOwnChangeDetected = qi >= 0 && record->entries[qi].ownChangeDetected;
+            if (!IpcDispatcherUseCases_shouldIncludeValuePoint(record->entries[vi].ownChangeDetected,
+                    qi >= 0, qualityOwnChangeDetected)) {
+                continue;
             }
 
-            pointHasLabel[k] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
-                    record->entries[vi].value, &pointLabel[k]);
-            if (pointHasLabel[k]) {
+            pointRefs[out] = refs[vi];
+            pointValues[out] = IpcDispatcherValueCodec_convert(record->entries[vi].value);
+
+            pointHasPreviousValue[out] = record->entries[vi].previousValue != NULL;
+            if (pointHasPreviousValue[out]) {
+                pointPreviousValue[out] = IpcDispatcherValueCodec_convert(record->entries[vi].previousValue);
+            }
+
+            pointHasLabel[out] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
+                    record->entries[vi].value, &pointLabel[out]);
+            if (pointHasLabel[out]) {
                 /* MmsValue_getBitStringAsInteger (the generic raw-bit read
                  * IpcDispatcherValueCodec_convert used above) and
                  * Dbpos_fromMmsValue disagree on bit order for a genuine
@@ -77,26 +92,27 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
                  * prefer Dbpos_fromMmsValue's own ordinal for the numeric
                  * value too, so "value" and "label" never contradict each
                  * other in the JSON. */
-                pointValues[k].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].value);
+                pointValues[out].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].value);
             }
-            if (pointHasPreviousValue[k]) {
-                pointHasPreviousLabel[k] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
-                        record->entries[vi].previousValue, &pointPreviousLabel[k]);
-                if (pointHasPreviousLabel[k]) {
-                    pointPreviousValue[k].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].previousValue);
+            if (pointHasPreviousValue[out]) {
+                pointHasPreviousLabel[out] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
+                        record->entries[vi].previousValue, &pointPreviousLabel[out]);
+                if (pointHasPreviousLabel[out]) {
+                    pointPreviousValue[out].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].previousValue);
                 }
             }
 
-            int qi = qualityIdx[k];
             if (qi >= 0) {
-                pointHasQuality[k] = IpcDispatcherValueCodec_decodeQuality(record->entries[qi].value, &pointQuality[k]);
+                pointHasQuality[out] = IpcDispatcherValueCodec_decodeQuality(record->entries[qi].value, &pointQuality[out]);
                 if (record->entries[qi].previousValue) {
-                    pointHasPreviousQuality[k] = IpcDispatcherValueCodec_decodeQuality(
-                            record->entries[qi].previousValue, &pointPreviousQuality[k]);
+                    pointHasPreviousQuality[out] = IpcDispatcherValueCodec_decodeQuality(
+                            record->entries[qi].previousValue, &pointPreviousQuality[out]);
                 }
             }
+
+            out++;
         }
-        builtCount = valueCount;
+        builtCount = out;
     }
 
     IpcDataPointExtras extras = {

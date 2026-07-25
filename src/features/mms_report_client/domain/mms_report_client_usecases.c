@@ -236,7 +236,7 @@ typedef struct {
  * still responsible for freeing previousValue itself. */
 static bool
 appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference, ReasonForInclusion reason,
-        MmsValue* previousValue, IedModelDaSemantic semantic) {
+        MmsValue* previousValue, IedModelDaSemantic semantic, bool ownChangeDetected) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         MmsReportEntry* grown = realloc(builder->entries, sizeof(MmsReportEntry) * (size_t) newCapacity);
@@ -251,6 +251,7 @@ appendEntry(EntryBuilder* builder, const MmsValue* value, const char* reference,
     entry->reason = reason;
     entry->previousValue = previousValue;
     entry->semantic = semantic;
+    entry->ownChangeDetected = ownChangeDetected;
     return true;
 }
 
@@ -271,6 +272,9 @@ typedef struct {
     int slot;
     MmsValue* previousValue;
     IedModelDaSemantic semantic;
+    bool ownChangeDetected; /* set by buildEntries' phase 2a, before the group-extension
+                                pass below may still forward this candidate for a
+                                different reason - see MmsReportEntry's own field comment */
 } EntryCandidate;
 
 typedef struct {
@@ -309,6 +313,7 @@ appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* re
     c->slot = slot;
     c->previousValue = NULL; /* set later, by shouldForwardAndUpdateCache in buildEntries' phase 2a */
     c->semantic = semantic;
+    c->ownChangeDetected = false; /* set later, by buildEntries' phase 2a */
 }
 
 /* Tracks flattened-structure arrays (MmsReportClientUtils_flattenStructure
@@ -709,6 +714,10 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
             EntryCandidate* c = &candidates.items[i];
             forward[i] = shouldForwardAndUpdateCache(memberRefCache, c->slot, c->value, c->reference,
                     &c->previousValue);
+            /* Snapshot BEFORE the group-extension pass below may still flip forward[i]
+             * to true for a different reason - see MmsReportEntry.ownChangeDetected's
+             * own field comment for why this distinction is preserved at all. */
+            c->ownChangeDetected = forward[i];
         }
 
         if (groupAnchorIndex) {
@@ -756,7 +765,8 @@ buildEntries(const MmsValue* dataSetValues, const ReasonForInclusion* reasons,
         }
 
         updateValueDiffCache(memberRefCache, c->slot, c->value);
-        if (!appendEntry(&builder, c->value, c->reference, c->reason, c->previousValue, c->semantic)) {
+        if (!appendEntry(&builder, c->value, c->reference, c->reason, c->previousValue, c->semantic,
+                c->ownChangeDetected)) {
             /* appendEntry failed to grow its array (OOM) - it never took
              * ownership of previousValue in that case, so free it ourselves. */
             if (c->previousValue) MmsValue_delete(c->previousValue);

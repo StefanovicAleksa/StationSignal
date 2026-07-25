@@ -1228,6 +1228,91 @@ test_buildReportRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf(void
     MmsReportClientUseCases_freeReportRecord(record);
 }
 
+/* Regression test for the "only send what actually changed" websocket fix:
+ * a real DPC-shaped decomposition has FOUR leaves (t/stVal/stSeld/q), not
+ * just two (value/q). The group-extension pass above still drags all four
+ * into record->entries (that membership is deliberately unchanged - see
+ * buildEntries' own doc comment), but MmsReportEntry.ownChangeDetected must
+ * distinguish stVal (the one leaf that actually changed) from t/stSeld/q
+ * (unchanged, only present because a sibling changed) - it's what
+ * ipc_dispatcher's IpcDispatcherUseCases_shouldIncludeValuePoint uses to
+ * suppress the latter three from the outbound websocket message. */
+void
+test_buildReportRecord_decomposedGroup_fourLeafDpc_onlyChangedLeafHasOwnChangeDetected(void) {
+    char* leafRefs0[4] = {
+        "Breaker1CB1/XSWI1.Pos$t", "Breaker1CB1/XSWI1.Pos$stVal",
+        "Breaker1CB1/XSWI1.Pos$stSeld", "Breaker1CB1/XSWI1.Pos$q",
+    };
+    char** memberLeafReferences[1] = { leafRefs0 };
+    int memberLeafCounts[1] = { 4 };
+    int leafSlotOffsets[1] = { 0 };
+
+    MmsValue* cachedQ = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(cachedQ, 0);
+    MmsValue* lastForwardedValues[4] = {
+        MmsValue_newUtcTimeByMsTime(1700000000000ULL), /* t: will match new value */
+        MmsValue_newBoolean(false),                    /* stVal: will differ from new value */
+        MmsValue_newBoolean(false),                    /* stSeld: will match new value */
+        cachedQ,                                       /* q: will match new value */
+    };
+
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberLeafReferences = memberLeafReferences;
+    cache.memberLeafCounts = memberLeafCounts;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 4;
+    cache.lastForwardedValues = lastForwardedValues;
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    MmsValue* tWire = MmsValue_newUtcTimeByMsTime(1700000000000ULL); /* unchanged */
+    MmsValue* stValWire = MmsValue_newBoolean(true);                /* CHANGED: false -> true */
+    MmsValue* stSeldWire = MmsValue_newBoolean(false);               /* unchanged */
+    MmsValue* qWire = MmsValue_newBitString(13);
+    MmsValue_setBitStringFromInteger(qWire, 0);                      /* unchanged */
+
+    MmsValue* structVal = MmsValue_createEmptyStructure(4);
+    MmsValue_setElement(structVal, 0, tWire);
+    MmsValue_setElement(structVal, 1, stValWire);
+    MmsValue_setElement(structVal, 2, stSeldWire);
+    MmsValue_setElement(structVal, 3, qWire);
+
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, structVal);
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.RP.rcbMain", false, "rcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, record->entryCount,
+            "group membership itself must stay unchanged - all four leaves still forward");
+
+    for (int i = 0; i < record->entryCount; i++) {
+        MmsReportEntry* entry = &record->entries[i];
+        if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$stVal") == 0) {
+            TEST_ASSERT_TRUE_MESSAGE(entry->ownChangeDetected,
+                    "stVal genuinely changed value - ownChangeDetected must be true");
+        } else if (strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$t") == 0
+                || strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$stSeld") == 0
+                || strcmp(entry->reference, "Breaker1CB1/XSWI1.Pos$q") == 0) {
+            TEST_ASSERT_FALSE_MESSAGE(entry->ownChangeDetected,
+                    "this leaf did not itself change - it was only dragged in by its stVal sibling");
+        } else {
+            TEST_FAIL_MESSAGE("unexpected entry reference");
+        }
+    }
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(cache.lastForwardedValues[2]);
+    MmsValue_delete(cache.lastForwardedValues[3]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
 void
 test_buildReportRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp(void) {
     /* Real device shape: cVal.mag.f (2 raw dataset positions - "cVal$mag$f"
@@ -1724,6 +1809,7 @@ main(void) {
     RUN_TEST(test_buildReportRecord_bothSiblingsUnchanged_neitherForwarded);
     RUN_TEST(test_buildReportRecord_ungroupableEntry_fallsBackToSoloDiffCheck);
     RUN_TEST(test_buildReportRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf);
+    RUN_TEST(test_buildReportRecord_decomposedGroup_fourLeafDpc_onlyChangedLeafHasOwnChangeDetected);
     RUN_TEST(test_buildReportRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
     RUN_TEST(test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
 

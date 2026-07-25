@@ -201,6 +201,7 @@ test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
     record->entries[0].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$stVal");
     record->entries[0].value = MmsValue_newBoolean(true);
     record->entries[0].previousValue = MmsValue_newBoolean(false);
+    record->entries[0].ownChangeDetected = true; /* false -> true: a genuine own change */
     record->entries[1].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$q");
     MmsValue* quality = MmsValue_newBitString(13);
     MmsValue_setBitStringFromInteger(quality, QUALITY_VALIDITY_GOOD);
@@ -208,6 +209,7 @@ test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
     MmsValue* previousQuality = MmsValue_newBitString(13);
     MmsValue_setBitStringFromInteger(previousQuality, QUALITY_VALIDITY_INVALID);
     record->entries[1].previousValue = previousQuality;
+    record->entries[1].ownChangeDetected = true; /* INVALID -> GOOD: a genuine own change */
 
     IpcDispatcher_onMmsReport(fixtureHandle, record); /* ownership transferred */
 

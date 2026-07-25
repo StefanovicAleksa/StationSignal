@@ -156,6 +156,38 @@ test_pairQuality_zeroCount_returnsZero(void) {
     TEST_ASSERT_EQUAL_INT(0, IpcDispatcherUseCases_pairQuality(NULL, 0, valueIdx, qualityIdx));
 }
 
+/* ---- shouldIncludeValuePoint ---- */
+
+void
+test_shouldIncludeValuePoint_ownChange_alwaysIncluded(void) {
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldIncludeValuePoint(true, false, false));
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldIncludeValuePoint(true, true, false));
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldIncludeValuePoint(true, true, true));
+}
+
+void
+test_shouldIncludeValuePoint_noOwnChange_noQualityPair_isExcluded(void) {
+    /* e.g. a DPC's "t" - no quality sibling in this record at all, and its
+     * own value didn't change - purely along for the group's ride. */
+    TEST_ASSERT_FALSE(IpcDispatcherUseCases_shouldIncludeValuePoint(false, false, false));
+}
+
+void
+test_shouldIncludeValuePoint_noOwnChange_qualityUnchanged_isExcluded(void) {
+    /* This is the reported bug: a DPC's "t"/"stSeld" dragged in only
+     * because their "stVal" sibling changed - neither their own value nor
+     * the shared quality actually changed, so they must be suppressed. */
+    TEST_ASSERT_FALSE(IpcDispatcherUseCases_shouldIncludeValuePoint(false, true, false));
+}
+
+void
+test_shouldIncludeValuePoint_noOwnChange_qualityChanged_isIncluded(void) {
+    /* A genuine quality-only change must still surface its value sibling -
+     * preserves mms_report_client's existing, deliberately-symmetric
+     * group-extension behavior for this specific case. */
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldIncludeValuePoint(false, true, true));
+}
+
 /* ---- assembleMessage / freeMessage ---- */
 
 void
@@ -328,6 +360,11 @@ main(void) {
     RUN_TEST(test_pairQuality_unparseableOrNullReference_passesThroughAsValue);
     RUN_TEST(test_pairQuality_multipleIndependentGroups_doNotCrossMix);
     RUN_TEST(test_pairQuality_zeroCount_returnsZero);
+
+    RUN_TEST(test_shouldIncludeValuePoint_ownChange_alwaysIncluded);
+    RUN_TEST(test_shouldIncludeValuePoint_noOwnChange_noQualityPair_isExcluded);
+    RUN_TEST(test_shouldIncludeValuePoint_noOwnChange_qualityUnchanged_isExcluded);
+    RUN_TEST(test_shouldIncludeValuePoint_noOwnChange_qualityChanged_isIncluded);
 
     RUN_TEST(test_assembleMessage_deepCopiesEverything_notAliased);
     RUN_TEST(test_assembleMessage_stringScalar_isDeepCopied);

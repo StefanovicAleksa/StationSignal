@@ -61,6 +61,28 @@ IpcDispatcherUseCases_pairQuality(const char* const* references, int count,
         int* outValueIndices, int* outQualityIndexForValue);
 
 /*
+ * True if a value data point (already paired via IpcDispatcherUseCases_pairQuality
+ * above) should actually reach the outbound dataPoints array, given whether ITS
+ * OWN value individually changed and, if it has a paired quality sibling,
+ * whether THAT quality individually changed:
+ *   - valueOwnChangeDetected true -> always include (a genuine own change).
+ *   - valueOwnChangeDetected false but hasQualityPair && qualityOwnChangeDetected
+ *     -> still include (a genuine quality-only change must still surface its
+ *     value sibling, or the change would have nowhere to attach in the JSON -
+ *     preserves mms_report_client's existing, deliberately-symmetric
+ *     group-extension behavior for this specific case).
+ *   - otherwise -> exclude: this value is only present because a DIFFERENT
+ *     sibling DA under the same DO/SDO changed (e.g. a DPC's "t"/"stSeld"
+ *     riding along with an unrelated "stVal" change) - see
+ *     mms_report_client_usecases.c's buildEntries doc comment for why that
+ *     group membership itself is intentionally left untouched; this function
+ *     is the ipc_dispatcher-side filter on top of it.
+ */
+bool
+IpcDispatcherUseCases_shouldIncludeValuePoint(bool valueOwnChangeDetected, bool hasQualityPair,
+        bool qualityOwnChangeDetected);
+
+/*
  * Deep-copies already-paired, already-converted parallel arrays (each of
  * length pointCount) into one owned IpcMessage - does no further pairing;
  * the caller runs IpcDispatcherUseCases_pairQuality itself first, converts

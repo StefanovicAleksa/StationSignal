@@ -65,6 +65,18 @@ typedef struct {
      * ipc_dispatcher attach a descriptive label without guessing from the
      * wire type alone. */
     IedModelDaSemantic semantic;
+
+    /* True if THIS leaf's own value differed from its cached last-forwarded
+     * value in shouldForwardAndUpdateCache's phase-2a diff check, BEFORE
+     * buildEntries' group-extension pass ran (see that function's own doc
+     * comment) - i.e. this leaf individually qualified on its own merits,
+     * as opposed to only being present because a DIFFERENT sibling DA under
+     * the same DO/SDO anchor changed (e.g. a DPC's "t"/"stSeld" riding along
+     * with an unrelated "stVal" change). Group membership/record->entries
+     * itself is unaffected by this field - it exists purely so ipc_dispatcher
+     * can tell the two cases apart when deciding what actually reaches the
+     * outbound dataPoints array (see IpcDispatcherUseCases_shouldIncludeValuePoint). */
+    bool ownChangeDetected;
 } MmsReportEntry;
 
 /*

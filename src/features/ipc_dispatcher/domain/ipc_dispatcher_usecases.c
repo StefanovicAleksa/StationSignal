@@ -100,6 +100,12 @@ IpcDispatcherUseCases_pairQuality(const char* const* references, int count,
     return valueCount;
 }
 
+bool
+IpcDispatcherUseCases_shouldIncludeValuePoint(bool valueOwnChangeDetected, bool hasQualityPair,
+        bool qualityOwnChangeDetected) {
+    return valueOwnChangeDetected || (hasQualityPair && qualityOwnChangeDetected);
+}
+
 static IpcScalarValue
 cloneScalarValue(const IpcScalarValue* src) {
     IpcScalarValue copy = *src;
