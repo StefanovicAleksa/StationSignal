@@ -74,6 +74,59 @@ MmsReportClientUseCases_freeReportRecord(MmsReportRecord* record);
 bool
 MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue* newValue);
 
+/*
+ * Guards against non-monotonic/duplicate EntryID redelivery WITHIN one RCB's
+ * own buffered report stream - orthogonal to (and NOT solved by) the
+ * EntryID-resumption-on-enable logic (enableOneTarget,
+ * mms_report_client_connection.c), which only uses EntryID to build the
+ * RESUME request at (re)enable time, never to validate an already-received
+ * report mid-session. Confirmed necessary via a real-hardware capture
+ * showing EntryID arriving as 1,4,5,6,7,8,1,9,4,A,5,... within one
+ * continuous session (no reconnect involved) - definitively duplicate/stale
+ * redelivery, not normal per-IEC-61850-8-1 behavior (EntryID is a
+ * server-assigned value that only increases within a buffer epoch).
+ *
+ * Returns true (stale/duplicate - caller must not process this report) only
+ * when both values are non-NULL, both are MMS_OCTET_STRING of EQUAL byte
+ * length, and incomingEntryId <= lastSeenEntryId when compared as a
+ * fixed-width big-endian unsigned integer (a plain byte-for-byte compare on
+ * equal-length buffers already yields this ordering - confirmed against
+ * libiec61850's own server-side EntryID encoding, which serializes an 8-byte
+ * big-endian counter). Fails OPEN (returns false, "not stale, forward
+ * normally") on any NULL/type-mismatch/size-mismatch case - matches this
+ * codebase's existing conservative bias (e.g. Gap-4 decomposition falling
+ * back to the raw entry on any mismatch): an EntryID shape this function
+ * doesn't understand must never cause a legitimate report to be silently
+ * dropped.
+ */
+bool
+MmsReportClientUseCases_isEntryIdStale(const MmsValue* incomingEntryId, const MmsValue* lastSeenEntryId);
+
+/*
+ * Decides whether enableOneTarget (mms_report_client_connection.c) should
+ * request GI on this (re)enable. Confirmed necessary via a real-hardware
+ * capture showing that requesting GI alongside an EntryID-based resume on a
+ * buffered RCB causes the device to enqueue its GI response as a brand-new
+ * entry in the RCB's OWN buffered backlog (fresh, ever-increasing EntryID,
+ * but byte-identical stale content) - every reconnect piled one more
+ * near-duplicate snapshot into the buffer, and replaying that pile through
+ * the single-slot value-diff cache made long-settled values look like they
+ * were changing again on every reconnect, well beyond what actually changed
+ * during the outage.
+ *
+ * Returns false (skip GI) only when buffered is true AND hasResumableEntryId
+ * is true - a buffered RCB's own EntryID resume already guarantees delivery
+ * of everything that happened while disconnected, so GI adds nothing there
+ * and is what was polluting the backlog. Returns true (request GI, the
+ * pre-existing behavior) in every other case: an unbuffered RCB (no buffer
+ * at all - GI is the only way to catch a change made while disconnected), or
+ * a buffered RCB with nothing to resume from yet (a genuine first-ever
+ * enable, or after an EntryID rejection resets the cache back to NULL) -
+ * same full-backlog safety net as before this function existed.
+ */
+bool
+MmsReportClientUseCases_shouldRequestGiOnEnable(bool buffered, bool hasResumableEntryId);
+
 /* LinkedListValueDeleteFunction-compatible: frees an
  * MmsReportClientMemberRefCacheEntry, including the Gap 4 (memberLeafReferences)
  * cache and the value-diff cache (leafSlotOffsets/lastForwardedValues)

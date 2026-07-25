@@ -29,6 +29,25 @@
  * protected instance: a correct password connects and enables the RCB, a
  * wrong one never does - same SimServer_requireAuthentication mechanism
  * scl_bootstrap's own E2E test already exercises for the discovery side.
+ *
+ * Known gap, documented rather than faked: this fixture's own
+ * sim_server.c only ever assigns strictly-increasing EntryIDs (confirmed
+ * against the vendored server's own EntryID-assignment logic,
+ * third_party_src/libiec61850/src/iec61850/server/mms_mapping/reporting.c),
+ * and its buffered-RCB resume is EXCLUSIVE of the EntryID a client resumes
+ * from - so a real, non-monotonic/duplicate EntryID redelivery (the bug
+ * MmsReportClientUseCases_isEntryIdStale in mms_report_client_report_adapter.c
+ * guards against, confirmed only via real-hardware debug logs, never
+ * reproducible against this compliant simulator) cannot be fault-injected
+ * here without patching the vendored third_party_src server, which would
+ * violate this repo's "Don't touch third_party/" Hard Rule. This suite
+ * instead proves the guard's pure comparison logic in
+ * tests/mms_report_client/test_mms_report_client_usecases.c, and proves
+ * HERE (test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog)
+ * that the guard is a true no-op against this simulator's own legitimate,
+ * strictly-increasing backlog delivery - i.e. it never has a false positive
+ * against real, compliant behavior, even though its true-positive path
+ * against actual non-monotonic redelivery is only exercised on real hardware.
  */
 
 #define FIXTURE_PATH "fixtures/reporter1.cid"
@@ -840,6 +859,125 @@ test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Isolated callback state for
+ * test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog below -
+ * records every brcbMain report's value IN ORDER (not just a count), since
+ * this test's whole point is proving the new
+ * MmsReportClientUseCases_isEntryIdStale guard (mms_report_client_report_adapter.c)
+ * doesn't drop any entry of a genuinely-increasing-EntryID backlog.
+ */
+#define ORDERED_VALUES_CAPACITY 16
+typedef struct {
+    volatile bool enabled;
+    volatile int reportCount;
+    bool orderedValues[ORDERED_VALUES_CAPACITY];
+} EntryIdGuardRegressionTestState;
+
+static void
+onRcbStatusForEntryIdGuardRegressionTest(void* userParam, const char* rcbReference, bool enabled,
+        IedClientError lastError) {
+    (void) lastError;
+    if (!enabled || !rcbReference) return;
+    if (strcmp(rcbReference, "Reporter1LD1/LLN0.BR.brcbMain") != 0) return;
+
+    EntryIdGuardRegressionTestState* state = (EntryIdGuardRegressionTestState*) userParam;
+    state->enabled = true;
+}
+
+static void
+onReportForEntryIdGuardRegressionTest(void* userParam, const MmsReportRecord* record) {
+    EntryIdGuardRegressionTestState* state = (EntryIdGuardRegressionTestState*) userParam;
+
+    if (record->rcbReference && strcmp(record->rcbReference, "Reporter1LD1/LLN0.BR.brcbMain") == 0
+            && record->entryCount > 0 && record->entries[0].value) {
+        if (state->reportCount < ORDERED_VALUES_CAPACITY) {
+            state->orderedValues[state->reportCount] = MmsValue_getBoolean(record->entries[0].value);
+        }
+        state->reportCount++;
+    }
+
+    MmsReportClient_destroyReportRecord((MmsReportRecord*) record);
+}
+
+/*
+ * Non-regression test for the new EntryID-staleness guard
+ * (MmsReportClientUseCases_isEntryIdStale, wired into
+ * MmsReportClientReportAdapter_onReport in mms_report_client_report_adapter.c):
+ * a real, spec-compliant server only ever assigns strictly-increasing
+ * EntryIDs (confirmed by reading its own EntryID-assignment logic), so every
+ * entry of a genuinely accumulated backlog must still pass the guard and
+ * reach the callback, in order - the guard must only ever reject a
+ * non-monotonic/repeated EntryID, which this fixture's compliant simulator
+ * structurally cannot produce (see this test file's own header comment on
+ * why a true fault-injection test isn't achievable here). This directly
+ * complements test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog
+ * above (which proves an EMPTY backlog isn't redelivered) by proving a
+ * NON-EMPTY one isn't partially dropped.
+ */
+void
+test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_ENTRY_ID_RESUME);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_ENTRY_ID_RESUME,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    EntryIdGuardRegressionTestState state = { 0 };
+    MmsReportClient_setReportCallback(client, onReportForEntryIdGuardRegressionTest, &state);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatusForEntryIdGuardRegressionTest, &state);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.enabled),
+            "expected the first connect to enable brcbMain within the timeout");
+    Thread_sleep(300); /* let the GI-seeded bootstrap snapshot settle - never forwarded */
+
+    SimServer_stop(sim);
+
+    /* Accumulate a multi-entry buffered backlog WHILE disconnected - each of
+     * these three is a genuinely increasing EntryID on this compliant
+     * simulator, so all three must survive the new guard. */
+    SimServer_setIndication(sim, true);
+    SimServer_setIndication(sim, false);
+    SimServer_setIndication(sim, true);
+
+    state.enabled = false;
+    SimServer_start(sim, TEST_PORT_ENTRY_ID_RESUME);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&state.enabled),
+            "expected the reconnect supervisor to reconnect and re-enable brcbMain");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.reportCount, 3),
+            "expected all three genuinely accumulated backlog entries to reach the callback - "
+            "the new EntryID-staleness guard must not drop any of a real, strictly-increasing sequence");
+    Thread_sleep(500); /* let anything further (there should be nothing) settle */
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, state.reportCount,
+            "exactly the three genuine backlog entries must be delivered - no fewer (guard "
+            "over-rejecting) and no more (guard failing to catch an unrelated duplicate)");
+    TEST_ASSERT_TRUE_MESSAGE(state.orderedValues[0], "backlog entry 1 must be true, in order");
+    TEST_ASSERT_FALSE_MESSAGE(state.orderedValues[1], "backlog entry 2 must be false, in order");
+    TEST_ASSERT_TRUE_MESSAGE(state.orderedValues[2], "backlog entry 3 must be true, in order");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -851,6 +989,7 @@ main(void) {
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
     RUN_TEST(test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog);
+    RUN_TEST(test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog);
 
     return UNITY_END();
 }

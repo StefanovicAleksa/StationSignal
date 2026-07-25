@@ -596,6 +596,54 @@ OptFlds write) — in that case `RCB_ELEMENT_OPT_FLDS`/`setOptFlds` would fail t
 other `IedConnection_setRCBValues` element can, surfaced through the existing generic
 error-and-log path, not a special case of its own.
 
+## GI-on-buffered-resume was polluting the backlog with duplicate snapshots
+
+**A further real-hardware finding in the same buffered-RCB-redelivery investigation as the EntryID
+resumption/OptFlds work above, surfaced after a non-monotonic/duplicate-EntryID guard
+(`MmsReportClientUseCases_isEntryIdStale`, `mms_report_client_report_adapter.c`) was added to drop
+literal re-deliveries of an already-seen EntryID**: even with that guard in place, a reconnect still
+showed far more "changes" on the websocket than actually happened during the outage — effectively
+replaying everything that had ever changed since the client's original connection, not just since the
+most recent disconnect. Root-caused directly from a real capture
+(`/tmp/ied_reporter_debug_mms_before.log`): a single reconnect burst for one buffered RCB delivered 14
+separate reports under 14 distinct, strictly-increasing EntryIDs, but every one of those 14 payloads
+was byte-for-byte identical — including per-attribute timestamps frozen a full day in the past. The
+`isEntryIdStale` guard cannot catch this, since each entry's EntryID genuinely is new; every one of
+them reaches the value-diff cache and (combined with non-monotonic delivery order also observed in the
+same captures, e.g. one RCB's entries arriving as `14,13,15,16,17,19,1A,...`) replaying this pile of
+near-duplicate snapshots through the single-slot cache can make long-settled values look like they're
+oscillating again.
+
+Cause: `enableOneTarget` requested both `RCB_ELEMENT_GI` and (for a buffered RCB) `RCB_ELEMENT_ENTRY_ID`
+together on every single (re)enable. On this device, a GI request doesn't behave as an out-of-band
+immediate snapshot the way IEC 61850 intends — it gets enqueued as a brand-new entry in the RCB's own
+buffered queue, with a fresh EntryID each time. Every reconnect therefore added one more near-duplicate
+snapshot to the buffer, which the client would then dutifully replay. This was already flagged as the
+leading suspect by a comment left during the EntryID-resumption work itself (`mms_report_client_connection.c`,
+now the temporary GI/EntryID diagnostic block): *"...if the server's own seqNum/entryId on the
+redelivered reports never advances past what we requested to resume from, the server (or our own GI
+request, sent unconditionally alongside EntryID on every enable) is not honoring the resume."*
+
+Fixed by making GI conditional: a new pure predicate,
+`MmsReportClientUseCases_shouldRequestGiOnEnable(buffered, hasResumableEntryId)`
+(`domain/mms_report_client_usecases.c`), returns `false` (skip GI) only when the RCB is buffered AND
+has a valid cached EntryID to resume from — a buffered RCB's own EntryID resume already guarantees
+delivery of everything that changed while disconnected, so GI is redundant there and is what was
+polluting the backlog. GI is still requested unconditionally for every unbuffered RCB (no buffer at
+all, so GI is the only way to catch a change made while disconnected) and for a buffered RCB with
+nothing to resume from yet (a genuine first-ever enable, or after an EntryID rejection resets the
+cache back to `NULL` — that retry path was updated to explicitly turn GI back on, since it's
+effectively a fresh full-resume enable). This has a clean spec-level justification independent of this
+specific device's quirk, not just a workaround: buffered RCBs are IEC 61850's guaranteed-delivery
+mechanism, so requesting GI alongside an EntryID-based resume was always somewhat redundant by design.
+No new E2E fault-injection test was added — `ied_simulator`'s server is spec-compliant and doesn't
+reproduce this device's GI-into-buffer quirk (same limitation already documented for the
+`isEntryIdStale` guard's own E2E coverage) — the existing reconnect/backlog-resume suite
+(`test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog`,
+`test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog`) was re-run to confirm no
+regression, and the `SEND ... gi=...` line was added to the existing temporary
+`ied_reporter_debug_entryid.log` diagnostic so this can be directly confirmed against the real device.
+
 ## `mms_report_client` dynamic dataset creation
 
 **Dynamically creates a dataset for RCBs whose SCL declares no `datSet` at all**

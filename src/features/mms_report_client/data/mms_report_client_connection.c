@@ -262,7 +262,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * shouldForwardAndUpdateCache's own doc comment (mms_report_client_usecases.c)
      * for exactly how a persistently-NULL slot past the first report is
      * detected and logged as a bug. */
-    uint32_t mask = RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_GI;
+    uint32_t mask = RCB_ELEMENT_RPT_ENA;
 
     /* Proactively request OptFlds.EntryID for every buffered RCB, rather
      * than relying on however the device happens to already be configured -
@@ -319,29 +319,6 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         mask |= RCB_ELEMENT_DATSET;
     }
 
-    ClientReportControlBlock_setRptEna(rcb, true);
-    ClientReportControlBlock_setGI(rcb, true);
-    /* GI is requested on every enable (first connect AND every reconnect),
-     * unconditionally, purely to force an immediate, deterministic snapshot
-     * to diff the cache against - it is NEVER trusted or forwarded itself.
-     * On the very first-ever connect, this snapshot lands against the
-     * still-all-NULL cache and is silently bootstrap-seeded (see
-     * shouldForwardAndUpdateCache's own doc comment). On every reconnect
-     * after that, this same snapshot instead lands against the REAL,
-     * preserved last-known values from before the disconnect (the cache is
-     * never reset - see MmsReportClientMemberRefCacheEntry's own doc
-     * comment) - a genuine change made while disconnected is correctly
-     * forwarded with a real previousValue, an unchanged resend is correctly
-     * suppressed. Without GI, the cache would only ever be seeded/refreshed
-     * by whatever report happens to arrive first after an enable - on a
-     * device with no periodic integrity reporting and no coincidental
-     * traffic at enable time, that could leave a long gap where a real
-     * change made while disconnected goes undetected simply because nothing
-     * prompted the device to report it yet. `reason` is still never trusted
-     * for filtering (see shouldForwardAndUpdateCache's own doc comment).
-     * TRG_OPS/BUF_TM/INTG_PD/CONF_REV are still never touched - those stay
-     * exactly as the IED's own SCL config already has them. */
-
     /* Resume a buffered RCB's delivery from the last EntryID this client
      * actually received, instead of re-requesting the server's entire
      * unacknowledged backlog on every RptEna transition - see
@@ -356,7 +333,10 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * network call, so it's safe to make while holding the lock, unlike
      * IedConnection_setRCBValues below. On the very first-ever enable
      * (lastEntryId still NULL - nothing to resume from yet) this is a no-op,
-     * same full-backlog behavior as before this change. */
+     * same full-backlog behavior as before this change. Computed BEFORE the
+     * GI decision just below - hasResumableEntryId is that decision's own
+     * input (see MmsReportClientUseCases_shouldRequestGiOnEnable). */
+    bool hasResumableEntryId = false;
     if (target->buffered) {
         MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
         if (cacheEntry) {
@@ -364,21 +344,53 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             if (cacheEntry->lastEntryId) {
                 ClientReportControlBlock_setEntryId(rcb, cacheEntry->lastEntryId);
                 mask |= RCB_ELEMENT_ENTRY_ID;
+                hasResumableEntryId = true;
 
                 char hex[256];
                 hexDump(MmsValue_getOctetStringBuffer(cacheEntry->lastEntryId),
                         MmsValue_getOctetStringSize(cacheEntry->lastEntryId), hex, sizeof(hex));
                 char line[384];
-                snprintf(line, sizeof(line), "SEND rcb=%s entryId=%s", target->objectReference, hex);
+                snprintf(line, sizeof(line), "SEND rcb=%s entryId=%s gi=false", target->objectReference, hex);
                 appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
             } else {
                 char line[256];
-                snprintf(line, sizeof(line), "SEND rcb=%s entryId=(none - first enable, full resume)",
+                snprintf(line, sizeof(line), "SEND rcb=%s entryId=(none - first enable, full resume) gi=true",
                         target->objectReference);
                 appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
             }
             Semaphore_post(handle->memberRefCacheLock);
         }
+    }
+
+    ClientReportControlBlock_setRptEna(rcb, true);
+    /* GI used to be requested on every enable unconditionally. Real-hardware
+     * logs showed a buffered RCB's own GI response getting enqueued into its
+     * buffered backlog as a brand-new entry (fresh, ever-increasing EntryID,
+     * but byte-identical stale content) - every reconnect piled one more
+     * near-duplicate snapshot into the buffer, and replaying that pile
+     * through the single-slot value-diff cache made long-settled values look
+     * like they were changing again on every reconnect, well beyond what
+     * actually changed during the outage. A buffered RCB's own EntryID
+     * resume above already guarantees delivery of everything that happened
+     * while disconnected - GI adds nothing there and is what was polluting
+     * the backlog. GI is skipped in exactly that one case
+     * (MmsReportClientUseCases_shouldRequestGiOnEnable) - buffered AND a
+     * valid EntryID to resume from - and still requested unconditionally for
+     * every unbuffered RCB (no buffer at all, so GI is the only way to catch
+     * a change made while disconnected) and for a buffered RCB's very
+     * first-ever enable / after an EntryID rejection resets the cache back
+     * to NULL (nothing to resume from either way, same full-backlog safety
+     * net as before this change). On the very first-ever connect, this
+     * snapshot lands against the still-all-NULL cache and is silently
+     * bootstrap-seeded (see shouldForwardAndUpdateCache's own doc comment).
+     * `reason` is still never trusted for filtering (see
+     * shouldForwardAndUpdateCache's own doc comment). TRG_OPS/BUF_TM/
+     * INTG_PD/CONF_REV are still never touched - those stay exactly as the
+     * IED's own SCL config already has them. */
+    bool requestGi = MmsReportClientUseCases_shouldRequestGiOnEnable(target->buffered, hasResumableEntryId);
+    if (requestGi) {
+        ClientReportControlBlock_setGI(rcb, true);
+        mask |= RCB_ELEMENT_GI;
     }
 
     IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
@@ -390,8 +402,47 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
          * back once to the pre-existing full-resume behavior instead of
          * leaving this RCB unreported. */
         fprintf(stderr, "[mms_report_client] setRCBValues with EntryID failed for '%s': error %d - "
-                "retrying without EntryID (full resume)\n", target->objectReference, err);
+                "retrying without EntryID (full resume, gi=true)\n", target->objectReference, err);
         mask &= ~(uint32_t) RCB_ELEMENT_ENTRY_ID;
+
+        /* GI was skipped on the first attempt above precisely because we had
+         * a resumable EntryID (requestGi was false) - now that the server
+         * has rejected it and the cache is about to be cleared back to NULL,
+         * this retry is a fresh full-resume enable with nothing to resume
+         * from, so it needs the same GI safety net a genuine first-ever
+         * enable gets. */
+        if (!requestGi) {
+            ClientReportControlBlock_setGI(rcb, true);
+            mask |= RCB_ELEMENT_GI;
+        }
+
+        /* The server just told us the EntryID we cached is no longer valid
+         * (buffer wrapped, or the server itself restarted with a fresh
+         * EntryID counter) - clear it back to NULL rather than leaving it in
+         * place. Required alongside MmsReportClientReportAdapter_onReport's
+         * own EntryID-staleness guard (mms_report_client_report_adapter.c):
+         * that guard drops any incoming report whose EntryID isn't strictly
+         * greater than this cached value, and only ever advances it on a
+         * report that survives the guard - so if a restarted server's own
+         * counter legitimately restarts low, a stale cached value here would
+         * make every one of its fresh reports look "stale" too, permanently
+         * silencing this RCB until the whole daemon process restarts. This
+         * reset is the one signal we actually have that the old baseline can
+         * no longer be trusted, so it puts the guard back into its
+         * fail-open, "nothing to compare against yet" bootstrap state. */
+        if (target->buffered) {
+            MmsReportClientMemberRefCacheEntry* cacheEntry =
+                    lookupMemberRefCacheByRcb(handle, target->objectReference);
+            if (cacheEntry) {
+                Semaphore_wait(handle->memberRefCacheLock);
+                if (cacheEntry->lastEntryId) {
+                    MmsValue_delete(cacheEntry->lastEntryId);
+                    cacheEntry->lastEntryId = NULL;
+                }
+                Semaphore_post(handle->memberRefCacheLock);
+            }
+        }
+
         IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
     }
     if (err != IED_ERROR_OK) {

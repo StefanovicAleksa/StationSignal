@@ -170,6 +170,35 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * (re)enable), so this lock is the real cross-thread guard for both
      * fields now, not just cheap insurance. */
     Semaphore_wait(handle->memberRefCacheLock);
+
+    /* Non-monotonic/duplicate EntryID guard - see
+     * MmsReportClientUseCases_isEntryIdStale's own doc comment for the full
+     * rationale (a real-hardware capture showing the same buffered entry
+     * redelivered multiple times, interleaved with newer ones, within one
+     * continuous session). A stale report is dropped entirely here, before
+     * it ever reaches the value-diff cache/decomposition/cross-RCB dedup
+     * below - forwarding it would let a genuinely-already-seen historical
+     * value look like a real change relative to whatever was most recently
+     * processed. fallback->lastEntryId is deliberately left untouched on
+     * this path (a stale entry is by definition <= the current cached
+     * value, so leaving it alone is correct either way). */
+    if (fallback && MmsReportClientUseCases_isEntryIdStale(entryId, fallback->lastEntryId)) {
+        char hex[256];
+        char lastHex[256];
+        char line[1024];
+        hexDump(MmsValue_getOctetStringBuffer(entryId), MmsValue_getOctetStringSize(entryId), hex, sizeof(hex));
+        hexDump(MmsValue_getOctetStringBuffer(fallback->lastEntryId), MmsValue_getOctetStringSize(fallback->lastEntryId),
+                lastHex, sizeof(lastHex));
+        snprintf(line, sizeof(line), "DROP-STALE rcb=%s entryId=%s lastSeenEntryId=%s",
+                rcbReference ? rcbReference : "(null)", hex, lastHex);
+        appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
+
+        Semaphore_post(handle->memberRefCacheLock);
+        free(reasons);
+        free(dataReferences);
+        return;
+    }
+
     MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
             rcbReference, buffered, rptId,
             entryId != NULL, entryId,

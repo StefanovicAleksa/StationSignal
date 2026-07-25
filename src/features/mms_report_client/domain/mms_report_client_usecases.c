@@ -88,6 +88,28 @@ MmsReportClientUseCases_isDuplicateValue(const MmsValue* cached, const MmsValue*
     return valuesAreSemanticallyEqual(cached, newValue);
 }
 
+bool
+MmsReportClientUseCases_isEntryIdStale(const MmsValue* incomingEntryId, const MmsValue* lastSeenEntryId) {
+    if (!incomingEntryId || !lastSeenEntryId) return false;
+    if (MmsValue_getType((MmsValue*) incomingEntryId) != MMS_OCTET_STRING) return false;
+    if (MmsValue_getType((MmsValue*) lastSeenEntryId) != MMS_OCTET_STRING) return false;
+
+    uint16_t incomingSize = MmsValue_getOctetStringSize((MmsValue*) incomingEntryId);
+    uint16_t lastSeenSize = MmsValue_getOctetStringSize((MmsValue*) lastSeenEntryId);
+    if (incomingSize == 0 || incomingSize != lastSeenSize) return false;
+
+    uint8_t* incomingBuf = MmsValue_getOctetStringBuffer((MmsValue*) incomingEntryId);
+    uint8_t* lastSeenBuf = MmsValue_getOctetStringBuffer((MmsValue*) lastSeenEntryId);
+    if (!incomingBuf || !lastSeenBuf) return false;
+
+    return memcmp(incomingBuf, lastSeenBuf, incomingSize) <= 0;
+}
+
+bool
+MmsReportClientUseCases_shouldRequestGiOnEnable(bool buffered, bool hasResumableEntryId) {
+    return !(buffered && hasResumableEntryId);
+}
+
 /* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
  * clone, if any, and clones newValue into its place). NULL-safe/no-op if
  * memberRefCache/lastForwardedValues is absent or slot is out of range - a

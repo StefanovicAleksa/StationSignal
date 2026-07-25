@@ -178,10 +178,22 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `AccessMode`, including `REPORT_ONLY`. Reconnects with exponential backoff via a dedicated
   supervisor thread driven by `IedConnection`'s state-changed handler.
   **Enable behavior**: every enable sets `RptEna`, `DatSet` (always explicitly re-asserted, never
-  a server-side default), and `GI` purely to force a deterministic snapshot — never
-  trusted/forwarded on its own merits, it lands on the same bootstrap-suppression path any first
-  observation would. `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are left untouched. A buffered RCB also
-  gets `RPT_OPT_ENTRY_ID` OR'd into its OptFlds if not already set (for EntryID resumption below).
+  a server-side default), and (with one exception, next paragraph) `GI` purely to force a
+  deterministic snapshot — never trusted/forwarded on its own merits, it lands on the same
+  bootstrap-suppression path any first observation would. `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are
+  left untouched. A buffered RCB also gets `RPT_OPT_ENTRY_ID` OR'd into its OptFlds if not already
+  set (for EntryID resumption below).
+  **GI is skipped on a buffered RCB's (re)enable whenever it has a valid EntryID to resume from**
+  (`MmsReportClientUseCases_shouldRequestGiOnEnable`) — a real device was found enqueuing its own
+  GI response as a brand-new entry in that RCB's buffered backlog (fresh, ever-increasing EntryID,
+  byte-identical stale content), so every reconnect piled one more near-duplicate snapshot into the
+  buffer; replayed through the single-slot value-diff cache, long-settled values looked like they
+  were changing again well beyond what actually happened during the outage. A buffered RCB's own
+  EntryID resume already guarantees delivery of everything that changed while disconnected, so GI
+  adds nothing there. GI is still requested unconditionally for every unbuffered RCB (no buffer at
+  all — GI is the only way to catch a change made while disconnected) and for a buffered RCB with
+  nothing to resume from yet (first-ever enable, or after an EntryID rejection resets the cache back
+  to `NULL`).
   **Event-driven filtering** (mirrors `goose_subscriber` exactly): a per-position value-diff cache
   forwards an entry only if it differs from the last one actually forwarded — **never** trusts the
   server's `ReasonForInclusion` bitmask to bypass this check (independently, combinably set by

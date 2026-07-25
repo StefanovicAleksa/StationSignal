@@ -140,6 +140,165 @@ test_isDuplicateValue_booleanUnchanged_isDuplicate(void) {
     MmsValue_delete(newValue);
 }
 
+/* ---- isEntryIdStale (non-monotonic/duplicate EntryID guard) ----
+ * See MmsReportClientUseCases_isEntryIdStale's own doc comment for the full
+ * real-hardware finding this covers: EntryID observed arriving as
+ * 1,4,5,6,7,8,1,9,4,A,5,... within one continuous session - duplicate/stale
+ * redelivery interleaved with genuinely new entries. */
+
+static MmsValue*
+newEntryId(const uint8_t* bytes, int size) {
+    MmsValue* v = MmsValue_newOctetString(size, size);
+    for (int i = 0; i < size; i++) MmsValue_setOctetStringOctet(v, i, bytes[i]);
+    return v;
+}
+
+void
+test_isEntryIdStale_incomingGreaterThanLastSeen_isNotStale(void) {
+    uint8_t lastBytes[8] = { 0, 0, 0, 0, 0, 0, 0, 5 };
+    uint8_t incomingBytes[8] = { 0, 0, 0, 0, 0, 0, 0, 8 };
+    MmsValue* lastSeen = newEntryId(lastBytes, 8);
+    MmsValue* incoming = newEntryId(incomingBytes, 8);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "a genuinely newer EntryID must never be treated as stale");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_incomingEqualsLastSeen_isStale(void) {
+    /* The exact "EntryID 1 recurring" case from the real capture. */
+    uint8_t bytes[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
+    MmsValue* lastSeen = newEntryId(bytes, 8);
+    MmsValue* incoming = newEntryId(bytes, 8);
+
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "an exact repeat of the last-seen EntryID must be treated as stale/duplicate redelivery");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_incomingLessThanLastSeen_isStale(void) {
+    /* The out-of-order case from the real capture (...,8,1,...). */
+    uint8_t lastBytes[8] = { 0, 0, 0, 0, 0, 0, 0, 8 };
+    uint8_t incomingBytes[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
+    MmsValue* lastSeen = newEntryId(lastBytes, 8);
+    MmsValue* incoming = newEntryId(incomingBytes, 8);
+
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "an EntryID older than the last one already durably processed must be treated as stale");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_incomingNull_isNotStale_failsOpen(void) {
+    uint8_t bytes[8] = { 0, 0, 0, 0, 0, 0, 0, 5 };
+    MmsValue* lastSeen = newEntryId(bytes, 8);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(NULL, lastSeen),
+            "a report with no EntryID at all must never be judged stale (fails open)");
+
+    MmsValue_delete(lastSeen);
+}
+
+void
+test_isEntryIdStale_lastSeenNull_isNotStale_failsOpen(void) {
+    /* The bootstrap/first-ever-report case - nothing to compare against yet. */
+    uint8_t bytes[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
+    MmsValue* incoming = newEntryId(bytes, 8);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, NULL),
+            "the first-ever report for an RCB (no cached lastEntryId yet) must never be judged stale");
+
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_mismatchedByteSizes_isNotStale_failsOpen(void) {
+    uint8_t lastBytes[8] = { 0, 0, 0, 0, 0, 0, 0, 5 };
+    uint8_t incomingBytes[4] = { 0, 0, 0, 5 };
+    MmsValue* lastSeen = newEntryId(lastBytes, 8);
+    MmsValue* incoming = newEntryId(incomingBytes, 4);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "an EntryID shape this function doesn't recognize must fail open rather than drop a report");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_nonOctetStringType_isNotStale_failsOpen(void) {
+    uint8_t bytes[8] = { 0, 0, 0, 0, 0, 0, 0, 5 };
+    MmsValue* lastSeen = newEntryId(bytes, 8);
+    MmsValue* incoming = MmsValue_newBoolean(true);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "a non-octet-string EntryID (unexpected shape) must fail open rather than drop a report");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+void
+test_isEntryIdStale_multiByteBigEndianOrdering_isCorrect(void) {
+    /* {0x01,0x00} = 256, {0x00,0xFF} = 255 - proves this is a real big-endian
+     * numeric comparison, not accidentally a last-byte-only or
+     * little-endian one. */
+    uint8_t lastBytes[2] = { 0x00, 0xFF };
+    uint8_t incomingBytes[2] = { 0x01, 0x00 };
+    MmsValue* lastSeen = newEntryId(lastBytes, 2);
+    MmsValue* incoming = newEntryId(incomingBytes, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isEntryIdStale(incoming, lastSeen),
+            "256 must be recognized as greater than 255 under big-endian byte comparison");
+
+    MmsValue_delete(lastSeen);
+    MmsValue_delete(incoming);
+}
+
+/* ---- shouldRequestGiOnEnable ---- */
+
+void
+test_shouldRequestGiOnEnable_unbufferedWithNoResumableEntryId_requestsGi(void) {
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_shouldRequestGiOnEnable(false, false),
+            "an unbuffered RCB has no backlog at all - GI is the only way to catch a change made "
+            "while disconnected, so it must always be requested");
+}
+
+void
+test_shouldRequestGiOnEnable_unbufferedWithResumableEntryId_stillRequestsGi(void) {
+    /* hasResumableEntryId is meaningless for an unbuffered RCB (EntryID only
+     * applies to buffered ones) - must not accidentally suppress GI here. */
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_shouldRequestGiOnEnable(false, true),
+            "GI must still be requested for an unbuffered RCB regardless of the resumable flag");
+}
+
+void
+test_shouldRequestGiOnEnable_bufferedWithNoResumableEntryId_requestsGi(void) {
+    /* First-ever enable, or after an EntryID rejection resets the cache back
+     * to NULL - nothing to resume from, same full-backlog safety net as
+     * before GI became conditional. */
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_shouldRequestGiOnEnable(true, false),
+            "a buffered RCB with nothing to resume from yet must still request GI");
+}
+
+void
+test_shouldRequestGiOnEnable_bufferedWithResumableEntryId_skipsGi(void) {
+    /* The one case this function exists for: a buffered RCB's own EntryID
+     * resume already guarantees delivery of everything that happened while
+     * disconnected - GI adds nothing and was found polluting the backlog
+     * with duplicate snapshots on real hardware. */
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_shouldRequestGiOnEnable(true, true),
+            "a buffered RCB with a valid resumable EntryID must skip GI");
+}
+
 /* ---- buildReportRecord ---- */
 
 void
@@ -1435,6 +1594,20 @@ main(void) {
     RUN_TEST(test_isDuplicateValue_bitString_sameDecodedIntegerDifferentSize_isNotDuplicate);
     RUN_TEST(test_isDuplicateValue_typeMismatch_isNotDuplicate);
     RUN_TEST(test_isDuplicateValue_booleanUnchanged_isDuplicate);
+
+    RUN_TEST(test_isEntryIdStale_incomingGreaterThanLastSeen_isNotStale);
+    RUN_TEST(test_isEntryIdStale_incomingEqualsLastSeen_isStale);
+    RUN_TEST(test_isEntryIdStale_incomingLessThanLastSeen_isStale);
+    RUN_TEST(test_isEntryIdStale_incomingNull_isNotStale_failsOpen);
+    RUN_TEST(test_isEntryIdStale_lastSeenNull_isNotStale_failsOpen);
+    RUN_TEST(test_isEntryIdStale_mismatchedByteSizes_isNotStale_failsOpen);
+    RUN_TEST(test_isEntryIdStale_nonOctetStringType_isNotStale_failsOpen);
+    RUN_TEST(test_isEntryIdStale_multiByteBigEndianOrdering_isCorrect);
+
+    RUN_TEST(test_shouldRequestGiOnEnable_unbufferedWithNoResumableEntryId_requestsGi);
+    RUN_TEST(test_shouldRequestGiOnEnable_unbufferedWithResumableEntryId_stillRequestsGi);
+    RUN_TEST(test_shouldRequestGiOnEnable_bufferedWithNoResumableEntryId_requestsGi);
+    RUN_TEST(test_shouldRequestGiOnEnable_bufferedWithResumableEntryId_skipsGi);
 
     RUN_TEST(test_buildReportRecord_copiesScalarFields);
     RUN_TEST(test_buildReportRecord_deepCopiesEntries_notAliased);
