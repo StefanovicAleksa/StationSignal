@@ -1,0 +1,6 @@
+# Runtime debug artifact written by the daemon - not source, not reproducible/meaningful
+# across machines, sometimes root-owned since it's produced by a sudo-run process.
+ied_reporter_debug_entryid.log
+
+# Local/personal Claude Code config - not shared project config
+.claude/settings.local.json
