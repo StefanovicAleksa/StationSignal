@@ -1,0 +1,221 @@
+package streamrelay
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var testUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+// fakeUpstream is a minimal in-process daemon-side stream peer — streamrelay is the boundary
+// package, so its unit tests control a real local WS peer rather than mocking anything
+// further down.
+type fakeUpstream struct {
+	srv *httptest.Server
+
+	mu    sync.Mutex
+	conns []*websocket.Conn
+}
+
+func newFakeUpstream(t *testing.T) *fakeUpstream {
+	t.Helper()
+	fu := &fakeUpstream{}
+	fu.srv = httptest.NewServer(http.HandlerFunc(fu.handle))
+	t.Cleanup(fu.srv.Close)
+	return fu
+}
+
+func (fu *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
+	conn, err := testUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	fu.mu.Lock()
+	fu.conns = append(fu.conns, conn)
+	fu.mu.Unlock()
+
+	// Keep the connection alive until the client closes it; streamrelay.Hub never sends
+	// anything upstream, so there's nothing to read/act on here beyond detecting close.
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+func (fu *fakeUpstream) url() string {
+	return "ws" + strings.TrimPrefix(fu.srv.URL, "http")
+}
+
+// send waits for at least one connection to be accepted, then writes data to all of them.
+func (fu *fakeUpstream) send(t *testing.T, data []byte) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		fu.mu.Lock()
+		defer fu.mu.Unlock()
+		return len(fu.conns) > 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	fu.mu.Lock()
+	defer fu.mu.Unlock()
+	for _, c := range fu.conns {
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, data))
+	}
+}
+
+func recvOrTimeout(t *testing.T, ch <-chan []byte) []byte {
+	t.Helper()
+	select {
+	case msg := <-ch:
+		return msg
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for message")
+		return nil
+	}
+}
+
+func TestHub_FansOutToMultipleSubscribers(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	ch1, cancel1 := hub.Subscribe()
+	defer cancel1()
+	ch2, cancel2 := hub.Subscribe()
+	defer cancel2()
+
+	fu.send(t, []byte(`{"type":"SCAN_RESULT"}`))
+
+	assert.Equal(t, `{"type":"SCAN_RESULT"}`, string(recvOrTimeout(t, ch1)))
+	assert.Equal(t, `{"type":"SCAN_RESULT"}`, string(recvOrTimeout(t, ch2)))
+}
+
+func TestHub_SlowSubscriberDropsWithoutBlockingOthers(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	slow, cancelSlow := hub.Subscribe() // never read from
+	defer cancelSlow()
+	fast, cancelFast := hub.Subscribe()
+	defer cancelFast()
+
+	// Send far more messages than the subscriber buffer (subscriberBufferSize) can hold.
+	for i := 0; i < subscriberBufferSize*3; i++ {
+		fu.send(t, []byte(`{"n":1}`))
+	}
+
+	// The fast subscriber must still be able to receive without ever having its channel
+	// drained artificially — proves the slow one didn't block broadcast().
+	assert.Equal(t, `{"n":1}`, string(recvOrTimeout(t, fast)))
+
+	// The slow subscriber's buffered channel should be full but not deadlocking anything;
+	// draining it should yield at most subscriberBufferSize buffered messages.
+	drained := 0
+	for {
+		select {
+		case <-slow:
+			drained++
+		default:
+			assert.LessOrEqual(t, drained, subscriberBufferSize)
+			return
+		}
+	}
+}
+
+func TestHub_CloseClosesAllSubscriberChannels(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+
+	ch, cancelSub := hub.Subscribe()
+	defer cancelSub()
+
+	hub.Close()
+
+	_, ok := <-ch
+	assert.False(t, ok, "subscriber channel should be closed after Hub.Close()")
+}
+
+func TestHub_SubscribeAfterCloseDoesNotPanic(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	hub.Close()
+
+	assert.NotPanics(t, func() {
+		ch, cancelSub := hub.Subscribe()
+		defer cancelSub()
+		_ = ch
+	})
+}
+
+func TestHub_UnsubscribeCancelClosesOnlyThatChannel(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	ch1, cancel1 := hub.Subscribe()
+	ch2, cancel2 := hub.Subscribe()
+	defer cancel2()
+
+	cancel1()
+	_, ok := <-ch1
+	assert.False(t, ok)
+
+	fu.send(t, []byte(`{"still":"alive"}`))
+	assert.Equal(t, `{"still":"alive"}`, string(recvOrTimeout(t, ch2)))
+}
+
+func TestHub_CancelIsIdempotent(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	_, cancelSub := hub.Subscribe()
+
+	assert.NotPanics(t, func() {
+		cancelSub()
+		cancelSub()
+	})
+}
+
+func TestHub_DialFailureLogsAndExitsCleanly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Nothing listens on this port — dialWithRetry should exhaust its retries and give up;
+	// Close() must still return promptly rather than hang.
+	hub := NewHub(ctx, "ws://127.0.0.1:1", nil)
+
+	done := make(chan struct{})
+	go func() {
+		hub.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not return after a failed dial")
+	}
+}
