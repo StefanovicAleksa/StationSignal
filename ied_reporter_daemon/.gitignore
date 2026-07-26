@@ -17,6 +17,11 @@ tools/smoke_tests/*
 # Stray object files from any manual gcc build
 *.o
 
+# Runtime debug artifact the daemon itself writes - not source, not reproducible/meaningful
+# across machines, sometimes root-owned since it's produced by a sudo-run process. Appears at
+# the repo root and scattered under integration_tests/*/ depending on where a test run left it.
+ied_reporter_debug_entryid.log
+
 # Local/personal Claude Code config - not shared project config
 .claude/settings.local.json
 
