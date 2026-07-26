@@ -21,14 +21,23 @@ file only describes current-state facts.
   or guess a permanent build command, ask before assuming one. `sudo` is only required once a
   client asks the daemon to actually report on a device over GOOSE (raw socket) — the process
   itself starts and idles fine without it.
-  - `./setup_project.sh` regenerates `third_party/lib/{libiec61850.a,libhal.a}` and
-    `third_party/include/` from the vendored source in the `third_party_src/libiec61850` git
-    submodule (`git submodule update --init` if not yet checked out). **Not run automatically
-    and not part of the normal build** — `third_party/{include,lib}` as currently committed is
-    the source of truth (see the "Don't touch `third_party/`" Hard Rule). Only run it if you
-    genuinely need to rebuild from source (different CMake flags, a version bump, or debugging
-    by stepping into library source), and review the resulting `git diff third_party/` before
-    committing it.
+  - `./setup_project.sh` regenerates all five vendored archives —
+    `third_party/lib/{libiec61850.a,libhal.a,libcjson.a,libmxml.a,libwebsockets.a}` — and
+    `third_party/include/` from the vendored source in the `third_party_src/{libiec61850,cJSON,
+    mxml,libwebsockets}` git submodules (`git submodule update --init --recursive` if not yet
+    checked out — governed by the **root** `station_signal` repo's `.gitmodules`, since the
+    gitlinks live under this directory but are recorded in the top-level tree). libiec61850 and
+    libwebsockets build via CMake; cJSON via CMake with `-DBUILD_SHARED_LIBS=OFF`; mxml via
+    autotools (`./configure --disable-shared`, no CMakeLists.txt at the pinned v3.3.1 commit).
+    libwebsockets is built with `-DLWS_WITH_SSL=OFF` to match the currently-vendored archive
+    (confirmed via its `lws_config.h` and `nm` symbol inspection — no OpenSSL symbols, only the
+    `*_no_ssl` stubs). **Not run automatically and not part of the normal build** —
+    `third_party/{include,lib}` as currently committed is the source of truth (see the "Don't
+    touch `third_party/`" Hard Rule). Only run it if you genuinely need to rebuild from source
+    (different build flags, a version bump, targeting a new architecture such as a Raspberry
+    Pi's ARM — this script builds natively, no cross-compilation, so run it on the target
+    machine — or debugging by stepping into library source), and review the resulting
+    `git diff third_party/` before committing it.
   - `main.c` takes **no arguments** and has no terminal/CLI surface — it's a pure background
     process-runner. It creates `device_manager` + `scan_orchestration` + `control_dispatcher`,
     starts the one always-on control websocket (default `127.0.0.1:8767`), and blocks until

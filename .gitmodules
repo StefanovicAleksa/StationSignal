@@ -1,0 +1,15 @@
+[submodule "station_signal_daemon/third_party_src/libiec61850"]
+	path = station_signal_daemon/third_party_src/libiec61850
+	url = https://github.com/mz-automation/libiec61850.git
+[submodule "station_signal_daemon/third_party_src/cJSON"]
+	path = station_signal_daemon/third_party_src/cJSON
+	url = https://github.com/DaveGamble/cJSON.git
+[submodule "station_signal_daemon/third_party_src/mxml"]
+	path = station_signal_daemon/third_party_src/mxml
+	url = https://github.com/michaelrsweet/mxml.git
+[submodule "station_signal_daemon/third_party_src/Unity"]
+	path = station_signal_daemon/third_party_src/Unity
+	url = https://github.com/ThrowTheSwitch/Unity.git
+[submodule "station_signal_daemon/third_party_src/libwebsockets"]
+	path = station_signal_daemon/third_party_src/libwebsockets
+	url = https://github.com/warmcat/libwebsockets.git
