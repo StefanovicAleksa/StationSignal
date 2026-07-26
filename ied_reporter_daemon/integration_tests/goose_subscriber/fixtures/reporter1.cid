@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="reporter1-fixture" nameStructure="IEDName" />
+
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="Reporter1" apName="AP1">
+        <GSE ldInst="LD1" cbName="gcbInd">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-01</P>
+            <P type="APPID">1000</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
+        <!-- Redundant instance of gcbInd over the identical ds1 dataset -
+             reproduces a real network's duplicate-publisher pattern, for
+             goose_subscriber's cross-target duplicate-content suppression
+             E2E test. -->
+        <GSE ldInst="LD1" cbName="gcbDup">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-02</P>
+            <P type="APPID">1001</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <IED name="Reporter1">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="LD1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="ds1" desc="Indication dataset">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="q" />
+            </DataSet>
+            <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
+                intgPd="60000" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />
+            <GSEControl name="gcbDup" appID="1001" datSet="ds1" type="GOOSE" confRev="1" />
+          </LN0>
+          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+      <DO name="Health" type="ENS1" />
+      <DO name="NamPlt" type="LPL1" />
+    </LNodeType>
+
+    <LNodeType id="GGIOType" lnClass="GGIO">
+      <DO name="Ind1" type="SPS1" />
+      <DO name="SPCSO1" type="SPC1" />
+    </LNodeType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="Enum" type="HealthKind" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="LPL1" cdc="LPL">
+      <DA name="vendor" bType="VisString255" fc="DC" />
+      <DA name="swRev" bType="VisString255" fc="DC" />
+    </DOType>
+
+    <DOType id="SPS1" cdc="SPS">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="SPC1" cdc="SPC">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="Oper" bType="Struct" type="OperSPS" fc="CO" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DAType id="OperSPS">
+      <BDA name="ctlVal" bType="BOOLEAN" />
+    </DAType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+
+    <EnumType id="HealthKind">
+      <EnumVal ord="1">Ok</EnumVal>
+      <EnumVal ord="2">Warning</EnumVal>
+      <EnumVal ord="3">Alarm</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

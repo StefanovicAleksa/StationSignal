@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="hardening-edge-cases-fixture" nameStructure="IEDName" />
+
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="HardeningIED" apName="AP1">
+        <Address>
+          <P type="IP">10.0.10.6</P>
+          <P type="IP-SUBNET">255.255.255.0</P>
+          <P type="IP-GATEWAY">10.0.10.1</P>
+        </Address>
+        <GSE ldInst="ED1" cbName="gcbHard">
+          <Address>
+            <P type="VLAN-ID">0012</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-06</P>
+            <P type="APPID">0040</P>
+          </Address>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <IED name="HardeningIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <!-- ldName exercises SCL "functional naming" - the FCDA below
+             references this LDevice via ldName, not its bare @inst, to
+             prove resolveLogicalDeviceByFcdaRef's third fallback. -->
+        <LDevice inst="ED1" ldName="HardeningIEDFuncBay">
+          <LN0 lnClass="LLN0" lnType="HardLLN0Type" inst="">
+            <DataSet name="ds1" desc="Hardening dataset">
+              <FCDA ldInst="HardeningIEDFuncBay" lnClass="LLN0" fc="ST" doName="Mod" daName="stVal" />
+            </DataSet>
+            <ReportControl name="rcbHard" rptID="rcbHard" datSet="ds1" confRev="1" buffered="false"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" />
+              <OptFields seqNum="true" dataSet="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <GSEControl name="gcbHard" appID="GCBHARD" datSet="ds1" type="GOOSE" confRev="1" />
+            <!-- SDI-wrapped override (bug 3): Phs is a structured DO, phsA is
+                 an SDO, db is a plain DA under it - previously silently
+                 dropped since only direct DAI children of DOI were visited. -->
+            <DOI name="Phs">
+              <SDI name="phsA">
+                <DAI name="db">
+                  <Val>2000</Val>
+                </DAI>
+              </SDI>
+            </DOI>
+            <!-- Non-numeric enum override (bug 4): "sbo-with-enhanced-security"
+                 must resolve to its real ordinal (4) via CtlModels' own
+                 EnumVal mapping, not atoi("sbo-with-enhanced-security")==0. -->
+            <DOI name="Mod">
+              <DAI name="ctlModel">
+                <Val>sbo-with-enhanced-security</Val>
+              </DAI>
+            </DOI>
+          </LN0>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="HardLLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+      <DO name="Phs" type="PhsType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="PhsType1" cdc="ASG">
+      <SDO name="phsA" type="PhsAType1" />
+    </DOType>
+
+    <DOType id="PhsAType1" cdc="ASG">
+      <DA name="db" bType="INT32" fc="CF" />
+    </DOType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

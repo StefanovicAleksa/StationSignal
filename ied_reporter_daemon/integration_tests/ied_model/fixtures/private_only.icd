@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="private-only-fixture" nameStructure="IEDName" />
+
+  <IED name="PrivateOnlyIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="ED1">
+          <LN0 lnClass="LLN0" lnType="PrivLLN0Type" inst="">
+            <!-- Deliberately zero literal ReportControl/GSEControl/DataSet
+                 elements - only a vendor Private blob claiming to hold one,
+                 the way a raw/unconfigured device-type template does. -->
+            <Private type="Vendor-ControlBlockStorage">urcbA|&lt;ReportControl name="urcbA" rptID="PrivateOnlyIEDED1/LLN0$RP$urcbA01" confRev="0" buffered="false"&gt;&lt;/ReportControl&gt;</Private>
+          </LN0>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="PrivLLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+    </DOType>
+  </DataTypeTemplates>
+</SCL>

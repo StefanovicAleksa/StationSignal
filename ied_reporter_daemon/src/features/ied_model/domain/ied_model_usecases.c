@@ -1,0 +1,795 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "features/ied_model/domain/ied_model_usecases.h"
+#include "iec61850_dynamic_model.h"
+#include "iec61850_common.h"
+#include "mms_common.h"
+
+/* ---- recursive tree walkers over the built model ---- */
+
+static void
+collectDataAttributesByFc(ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc == fc) {
+            char* ref = ModelNode_getObjectReference(node, NULL);
+            if (ref) {
+                LinkedList_add(result, ref);
+            } else {
+                fprintf(stderr, "[ied_model] WARN: could not build object reference for DA '%s' - omitted from read targets\n",
+                        node->name);
+            }
+        }
+        /* DataAttributes are leaves for this purpose: nested BDAs of a Struct inherit
+         * the same fc, so if the parent didn't match, its children won't either, and
+         * if it did match, the parent reference already covers them. */
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectDataAttributesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        /* Static: children are live ModelNode pointers owned by the model, not ours to free. */
+        LinkedList_destroyStatic(children);
+    }
+}
+
+static void
+collectControllableDataObjects(ModelNode* node, LinkedList result) {
+    if (ModelNode_getType(node) == DataObjectModelType) {
+        if (DataObject_hasFCData((DataObject*) node, IEC61850_FC_CO)) {
+            char* ref = ModelNode_getObjectReference(node, NULL);
+            if (ref) {
+                LinkedList_add(result, ref);
+            } else {
+                fprintf(stderr,
+                        "[ied_model] WARN: could not build object reference for controllable DO '%s' - omitted from control targets\n",
+                        node->name);
+            }
+            return; /* report the controllable DO itself, not its nested SDOs separately */
+        }
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectControllableDataObjects((ModelNode*) LinkedList_getData(element), result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+/*
+ * Unlike collectDataAttributesByFc (which terminal-izes any DataAttribute
+ * node, since it's building single read-target references where a
+ * CONSTRUCTED attribute's own BDAs are covered by the parent's reference),
+ * this walk keeps going: a CONSTRUCTED Data Attribute's BDA children are
+ * recursed into individually, because on the wire a CONSTRUCTED DA is itself
+ * an MMS_STRUCTURE - decomposing a DO-level dataset entry into flat leaf
+ * points requires reaching genuinely terminal (basic-typed) attributes, not
+ * stopping at the first CONSTRUCTED one. FC filtering still happens once at
+ * the DataAttribute level (BDAs inherit their parent DA's fc) - a DO can mix
+ * attributes of different FCs as direct children (e.g. a DPC's stVal/q/t at
+ * ST alongside Oper/SBOw/Cancel at CO), so filtering can't happen any higher.
+ *
+ * Builds the "$"-joined MMS-variable-name-style path itself (pathPrefix +
+ * "$" + node->name at each level) rather than using
+ * ModelNode_getObjectReference - that function produces the DOT-separated
+ * ACSI object-reference style ("LD/LN.DO.DA"), which does not match the
+ * "$"-joined style every dataset-member reference in this codebase already
+ * uses (see IedModelUseCases_getDataSetMemberReferences/
+ * IedModelUtils_buildFcdaVariableName) and that ipc_dispatcher's
+ * quality-pairing logic specifically parses (splits on the LAST "$").
+ */
+static void
+collectLeafReferencesByFc(ModelNode* node, FunctionalConstraint fc, const char* pathPrefix, LinkedList result) {
+    size_t pathLen = strlen(pathPrefix) + 1 + strlen(node->name) + 1;
+    char* nodePath = malloc(pathLen);
+    if (!nodePath) return;
+    snprintf(nodePath, pathLen, "%s$%s", pathPrefix, node->name);
+
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) {
+            free(nodePath);
+            return;
+        }
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            /* Basic-typed leaf - genuinely terminal. Ownership of nodePath
+             * transfers to result. */
+            LinkedList_add(result, nodePath);
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        /* CONSTRUCTED attribute (e.g. a WYE phase's cVal) - recurse into its
+         * BDA children instead of terminal-izing here. */
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafReferencesByFc((ModelNode*) LinkedList_getData(element), fc, nodePath, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        free(nodePath);
+        return;
+    }
+
+    /* DataObjectModelType (a nested SDO) - recurse unconditionally; FC
+     * filtering happens once a DataAttribute leaf is reached. */
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafReferencesByFc((ModelNode*) LinkedList_getData(element), fc, nodePath, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+    free(nodePath);
+}
+
+/* ---- public use-cases ---- */
+
+LinkedList
+IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle) {
+    LinkedList result = LinkedList_create();
+
+    for (GSEControlBlock* gcb = handle->model->gseCBs; gcb; gcb = gcb->sibling) {
+        char* lnRef = ModelNode_getObjectReference((ModelNode*) gcb->parent, NULL);
+        if (!lnRef) {
+            fprintf(stderr, "[ied_model] WARN: could not build parent LN reference for GoCB '%s' - omitted from GOOSE targets\n",
+                    gcb->name);
+            continue;
+        }
+
+        /* GoCB reference notation uses "$"-separated MMS style, per goose_subscriber.h's
+         * documented example ("simpleIOGenericIO/LLN0$GO$gcbEvents"). */
+        size_t len = strlen(lnRef) + strlen("$GO$") + strlen(gcb->name) + 1;
+        char* ref = malloc(len);
+        if (ref) snprintf(ref, len, "%s$GO$%s", lnRef, gcb->name);
+
+        /* Dataset object-reference notation, "$"-joined, mirrors
+         * getReportSubscriptionTargets's datasetRef convention above. */
+        char* datasetRef = NULL;
+        if (gcb->dataSetName && gcb->dataSetName[0] != '\0') {
+            size_t dsLen = strlen(lnRef) + strlen("$") + strlen(gcb->dataSetName) + 1;
+            datasetRef = malloc(dsLen);
+            if (datasetRef) snprintf(datasetRef, dsLen, "%s$%s", lnRef, gcb->dataSetName);
+        }
+        free(lnRef);
+
+        if (!ref) {
+            free(datasetRef);
+            continue;
+        }
+
+        GooseSubscriptionTarget* target = calloc(1, sizeof(GooseSubscriptionTarget));
+        if (!target) {
+            free(ref);
+            free(datasetRef);
+            continue;
+        }
+        target->objectReference = ref;
+        target->datasetReference = datasetRef;
+
+        if (gcb->address) {
+            target->hasAddress = true;
+            target->vlanId = gcb->address->vlanId;
+            target->vlanPriority = gcb->address->vlanPriority;
+            target->appId = gcb->address->appId;
+            memcpy(target->dstMac, gcb->address->dstAddress, 6);
+        }
+
+        LinkedList_add(result, target);
+    }
+
+    return result;
+}
+
+void
+IedModelUseCases_destroyGooseSubscriptionTarget(void* target) {
+    if (!target) return;
+    GooseSubscriptionTarget* gooseTarget = (GooseSubscriptionTarget*) target;
+    free(gooseTarget->objectReference);
+    free(gooseTarget->datasetReference);
+    free(gooseTarget);
+}
+
+LinkedList
+IedModelUseCases_getReportSubscriptionTargets(IedModelHandle handle) {
+    LinkedList result = LinkedList_create();
+
+    for (ReportControlBlock* rcb = handle->model->rcbs; rcb; rcb = rcb->sibling) {
+        char* lnRef = ModelNode_getObjectReference((ModelNode*) rcb->parent, NULL);
+        if (!lnRef) {
+            fprintf(stderr, "[ied_model] WARN: could not build parent LN reference for RCB '%s' - omitted from report targets\n",
+                    rcb->name);
+            continue;
+        }
+
+        /* RCB reference notation uses object-reference dot style with a "BR"
+         * segment for buffered RCBs and "RP" for unbuffered ones, per
+         * IedConnection_getRCBValues's documented convention
+         * (third_party/include/iec61850_client.h). */
+        const char* fcSegment = rcb->buffered ? ".BR." : ".RP.";
+        size_t refLen = strlen(lnRef) + strlen(fcSegment) + strlen(rcb->name) + 1;
+        char* ref = malloc(refLen);
+        if (ref) snprintf(ref, refLen, "%s%s%s", lnRef, fcSegment, rcb->name);
+
+        /* Dataset object-reference notation, "$"-joined, mirrors the existing
+         * GOOSE-reference convention above. */
+        char* datasetRef = NULL;
+        if (rcb->dataSetName && rcb->dataSetName[0] != '\0') {
+            size_t dsLen = strlen(lnRef) + strlen("$") + strlen(rcb->dataSetName) + 1;
+            datasetRef = malloc(dsLen);
+            if (datasetRef) snprintf(datasetRef, dsLen, "%s$%s", lnRef, rcb->dataSetName);
+        }
+
+        if (!ref) {
+            free(lnRef);
+            free(datasetRef);
+            continue;
+        }
+
+        ReportControlBlockTarget* target = malloc(sizeof(ReportControlBlockTarget));
+        if (!target) {
+            free(lnRef);
+            free(ref);
+            free(datasetRef);
+            continue;
+        }
+        target->objectReference = ref;
+        target->buffered = rcb->buffered;
+        target->datasetReference = datasetRef;
+        target->lnReference = lnRef;
+
+        LinkedList_add(result, target);
+    }
+
+    return result;
+}
+
+void
+IedModelUseCases_destroyReportControlBlockTarget(void* target) {
+    if (!target) return;
+    ReportControlBlockTarget* rcbTarget = (ReportControlBlockTarget*) target;
+    free(rcbTarget->objectReference);
+    free(rcbTarget->datasetReference);
+    free(rcbTarget->lnReference);
+    free(rcbTarget);
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberReferences(IedModelHandle handle, const char* datasetReference) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) {
+        fprintf(stderr, "[ied_model] WARN: dataset '%s' not found in model - returning empty member list "
+                "(check for a typo'd/mismatched datSet reference on the referencing RCB/GoCB)\n", datasetReference);
+        return result;
+    }
+
+    for (DataSetEntry* entry = DataSet_getFirstEntry(dataSet); entry; entry = DataSetEntry_getNext(entry)) {
+        if (!entry->logicalDeviceName || !entry->variableName) continue;
+        size_t len = strlen(entry->logicalDeviceName) + 1 + strlen(entry->variableName) + 1;
+        char* ref = malloc(len);
+        if (ref) {
+            snprintf(ref, len, "%s/%s", entry->logicalDeviceName, entry->variableName);
+            LinkedList_add(result, ref);
+        }
+    }
+    return result;
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberLeafReferences(IedModelHandle handle, const char* datasetReference,
+        int memberIndex) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference || memberIndex < 0) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    DataSetEntry* entry = DataSet_getFirstEntry(dataSet);
+    for (int i = 0; entry && i < memberIndex; i++) entry = DataSetEntry_getNext(entry);
+    if (!entry || !entry->logicalDeviceName || !entry->variableName) return result;
+
+    /* variableName is "$"-joined "LN$FC$DO" (decomposition candidate) or
+     * "LN$FC$DO$DA" (already leaf-level) - see
+     * IedModelUtils_buildFcdaVariableName's own doc comment. */
+    char* variableNameCopy = strdup(entry->variableName);
+    if (!variableNameCopy) return result;
+
+    char* lnToken = strtok(variableNameCopy, "$");
+    char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+    char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+    char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+    if (!doToken || daToken) {
+        /* Already leaf-level, or an unexpectedly-shaped variableName -
+         * nothing to decompose either way. */
+        free(variableNameCopy);
+        return result;
+    }
+
+    FunctionalConstraint fc = FunctionalConstraint_fromString(fcToken);
+    LogicalDevice* ld = IedModel_getDevice(handle->model, entry->logicalDeviceName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* doNode = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+
+    if (doNode && ModelNode_getType(doNode) == DataObjectModelType) {
+        /* Base "$"-joined path for the DO itself - each child's leaf path is
+         * built as basePath + "$" + <child names...> by
+         * collectLeafReferencesByFc, matching the same "LD/LN$FC$DO$DA"
+         * style entry->variableName already uses. */
+        size_t baseLen = strlen(entry->logicalDeviceName) + 1 + strlen(lnToken) + 1 + strlen(fcToken) + 1
+                + strlen(doToken) + 1;
+        char* basePath = malloc(baseLen);
+        if (basePath) {
+            snprintf(basePath, baseLen, "%s/%s$%s$%s", entry->logicalDeviceName, lnToken, fcToken, doToken);
+
+            LinkedList doChildren = ModelNode_getChildren(doNode);
+            if (doChildren) {
+                LinkedList element = LinkedList_getNext(doChildren);
+                while (element) {
+                    collectLeafReferencesByFc((ModelNode*) LinkedList_getData(element), fc, basePath, result);
+                    element = LinkedList_getNext(element);
+                }
+                LinkedList_destroyStatic(doChildren);
+            }
+            free(basePath);
+        }
+    }
+
+    free(variableNameCopy);
+    return result;
+}
+
+/* ---- Dbpos semantic lookup (see IedModelDaSemantic's own doc comment) ---- */
+
+static IedModelDaSemantic
+lookupDaSemantic(IedModelHandle handle, DataAttribute* da) {
+    if (!da) return IED_MODEL_DA_SEMANTIC_NONE;
+    for (int i = 0; i < handle->daSemanticCount; i++) {
+        if (handle->daSemantics[i].da == da) return handle->daSemantics[i].semantic;
+    }
+    return IED_MODEL_DA_SEMANTIC_NONE;
+}
+
+/*
+ * Resolves an already leaf-level FCDA's daToken down to its real terminal
+ * DataAttribute* node. daToken is the raw SCL @daName attribute value as
+ * embedded (unmodified) into the "$"-joined wire reference by
+ * IedModelUtils_buildFcdaVariableName - per IEC 61850-6, this can itself be
+ * a "."-separated path into nested BDA/SDO levels (e.g. "cVal.mag.f"), NOT
+ * "$"-separated (that convention is reserved for the top-level
+ * LN$FC$DO$daName segments elsewhere in this codebase - see
+ * collectLeafReferencesByFc's own comment on why decomposed leaves use "$"
+ * per level instead: that walk builds paths from the MODEL TREE structure,
+ * while this one is splitting one ALREADY-GIVEN SCL attribute string). Not
+ * currently exercised by any real fixture in this repo (a flat, undotted
+ * daName is the only case seen so far) but handled correctly regardless,
+ * rather than assuming daToken is always a single segment. Returns NULL on
+ * any resolution failure (unresolved LD/LN/DO/BDA segment, or the resolved
+ * node isn't actually a DataAttribute) - never guesses.
+ */
+static DataAttribute*
+resolveTerminalDataAttribute(IedModel* model, const char* ldName, const char* lnToken, const char* doToken,
+        const char* daToken) {
+    LogicalDevice* ld = IedModel_getDevice(model, ldName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* node = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+    if (!node || !daToken) return NULL;
+
+    char* daCopy = strdup(daToken);
+    if (!daCopy) return NULL;
+
+    char* seg = strtok(daCopy, ".");
+    while (seg && node) {
+        node = ModelNode_getChild(node, seg);
+        seg = strtok(NULL, ".");
+    }
+    free(daCopy);
+
+    if (!node || ModelNode_getType(node) != DataAttributeModelType) return NULL;
+    return (DataAttribute*) node;
+}
+
+/* Semantics-lookup sibling of collectLeafReferencesByFc - identical
+ * traversal (same FC filtering, same CONSTRUCTED-attribute recursion), but
+ * appends this handle's resolved IedModelDaSemantic for each genuinely
+ * terminal leaf instead of building a reference string. Order matches
+ * collectLeafReferencesByFc's own traversal exactly (same walk), so results
+ * stay index-aligned with IedModelUseCases_getDataSetMemberLeafReferences's
+ * own output for the same (datasetReference, memberIndex). */
+static void
+collectLeafSemanticsByFc(IedModelHandle handle, ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) return;
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            IedModelDaSemantic* boxed = malloc(sizeof(IedModelDaSemantic));
+            if (boxed) {
+                *boxed = lookupDaSemantic(handle, (DataAttribute*) node);
+                LinkedList_add(result, boxed);
+            }
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    for (DataSetEntry* entry = DataSet_getFirstEntry(dataSet); entry; entry = DataSetEntry_getNext(entry)) {
+        IedModelDaSemantic semantic = IED_MODEL_DA_SEMANTIC_NONE;
+
+        if (entry->logicalDeviceName && entry->variableName) {
+            char* copy = strdup(entry->variableName);
+            if (copy) {
+                char* lnToken = strtok(copy, "$");
+                char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+                char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+                char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+                if (doToken && daToken) {
+                    DataAttribute* da = resolveTerminalDataAttribute(handle->model, entry->logicalDeviceName,
+                            lnToken, doToken, daToken);
+                    semantic = lookupDaSemantic(handle, da);
+                }
+                free(copy);
+            }
+        }
+
+        IedModelDaSemantic* boxed = malloc(sizeof(IedModelDaSemantic));
+        if (boxed) {
+            *boxed = semantic;
+            LinkedList_add(result, boxed);
+        }
+    }
+    return result;
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberLeafSemantics(IedModelHandle handle, const char* datasetReference,
+        int memberIndex) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference || memberIndex < 0) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    DataSetEntry* entry = DataSet_getFirstEntry(dataSet);
+    for (int i = 0; entry && i < memberIndex; i++) entry = DataSetEntry_getNext(entry);
+    if (!entry || !entry->logicalDeviceName || !entry->variableName) return result;
+
+    char* variableNameCopy = strdup(entry->variableName);
+    if (!variableNameCopy) return result;
+
+    char* lnToken = strtok(variableNameCopy, "$");
+    char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+    char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+    char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+    if (!doToken || daToken) {
+        /* Already leaf-level, or an unexpectedly-shaped variableName -
+         * nothing to decompose either way (mirrors
+         * IedModelUseCases_getDataSetMemberLeafReferences's identical check). */
+        free(variableNameCopy);
+        return result;
+    }
+
+    FunctionalConstraint fc = FunctionalConstraint_fromString(fcToken);
+    LogicalDevice* ld = IedModel_getDevice(handle->model, entry->logicalDeviceName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* doNode = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+
+    if (doNode && ModelNode_getType(doNode) == DataObjectModelType) {
+        LinkedList doChildren = ModelNode_getChildren(doNode);
+        if (doChildren) {
+            LinkedList element = LinkedList_getNext(doChildren);
+            while (element) {
+                collectLeafSemanticsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+                element = LinkedList_getNext(element);
+            }
+            LinkedList_destroyStatic(doChildren);
+        }
+    }
+
+    free(variableNameCopy);
+    return result;
+}
+
+/* Wire-type-lookup sibling of collectLeafReferencesByFc -
+ * identical traversal (same FC filtering, same CONSTRUCTED-attribute recursion),
+ * but appends each genuinely terminal leaf's own already-known
+ * DataAttributeType (set once at SCL-load time via IedModelUtils_mapBType,
+ * stored directly on the DataAttribute node - see struct sDataAttribute in
+ * iec61850_model.h) instead of building a reference string. Order matches
+ * collectLeafReferencesByFc's own traversal exactly (same walk), so results
+ * stay index-aligned with IedModelUseCases_getDataSetMemberLeafReferences's
+ * own output for the same (datasetReference, memberIndex) - this is what lets
+ * mms_report_client/goose_subscriber cross-check each decomposed leaf's
+ * ACTUAL wire type against its EXPECTED (SCL-declared) type before trusting
+ * the reference-to-value zip (see IedModelUseCases_dataAttributeTypeMatchesMmsType's
+ * own doc comment for why: same-count-different-order mismatches between this
+ * daemon's locally-resolved leaf order and a real device's actual wire order
+ * are NOT caught by the pre-existing count-only fallback). */
+static void
+collectLeafWireTypesByFc(ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) return;
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            DataAttributeType* boxed = malloc(sizeof(DataAttributeType));
+            if (boxed) {
+                *boxed = ((DataAttribute*) node)->type;
+                LinkedList_add(result, boxed);
+            }
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+LinkedList
+IedModelUseCases_getDataSetMemberLeafWireTypes(IedModelHandle handle, const char* datasetReference,
+        int memberIndex) {
+    LinkedList result = LinkedList_create();
+    if (!datasetReference || memberIndex < 0) return result;
+
+    DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
+    if (!dataSet) return result;
+
+    DataSetEntry* entry = DataSet_getFirstEntry(dataSet);
+    for (int i = 0; entry && i < memberIndex; i++) entry = DataSetEntry_getNext(entry);
+    if (!entry || !entry->logicalDeviceName || !entry->variableName) return result;
+
+    char* variableNameCopy = strdup(entry->variableName);
+    if (!variableNameCopy) return result;
+
+    char* lnToken = strtok(variableNameCopy, "$");
+    char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+    char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+    char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+    if (!doToken || daToken) {
+        /* Already leaf-level, or an unexpectedly-shaped variableName -
+         * nothing to decompose either way (mirrors
+         * IedModelUseCases_getDataSetMemberLeafReferences's identical check). */
+        free(variableNameCopy);
+        return result;
+    }
+
+    FunctionalConstraint fc = FunctionalConstraint_fromString(fcToken);
+    LogicalDevice* ld = IedModel_getDevice(handle->model, entry->logicalDeviceName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+    ModelNode* doNode = ln ? ModelNode_getChild((ModelNode*) ln, doToken) : NULL;
+
+    if (doNode && ModelNode_getType(doNode) == DataObjectModelType) {
+        LinkedList doChildren = ModelNode_getChildren(doNode);
+        if (doChildren) {
+            LinkedList element = LinkedList_getNext(doChildren);
+            while (element) {
+                collectLeafWireTypesByFc((ModelNode*) LinkedList_getData(element), fc, result);
+                element = LinkedList_getNext(element);
+            }
+            LinkedList_destroyStatic(doChildren);
+        }
+    }
+
+    free(variableNameCopy);
+    return result;
+}
+
+/*
+ * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType against
+ * its ACTUAL wire-decoded MmsType, before mms_report_client/goose_subscriber
+ * trust a Gap-4 decomposition zip. Exists because the pre-existing
+ * count-only fallback (see IedModelUseCases_getDataSetMemberLeafReferences's
+ * own doc comment on the wire-order assumption) cannot catch a
+ * same-count-but-different-ORDER mismatch between this daemon's
+ * locally-resolved leaf order (SCL <DOType> XML child order) and a real
+ * device's actual runtime attribute order - confirmed against real
+ * production hardware: a DPC's "Pos" structured attribute had its stVal/t
+ * sub-elements zipped to the wrong reference labels (a UTC_TIME value landed
+ * on the "stVal" reference, a BOOLEAN landed on "t") because both orderings
+ * happened to have the same leaf count. Only implements CONFIDENT, well-
+ * established groupings - per this codebase's "don't guess IEC 61850
+ * semantics" rule (same conservative posture IedModelUtils_mapBType itself
+ * already takes for an unrecognized bType), anything not explicitly listed
+ * below always matches (no check), rather than risk a false-positive
+ * rejection of a genuinely well-ordered structure.
+ */
+bool
+IedModelUseCases_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType actual) {
+    switch (expected) {
+        case IEC61850_BOOLEAN:
+            return actual == MMS_BOOLEAN;
+        case IEC61850_TIMESTAMP:
+            return actual == MMS_UTC_TIME;
+        case IEC61850_QUALITY:
+        case IEC61850_CODEDENUM:
+        case IEC61850_CHECK:
+        case IEC61850_GENERIC_BITSTRING:
+        case IEC61850_OPTFLDS:
+        case IEC61850_TRGOPS:
+            return actual == MMS_BIT_STRING;
+        case IEC61850_INT8:
+        case IEC61850_INT16:
+        case IEC61850_INT32:
+        case IEC61850_INT64:
+        case IEC61850_INT128:
+        case IEC61850_INT8U:
+        case IEC61850_INT16U:
+        case IEC61850_INT24U:
+        case IEC61850_INT32U:
+        case IEC61850_FLOAT32:
+        case IEC61850_FLOAT64:
+        case IEC61850_ENUMERATED:
+            return actual == MMS_INTEGER || actual == MMS_UNSIGNED || actual == MMS_FLOAT;
+        case IEC61850_VISIBLE_STRING_32:
+        case IEC61850_VISIBLE_STRING_64:
+        case IEC61850_VISIBLE_STRING_65:
+        case IEC61850_VISIBLE_STRING_129:
+        case IEC61850_VISIBLE_STRING_255:
+        case IEC61850_UNICODE_STRING_255:
+            return actual == MMS_VISIBLE_STRING || actual == MMS_STRING;
+        default:
+            /* IEC61850_UNKNOWN_TYPE, IEC61850_OCTET_STRING_*, IEC61850_ENTRY_TIME,
+             * IEC61850_PHYCOMADDR, IEC61850_CURRENCY, IEC61850_CONSTRUCTED - not
+             * confident enough to assert a specific MmsType, so never reject. */
+            return true;
+    }
+}
+
+/* Walks every direct child (Data Object) of `ln`, collecting "$"-joined leaf
+ * references at functional constraint `fc` via collectLeafReferencesByFc -
+ * same walk IedModelUseCases_getDataSetMemberLeafReferences uses per-DO, just
+ * driven for every DO under the LN instead of one already-known DO. basePath
+ * must already include the "LD/LN$FC" prefix (FC placed here, once, rather
+ * than re-derived per DataAttribute - collectLeafReferencesByFc itself only
+ * ever appends "$<name>" per level). */
+static void
+collectLnLeavesByFc(LogicalNode* ln, FunctionalConstraint fc, const char* ldName, const char* lnName,
+        LinkedList result) {
+    const char* fcName = FunctionalConstraint_toString(fc);
+    size_t baseLen = strlen(ldName) + 1 + strlen(lnName) + 1 + strlen(fcName) + 1;
+    char* basePath = malloc(baseLen);
+    if (!basePath) return;
+    snprintf(basePath, baseLen, "%s/%s$%s", ldName, lnName, fcName);
+
+    LinkedList children = ModelNode_getChildren((ModelNode*) ln);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafReferencesByFc((ModelNode*) LinkedList_getData(element), fc, basePath, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+    free(basePath);
+}
+
+LinkedList
+IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference) {
+    LinkedList result = LinkedList_create();
+    if (!lnReference) return result;
+
+    char* refCopy = strdup(lnReference);
+    if (!refCopy) return result;
+
+    char* slash = strchr(refCopy, '/');
+    if (!slash) {
+        free(refCopy);
+        return result;
+    }
+    *slash = '\0';
+    const char* ldName = refCopy;
+    const char* lnName = slash + 1;
+
+    LogicalDevice* ld = IedModel_getDevice(handle->model, ldName);
+    LogicalNode* ln = ld ? LogicalDevice_getLogicalNode(ld, lnName) : NULL;
+    if (!ln) {
+        free(refCopy);
+        return result;
+    }
+
+    /* "All the variables" = every leaf DA at FC=ST (status) or FC=MX
+     * (measurand) under this one LN - the same FC pair getReadTargets already
+     * treats as "reportable" elsewhere in this codebase. Output format
+     * ("LD/LN$FC$DO$DA") matches getDataSetMemberReferences exactly, so every
+     * downstream consumer (reference labeling, ipc_dispatcher's quality
+     * pairing) treats this identically to an SCL-declared dataset's members. */
+    collectLnLeavesByFc(ln, IEC61850_FC_ST, ldName, lnName, result);
+    collectLnLeavesByFc(ln, IEC61850_FC_MX, ldName, lnName, result);
+
+    free(refCopy);
+    return result;
+}
+
+LinkedList
+IedModelUseCases_getReadTargets(IedModelHandle handle) {
+    LinkedList result = LinkedList_create();
+
+    ModelNode* ldNode = (ModelNode*) handle->model->firstChild;
+    while (ldNode) {
+        collectDataAttributesByFc(ldNode, IEC61850_FC_ST, result);
+        collectDataAttributesByFc(ldNode, IEC61850_FC_MX, result);
+        ldNode = ldNode->sibling;
+    }
+
+    return result;
+}
+
+LinkedList
+IedModelUseCases_getControlTargets(IedModelHandle handle) {
+    LinkedList result = LinkedList_create();
+
+    ModelNode* ldNode = (ModelNode*) handle->model->firstChild;
+    while (ldNode) {
+        collectControllableDataObjects(ldNode, result);
+        ldNode = ldNode->sibling;
+    }
+
+    return result;
+}

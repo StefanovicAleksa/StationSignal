@@ -1,0 +1,33 @@
+# Compiled unit-test binaries (tests/Makefile builds these flat into tests/,
+# no extension - source files live one level down in tests/<feature>/)
+/tests/test_*
+
+# Compiled E2E test binaries (same name as their .c, no extension)
+integration_tests/*/e2e_test_*
+!integration_tests/*/e2e_test_*.c
+
+# ied_simulator's own compiled binary
+/integration_tests/ied_simulator/ied_simulator
+
+# Manually-built smoke test probes (see CLAUDE.md's throwaway-linkage-probe
+# convention - some get built in-place here, e.g. tools/smoke_tests/ied_model_test)
+tools/smoke_tests/*
+!tools/smoke_tests/*.c
+
+# Stray object files from any manual gcc build
+*.o
+
+# Local/personal Claude Code config - not shared project config
+.claude/settings.local.json
+
+# Real device SCL/ICD exports kept at repo root for manual testing against
+# actual hardware - not tracked source, potentially large (tens of MB) and
+# may contain real substation configuration data (IED names, network
+# addresses). The leading slash anchors this to the repo root only -
+# integration_tests/*/fixtures/*.icd|.cid|.scd etc. (small, self-authored
+# test fixtures) are unaffected and stay tracked.
+/*.icd
+/*.cid
+/*.scd
+/*.ssd
+/*.sed
