@@ -1,18 +1,26 @@
-# Deploying to a fixed local hostname (e.g. `http://stationsignal.com`)
+# Deploying to a fixed local hostname (e.g. `http://stationsignal.internal`)
 
 Makes the app reachable from every PC on the substation LAN at a fixed, memorable URL, entirely
 offline — no real domain registration, no internet dependency. See the top-level `../CLAUDE.md`
 for why this is a single-box-per-substation deployment (no multi-site concerns here).
 
-Design: `dnsmasq` on the box resolves `stationsignal.com` to the box's own static IP for every
+Uses `.internal` (RFC 9476), not a real public TLD like `.com` — that space is reserved and
+guaranteed never delegated as a live domain. An earlier revision used `stationsignal.com`, which
+turned out to collide with an unrelated real, HSTS-enabled website of the same name: any browser
+that had ever touched the real site (or ships it HSTS-preloaded) silently force-upgraded every
+request here to HTTPS, which this deliberately-plain-HTTP nginx has no way to answer — and there
+was no reliable per-client fix. Don't repoint this at another real-feeling domain without checking
+it isn't actually registered.
+
+Design: `dnsmasq` on the box resolves `stationsignal.internal` to the box's own static IP for every
 LAN client; `nginx` on port 80 serves the frontend's production build and reverse-proxies the Go
 API's REST + WebSocket routes under that same origin (so the browser never sees CORS or a port
 number); `systemd` keeps the API (and the daemon it supervises) running unattended and across
 reboots.
 
 ```
-Other PC's browser → http://stationsignal.com
-   (1) DNS: PC's DHCP-assigned DNS = box's static IP → dnsmasq answers stationsignal.com
+Other PC's browser → http://stationsignal.internal
+   (1) DNS: PC's DHCP-assigned DNS = box's static IP → dnsmasq answers stationsignal.internal
    (2) HTTP to box:80 → nginx: "/" serves frontend dist/, "/health|/devices|/scans|
        /structure-files|/ws/*" proxy to 127.0.0.1:8080 (the unchanged Go API)
 ```
@@ -65,7 +73,7 @@ station_signal_daemon/rebuild_proj.sh /opt/station_signal/bin/station_signal_dae
 # API
 (cd station_signal_api && go build -o /opt/station_signal/bin/station_signal_api ./cmd/station_signal_api)
 
-# Frontend — .env.production (already in the repo) bakes in VITE_API_BASE_URL=http://stationsignal.com
+# Frontend — .env.production (already in the repo) bakes in VITE_API_BASE_URL=http://stationsignal.internal
 (cd station_signal_frontend && npm install && npm run build)
 sudo mkdir -p /opt/station_signal/frontend-dist
 sudo cp -r station_signal_frontend/dist/* /opt/station_signal/frontend-dist/
@@ -94,9 +102,9 @@ the daemon" open question in `station_signal_api/CLAUDE.md`. Confirm that's acce
 relying on it in production.
 
 ## Verification
-1. On the box: `curl http://127.0.0.1:8080/health` and `curl -H "Host: stationsignal.com" http://127.0.0.1/`.
-2. On a second LAN PC: `nslookup stationsignal.com` should return the box's static IP, then open
-   `http://stationsignal.com` in a browser and confirm the UI loads, a device report stream
+1. On the box: `curl http://127.0.0.1:8080/health` and `curl -H "Host: stationsignal.internal" http://127.0.0.1/`.
+2. On a second LAN PC: `nslookup stationsignal.internal` should return the box's static IP, then open
+   `http://stationsignal.internal` in a browser and confirm the UI loads, a device report stream
    connects, and a scan runs end-to-end (this is what actually proves the nginx WebSocket proxy
    headers are correct).
 3. Reboot the box and repeat step 2 without starting anything by hand, to confirm the systemd

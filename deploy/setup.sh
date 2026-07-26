@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot installer: builds the daemon, API, and frontend, then installs everything needed to
-# reach this app from any PC on the substation LAN at http://stationsignal.com — dnsmasq (local
+# reach this app from any PC on the substation LAN at http://stationsignal.internal — dnsmasq (local
 # DNS), nginx (reverse proxy + static frontend host), and a systemd service that keeps the API
 # (and the daemon it supervises) running across crashes/reboots. See deploy/README.md for the
 # manual, step-by-step version of everything this script automates, and for what it deliberately
@@ -29,7 +29,7 @@ DEPLOY_DIR="$ROOT/deploy"
 
 INSTALL_ROOT="/opt/station_signal"
 SERVICE_USER="station-signal"
-HOSTNAME_NAME="stationsignal.com"
+HOSTNAME_NAME="stationsignal.internal"
 
 echo "==> Preflight: checking required tools"
 for tool in gcc go npm curl sudo ip ss sed; do
