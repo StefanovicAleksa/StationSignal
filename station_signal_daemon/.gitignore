@@ -9,6 +9,9 @@ integration_tests/*/e2e_test_*
 # ied_simulator's own compiled binary
 /integration_tests/ied_simulator/ied_simulator
 
+# simulation_app_tests' own compiled binary
+/integration_tests/simulation_app_tests/ied_sim_app
+
 # Manually-built smoke test probes (see CLAUDE.md's throwaway-linkage-probe
 # convention - some get built in-place here, e.g. tools/smoke_tests/ied_model_test)
 tools/smoke_tests/*
