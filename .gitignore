@@ -1,6 +1,9 @@
 # Runtime debug artifact written by the daemon - not source, not reproducible/meaningful
 # across machines, sometimes root-owned since it's produced by a sudo-run process.
 station_signal_debug_entryid.log
+# Pre-rename filename - a root-owned leftover from before the station_signal rename may
+# still be sitting around and can't be deleted/renamed without sudo.
+ied_reporter_debug_entryid.log
 
 # Local/personal Claude Code config - not shared project config
 .claude/settings.local.json
