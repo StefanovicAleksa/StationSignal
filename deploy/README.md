@@ -101,6 +101,48 @@ binary over running the whole service as root, which resolves the "privilege mod
 the daemon" open question in `station_signal_api/CLAUDE.md`. Confirm that's acceptable before
 relying on it in production.
 
+## Raspberry Pi (ARM)
+
+Everything above applies unchanged once the daemon's native libraries are rebuilt for ARM — one
+extra step before "3. Build everything", nothing else in this file is architecture-specific
+(`go build` has no cgo dependency, and `gcc`/`npm` just target whatever CPU they're running on).
+
+**Why this step exists**: `station_signal_daemon/third_party/lib/*.a` (`libiec61850.a`,
+`libhal.a`, `libcjson.a`, `libmxml.a`, `libwebsockets.a`) are committed pre-built x86_64
+archives — they will not link on a Pi's ARM. Rebuild them natively, on the Pi itself (no
+cross-compilation toolchain needed):
+
+```
+git submodule update --init --recursive
+station_signal_daemon/setup_project.sh
+```
+
+`setup_project.sh` needs `sudo` for its own `apt-get install build-essential cmake git` step —
+same as everywhere else in this doc, run it un-escalated and let it prompt. Confirm it actually
+produced ARM binaries before trusting the rest of the install:
+```
+file station_signal_daemon/third_party/lib/*.a   # should say ARM, not x86-64
+```
+This overwrites the committed archives in your working tree — normal and expected for a Pi
+checkout, but don't `git add`/commit that change back onto a branch other machines also build
+from (see `station_signal_daemon/CLAUDE.md`'s "Don't touch `third_party/`" Hard Rule — this is
+the one sanctioned exception, and even then only for the machine that genuinely needs it).
+
+From here, continue at "3. Build everything" (or just run `./deploy/setup.sh`, which now builds
+against the freshly-rebuilt ARM libraries) exactly as above. Two Pi-specific things to watch for:
+
+- **Port 53**: Raspberry Pi OS Bookworm's NetworkManager ships its own embedded dnsmasq bound to
+  port 53, the same conflict class as `systemd-resolved` on Ubuntu (step 2 above) — check
+  `/etc/NetworkManager/dnsmasq.d/` instead of `/etc/dnsmasq.d/` if so. If the Pi (like a dev
+  workstation) also needs to keep other local DNS-dependent services working, scope the
+  `stationsignal.internal` dnsmasq config to the LAN interface only instead of disabling the
+  competing resolver outright: add `interface=<lan-iface>`, `bind-interfaces`, and
+  `except-interface=lo` to `deploy/dnsmasq/stationsignal.conf` before installing it.
+- **Node.js version**: the frontend's `package.json` requires `^22.18.0 || >=24.12.0`. Raspberry
+  Pi OS's `apt` Node is often older than that — if `npm install`/`npm run build` complains, install
+  a current Node via [NodeSource's ARM builds](https://github.com/nodesource/distributions) or
+  `nvm` rather than the distro package.
+
 ## Verification
 1. On the box: `curl http://127.0.0.1:8080/health` and `curl -H "Host: stationsignal.internal" http://127.0.0.1/`.
 2. On a second LAN PC: `nslookup stationsignal.internal` should return the box's static IP, then open
