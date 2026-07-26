@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs a few distinguishable fake IEDs continuously, so the frontend's Network Scan page has
 # something real to discover and connect to during manual testing. Uses ied_sim_app, built from
-# ied_reporter_daemon/integration_tests/simulation_app_tests/ (a standalone copy of the daemon's
+# station_signal_daemon/integration_tests/simulation_app_tests/ (a standalone copy of the daemon's
 # own ied_simulator test fixture, adapted to run several concurrent, network-distinguishable
 # instances instead of one hardcoded loopback-only one — see that directory's own header
 # comments for the full rationale).
@@ -11,7 +11,7 @@
 # that instantly, which is why this script gives the simulated devices their own small, dedicated
 # subnet on a Linux "dummy" interface instead of reusing "lo".
 #
-# Privilege model mirrors ied_reporter_daemon/run_all_tests.sh: this script re-execs itself under
+# Privilege model mirrors station_signal_daemon/run_all_tests.sh: this script re-execs itself under
 # sudo if not already root, since both the network setup (ip link/addr) and each simulated
 # device's own real GOOSE publishing (raw AF_PACKET socket, CAP_NET_RAW) need it.
 #
@@ -31,7 +31,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SIM_DIR="$ROOT/ied_reporter_daemon/integration_tests/simulation_app_tests"
+SIM_DIR="$ROOT/station_signal_daemon/integration_tests/simulation_app_tests"
 SIM_BIN="$SIM_DIR/ied_sim_app"
 SIM_FILESTORE="$SIM_DIR/served_files/"
 

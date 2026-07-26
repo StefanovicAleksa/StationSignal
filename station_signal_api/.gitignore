@@ -1,0 +1,15 @@
+# Runtime debug artifact written by the daemon this API supervises - not source, not
+# reproducible/meaningful across machines, sometimes root-owned since it's produced by a
+# sudo-run process.
+station_signal_debug_entryid.log
+
+# Built binaries (run_dev.sh/deploy/setup.sh build these to /tmp or /opt, never in-repo)
+/station_signal_api
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+
+# Local/personal Claude Code config - not shared project config (same convention as
+# station_signal_daemon/.gitignore)
+.claude/settings.local.json

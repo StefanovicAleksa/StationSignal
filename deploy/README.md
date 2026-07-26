@@ -60,15 +60,15 @@ server to the box's IP manually if router DHCP isn't accessible to you.
 ## 3. Build everything
 ```
 # Daemon
-ied_reporter_daemon/rebuild_proj.sh /opt/ied_reporter/bin/ied_reporter_daemon
+station_signal_daemon/rebuild_proj.sh /opt/station_signal/bin/station_signal_daemon
 
 # API
-(cd ied_reporter_api && go build -o /opt/ied_reporter/bin/ied_reporter_api ./cmd/ied_reporter_api)
+(cd station_signal_api && go build -o /opt/station_signal/bin/station_signal_api ./cmd/station_signal_api)
 
 # Frontend — .env.production (already in the repo) bakes in VITE_API_BASE_URL=http://stationsignal.com
-(cd ied_reporter_frontend && npm install && npm run build)
-sudo mkdir -p /opt/ied_reporter/frontend-dist
-sudo cp -r ied_reporter_frontend/dist/* /opt/ied_reporter/frontend-dist/
+(cd station_signal_frontend && npm install && npm run build)
+sudo mkdir -p /opt/station_signal/frontend-dist
+sudo cp -r station_signal_frontend/dist/* /opt/station_signal/frontend-dist/
 ```
 
 ## 4. Install nginx
@@ -81,16 +81,16 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ## 5. Install the systemd service
 ```
-sudo setcap cap_net_raw+ep /opt/ied_reporter/bin/ied_reporter_daemon
-sudo useradd --system --no-create-home ied-reporter   # if it doesn't already exist
-sudo mkdir -p /opt/ied_reporter/structure_files && sudo chown ied-reporter:ied-reporter /opt/ied_reporter/structure_files
-sudo cp deploy/systemd/ied-reporter-api.service /etc/systemd/system/
+sudo setcap cap_net_raw+ep /opt/station_signal/bin/station_signal_daemon
+sudo useradd --system --no-create-home station-signal   # if it doesn't already exist
+sudo mkdir -p /opt/station_signal/structure_files && sudo chown station-signal:station-signal /opt/station_signal/structure_files
+sudo cp deploy/systemd/station-signal-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ied-reporter-api
+sudo systemctl enable --now station-signal-api
 ```
-See the comments in `deploy/systemd/ied-reporter-api.service` — this picks `setcap` on the daemon
+See the comments in `deploy/systemd/station-signal-api.service` — this picks `setcap` on the daemon
 binary over running the whole service as root, which resolves the "privilege model for spawning
-the daemon" open question in `ied_reporter_api/CLAUDE.md`. Confirm that's acceptable before
+the daemon" open question in `station_signal_api/CLAUDE.md`. Confirm that's acceptable before
 relying on it in production.
 
 ## Verification

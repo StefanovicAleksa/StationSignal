@@ -22,13 +22,13 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DAEMON_DIR="$ROOT/ied_reporter_daemon"
-API_DIR="$ROOT/ied_reporter_api"
-FRONTEND_DIR="$ROOT/ied_reporter_frontend"
+DAEMON_DIR="$ROOT/station_signal_daemon"
+API_DIR="$ROOT/station_signal_api"
+FRONTEND_DIR="$ROOT/station_signal_frontend"
 DEPLOY_DIR="$ROOT/deploy"
 
-INSTALL_ROOT="/opt/ied_reporter"
-SERVICE_USER="ied-reporter"
+INSTALL_ROOT="/opt/station_signal"
+SERVICE_USER="station-signal"
 HOSTNAME_NAME="stationsignal.com"
 
 echo "==> Preflight: checking required tools"
@@ -61,12 +61,12 @@ if ss -tlnp 2>/dev/null | grep -q ':53 '; then
 fi
 
 echo "==> Building daemon"
-DAEMON_BUILD="$(mktemp -d)/ied_reporter_daemon"
+DAEMON_BUILD="$(mktemp -d)/station_signal_daemon"
 "$DAEMON_DIR/rebuild_proj.sh" "$DAEMON_BUILD"
 
 echo "==> Building API"
-API_BUILD="$(mktemp -d)/ied_reporter_api"
-(cd "$API_DIR" && go build -o "$API_BUILD" ./cmd/ied_reporter_api)
+API_BUILD="$(mktemp -d)/station_signal_api"
+(cd "$API_DIR" && go build -o "$API_BUILD" ./cmd/station_signal_api)
 
 echo "==> Building frontend"
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
@@ -76,13 +76,13 @@ fi
 
 echo "==> Installing artifacts to $INSTALL_ROOT"
 sudo mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/frontend-dist" "$INSTALL_ROOT/structure_files"
-sudo cp "$DAEMON_BUILD" "$INSTALL_ROOT/bin/ied_reporter_daemon"
-sudo cp "$API_BUILD" "$INSTALL_ROOT/bin/ied_reporter_api"
+sudo cp "$DAEMON_BUILD" "$INSTALL_ROOT/bin/station_signal_daemon"
+sudo cp "$API_BUILD" "$INSTALL_ROOT/bin/station_signal_api"
 sudo rm -rf "${INSTALL_ROOT:?}/frontend-dist"/*
 sudo cp -r "$FRONTEND_DIR/dist/." "$INSTALL_ROOT/frontend-dist/"
 
 echo "==> Granting the daemon raw-socket capability (setcap, no root service needed)"
-sudo setcap cap_net_raw+ep "$INSTALL_ROOT/bin/ied_reporter_daemon"
+sudo setcap cap_net_raw+ep "$INSTALL_ROOT/bin/station_signal_daemon"
 
 echo "==> Ensuring service user '$SERVICE_USER' exists"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || sudo useradd --system --no-create-home "$SERVICE_USER"
@@ -102,9 +102,9 @@ sudo nginx -t
 sudo systemctl reload nginx
 
 echo "==> Installing systemd service"
-sudo cp "$DEPLOY_DIR/systemd/ied-reporter-api.service" /etc/systemd/system/ied-reporter-api.service
+sudo cp "$DEPLOY_DIR/systemd/station-signal-api.service" /etc/systemd/system/station-signal-api.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now ied-reporter-api
+sudo systemctl enable --now station-signal-api
 
 echo ""
 echo "==> Done."

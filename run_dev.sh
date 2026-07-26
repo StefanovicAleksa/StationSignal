@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Builds the daemon and runs all three pieces of the app together for local development:
-# ied_reporter_daemon (rebuilt from source), ied_reporter_api (supervising that daemon), and
-# the ied_reporter_frontend dev server.
+# station_signal_daemon (rebuilt from source), station_signal_api (supervising that daemon), and
+# the station_signal_frontend dev server.
 #
 # Privilege model mirrors the sudo-elevation pattern already used by
-# ied_reporter_daemon/run_all_tests.sh and ied_reporter_api/run_integration_tests.sh: real GOOSE
+# station_signal_daemon/run_all_tests.sh and station_signal_api/run_integration_tests.sh: real GOOSE
 # reception needs CAP_NET_RAW, and this repo's convention is to run the whole
 # daemon-spawning process under sudo rather than setcap the binary. So only the API (and the
 # daemon it spawns as a child) runs under sudo here — building the daemon (gcc) and running the
@@ -24,9 +24,9 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DAEMON_DIR="$ROOT/ied_reporter_daemon"
-API_DIR="$ROOT/ied_reporter_api"
-FRONTEND_DIR="$ROOT/ied_reporter_frontend"
+DAEMON_DIR="$ROOT/station_signal_daemon"
+API_DIR="$ROOT/station_signal_api"
+FRONTEND_DIR="$ROOT/station_signal_frontend"
 
 
 # Per-user paths (not a fixed shared /tmp path): the daemon/API used to always run under
@@ -34,9 +34,9 @@ FRONTEND_DIR="$ROOT/ied_reporter_frontend"
 # the same path (/tmp has the sticky bit, so a normal user can't even rm a root-owned file
 # there). Namespacing by uid means a stale root-owned binary from an old invocation is
 # simply never in the way, and two different users on the same box don't collide either.
-DAEMON_BIN="${DAEMON_BIN:-/tmp/ied_reporter_daemon-$(id -u)}"
-API_BIN="${API_BIN:-/tmp/ied_reporter_api-$(id -u)}"
-API_HTTP_ADDR="${IED_REPORTER_API_HTTP_ADDR:-:8080}"
+DAEMON_BIN="${DAEMON_BIN:-/tmp/station_signal_daemon-$(id -u)}"
+API_BIN="${API_BIN:-/tmp/station_signal_api-$(id -u)}"
+API_HTTP_ADDR="${STATION_SIGNAL_API_HTTP_ADDR:-:8080}"
 API_PORT="${API_HTTP_ADDR##*:}"
 
 for tool in gcc go npm curl sudo; do
@@ -50,7 +50,7 @@ echo "==> Building daemon"
 "$DAEMON_DIR/rebuild_proj.sh" "$DAEMON_BIN"
 
 echo "==> Building API"
-(cd "$API_DIR" && go build -o "$API_BIN" ./cmd/ied_reporter_api)
+(cd "$API_DIR" && go build -o "$API_BIN" ./cmd/station_signal_api)
 
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
     echo "==> Installing frontend dependencies"
