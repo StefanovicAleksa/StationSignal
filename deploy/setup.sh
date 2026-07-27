@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # One-shot installer: builds the daemon, API, and frontend, then installs everything needed to
-# reach this app from any PC on the substation LAN at http://stationsignal.internal — dnsmasq (local
-# DNS), nginx (reverse proxy + static frontend host), and a systemd service that keeps the API
-# (and the daemon it supervises) running across crashes/reboots. See deploy/README.md for the
-# manual, step-by-step version of everything this script automates, and for what it deliberately
-# leaves out (static IP / router DHCP reservation, router DNS setting — too router-specific and
-# risky to automate blind).
+# reach this app from any PC on the substation LAN at http://stationsignal.local — avahi (mDNS),
+# nginx (reverse proxy + static frontend host), and a systemd service that keeps the API (and the
+# daemon it supervises) running across crashes/reboots. See deploy/README.md for the manual,
+# step-by-step version of everything this script automates.
+#
+# mDNS, not a DNS server: the substation's actual client fleet is technician laptops with
+# hand-configured static IPs (commonly left over from direct IED work via tools like IEDScout),
+# so a DHCP-based auto-config approach can't reach them — they never send a DHCP request in the
+# first place. avahi/mDNS doesn't care how a client got its address, so it works with zero
+# client-side setup either way.
 #
 # Usage: ./deploy/setup.sh   (run WITHOUT sudo — see below)
 # Safe to re-run: every install step overwrites in place rather than failing on "already exists."
@@ -29,41 +33,21 @@ DEPLOY_DIR="$ROOT/deploy"
 
 INSTALL_ROOT="/opt/station_signal"
 SERVICE_USER="station-signal"
-HOSTNAME_NAME="stationsignal.internal"
+HOSTNAME_NAME="stationsignal.local"
+AVAHI_HOST_NAME="stationsignal"
 
 echo "==> Preflight: checking required tools"
-for tool in gcc go npm curl sudo ip ss sed; do
+for tool in gcc go npm curl sudo ip sed; do
     command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' is required but not found on PATH" >&2; exit 1; }
 done
 
-echo "==> Detecting network facts (read-only — no network config is changed)"
+echo "==> Detecting this box's LAN IP (read-only — no network config is changed)"
 BOX_IP="${BOX_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')}"
 if [ -z "$BOX_IP" ]; then
     echo "error: could not auto-detect this box's LAN IP. Re-run with BOX_IP=<ip> ./deploy/setup.sh" >&2
     exit 1
 fi
-UPSTREAM_DNS="${UPSTREAM_DNS:-$(awk '/^nameserver/ && $2 != "127.0.0.1" && $2 != "127.0.0.53" {print $2; exit}' /etc/resolv.conf)}"
-if [ -z "$UPSTREAM_DNS" ]; then
-    echo "error: could not auto-detect an upstream DNS server from /etc/resolv.conf." >&2
-    echo "       Re-run with UPSTREAM_DNS=<ip> ./deploy/setup.sh (usually the router's IP)." >&2
-    exit 1
-fi
-echo "    box IP:       $BOX_IP"
-echo "    upstream DNS: $UPSTREAM_DNS"
-
-echo "==> Checking port 53 is free for dnsmasq"
-if ss -tlnp 2>/dev/null | grep -q ':53 '; then
-    if systemctl is-active --quiet dnsmasq; then
-        echo "    port 53 is held by dnsmasq itself (installed by a previous run of this script)"
-        echo "    — expected on a re-run, not a conflict. Continuing."
-    else
-        echo "error: something is already listening on port 53 (systemd-resolved and" >&2
-        echo "       NetworkManager's built-in dnsmasq are common culprits on Raspberry Pi OS" >&2
-        echo "       Bookworm). Resolve that first — see the dnsmasq section of deploy/README.md" >&2
-        echo "       — rather than let this script silently break the box's existing DNS." >&2
-        exit 1
-    fi
-fi
+echo "    box IP: $BOX_IP"
 
 echo "==> Building daemon"
 DAEMON_BUILD="$(mktemp -d)/station_signal_daemon"
@@ -93,19 +77,26 @@ echo "==> Ensuring service user '$SERVICE_USER' exists"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || sudo useradd --system --no-create-home "$SERVICE_USER"
 sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_ROOT/structure_files"
 
-echo "==> Installing dnsmasq config for $HOSTNAME_NAME"
-command -v dnsmasq >/dev/null 2>&1 || sudo apt-get install -y dnsmasq
-sed -e "s/<BOX_STATIC_IP>/$BOX_IP/" -e "s/<UPSTREAM_DNS_IP>/$UPSTREAM_DNS/" \
-    "$DEPLOY_DIR/dnsmasq/stationsignal.conf" | sudo tee /etc/dnsmasq.d/stationsignal.conf >/dev/null
-sudo systemctl restart dnsmasq
+echo "==> Installing avahi (mDNS) so $HOSTNAME_NAME resolves"
+command -v avahi-daemon >/dev/null 2>&1 || sudo apt-get install -y avahi-daemon
+if grep -q '^host-name=' /etc/avahi/avahi-daemon.conf; then
+    sudo sed -i "s/^host-name=.*/host-name=$AVAHI_HOST_NAME/" /etc/avahi/avahi-daemon.conf
+elif grep -q '^#host-name=' /etc/avahi/avahi-daemon.conf; then
+    sudo sed -i "s/^#host-name=.*/host-name=$AVAHI_HOST_NAME/" /etc/avahi/avahi-daemon.conf
+else
+    sudo sed -i "/^\[server\]/a host-name=$AVAHI_HOST_NAME" /etc/avahi/avahi-daemon.conf
+fi
+sudo systemctl enable --now avahi-daemon >/dev/null
+sudo systemctl restart avahi-daemon
 
 echo "==> Installing nginx config"
 command -v nginx >/dev/null 2>&1 || sudo apt-get install -y nginx
 sudo cp "$DEPLOY_DIR/nginx/stationsignal.conf" /etc/nginx/sites-available/stationsignal.conf
 sudo ln -sf /etc/nginx/sites-available/stationsignal.conf /etc/nginx/sites-enabled/stationsignal.conf
 # Our site is default_server (see the comment in deploy/nginx/stationsignal.conf) so that a
-# client can reach the app by bare IP even if the substation router's DNS was never pointed at
-# this box. The stock default site must go, or nginx will refuse to start (duplicate default_server).
+# client can reach the app by bare IP even where mDNS doesn't resolve (e.g. some Android
+# browsers). The stock default site must go, or nginx will refuse to start (duplicate
+# default_server).
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
@@ -119,12 +110,12 @@ echo ""
 echo "==> Done."
 echo ""
 echo "This box's LAN IP: $BOX_IP"
-echo "For $HOSTNAME_NAME to keep working long-term, set a DHCP reservation for this exact IP"
-echo "on the substation router (keyed to this Pi's MAC address) — the script only read the"
-echo "current IP, it did not make it static. See 'Give the box a static IP' in deploy/README.md."
+echo "$HOSTNAME_NAME is live via avahi/mDNS — works for statically-addressed clients with zero"
+echo "per-laptop setup (Windows 10/11, macOS, and Linux all resolve it natively). Known gap: some"
+echo "Android browsers don't resolve .local names reliably — those can still reach the app via"
+echo "http://$BOX_IP directly (nginx's default_server)."
 echo ""
 echo "Verify:"
 echo "  On this box:   curl http://127.0.0.1:8080/health"
 echo "                 curl -H \"Host: $HOSTNAME_NAME\" http://127.0.0.1/"
-echo "  From a LAN PC: nslookup $HOSTNAME_NAME   (should return $BOX_IP)"
-echo "                 open http://$HOSTNAME_NAME in a browser"
+echo "  From a LAN PC: open http://$HOSTNAME_NAME in a browser"
