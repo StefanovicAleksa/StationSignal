@@ -53,11 +53,16 @@ echo "    upstream DNS: $UPSTREAM_DNS"
 
 echo "==> Checking port 53 is free for dnsmasq"
 if ss -tlnp 2>/dev/null | grep -q ':53 '; then
-    echo "error: something is already listening on port 53 (systemd-resolved and" >&2
-    echo "       NetworkManager's built-in dnsmasq are common culprits on Raspberry Pi OS" >&2
-    echo "       Bookworm). Resolve that first — see the dnsmasq section of deploy/README.md" >&2
-    echo "       — rather than let this script silently break the box's existing DNS." >&2
-    exit 1
+    if systemctl is-active --quiet dnsmasq; then
+        echo "    port 53 is held by dnsmasq itself (installed by a previous run of this script)"
+        echo "    — expected on a re-run, not a conflict. Continuing."
+    else
+        echo "error: something is already listening on port 53 (systemd-resolved and" >&2
+        echo "       NetworkManager's built-in dnsmasq are common culprits on Raspberry Pi OS" >&2
+        echo "       Bookworm). Resolve that first — see the dnsmasq section of deploy/README.md" >&2
+        echo "       — rather than let this script silently break the box's existing DNS." >&2
+        exit 1
+    fi
 fi
 
 echo "==> Building daemon"
