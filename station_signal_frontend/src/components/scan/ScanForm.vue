@@ -55,7 +55,7 @@ function handleSubmit() {
 
 <template>
   <form class="flex flex-wrap items-end gap-4" @submit.prevent="handleSubmit">
-    <div class="flex flex-col gap-1">
+    <div class="flex min-w-40 flex-1 flex-col gap-1">
       <label for="interfaceId" class="text-sm font-medium text-slate-700 dark:text-slate-300">Interface</label>
       <input
         id="interfaceId"
@@ -63,12 +63,12 @@ function handleSubmit() {
         type="text"
         placeholder="enp34s0"
         :disabled="props.disabled"
-        class="w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
+        class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
       />
       <p v-if="interfaceError" class="text-xs text-red-600 dark:text-red-400">{{ interfaceError }}</p>
     </div>
 
-    <div class="flex flex-col gap-1">
+    <div class="flex min-w-32 flex-1 flex-col gap-1">
       <label for="mmsPort" class="text-sm font-medium text-slate-700 dark:text-slate-300">MMS Port</label>
       <input
         id="mmsPort"
@@ -78,7 +78,7 @@ function handleSubmit() {
         max="65535"
         step="1"
         :disabled="props.disabled"
-        class="w-32 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
+        class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
       />
       <p v-if="portError" class="text-xs text-red-600 dark:text-red-400">{{ portError }}</p>
     </div>

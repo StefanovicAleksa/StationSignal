@@ -17,21 +17,22 @@ const navItems = [
     <header
       class="sticky top-0 z-10 border-b border-slate-300 bg-white dark:border-slate-800 dark:bg-slate-900"
     >
-      <div class="flex h-12 items-center gap-4 px-4">
+      <div class="flex h-12 items-center gap-2 px-3 sm:gap-4 sm:px-4">
         <span class="font-mono text-sm font-semibold tracking-tight text-slate-700 dark:text-slate-200">
           Station Signal
         </span>
 
-        <nav class="flex items-stretch gap-1 border-l border-slate-300 pl-4 dark:border-slate-700">
+        <nav class="flex items-stretch gap-1 border-l border-slate-300 pl-2 sm:pl-4 dark:border-slate-700">
           <RouterLink
             v-for="item in navItems"
             :key="item.label"
             :to="item.to"
-            class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+            :aria-label="item.label"
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:px-3 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
             active-class="!bg-blue-600 !text-white dark:!bg-blue-600 dark:!text-white"
           >
             <component :is="item.icon" :size="15" />
-            {{ item.label }}
+            <span class="hidden sm:inline">{{ item.label }}</span>
           </RouterLink>
         </nav>
 

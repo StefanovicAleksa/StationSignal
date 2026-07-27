@@ -75,7 +75,7 @@ function clear() {
   <div class="flex flex-col gap-1">
     <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Structure File (SCL/ICD/CID)</label>
     <div
-      class="flex w-72 flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed px-3 py-3 text-center text-xs transition-colors"
+      class="flex w-full flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed px-3 py-3 text-center text-xs transition-colors sm:w-72"
       :class="[
         isDragOver ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-300 dark:border-slate-700',
         props.disabled

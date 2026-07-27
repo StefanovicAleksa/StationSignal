@@ -55,7 +55,7 @@ function displayValue(value: string | boolean | number | null): string {
 
 <template>
   <div class="flex flex-col gap-4">
-    <header class="flex items-start justify-between gap-4">
+    <header class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div>
         <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">
           {{ device.host }}:{{ device.mmsPort }}

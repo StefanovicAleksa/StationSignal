@@ -16,12 +16,12 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="flex flex-wrap gap-1 border-b border-slate-300 dark:border-slate-800">
+  <div class="flex flex-nowrap gap-1 overflow-x-auto border-b border-slate-300 dark:border-slate-800">
     <button
       v-for="tab in tabs"
       :key="tab.id"
       type="button"
-      class="flex flex-col items-start rounded-t-md border border-b-0 px-3 py-2 text-sm"
+      class="flex shrink-0 flex-col items-start rounded-t-md border border-b-0 px-3 py-2 text-sm"
       :class="
         tab.id === activeId
           ? 'border-slate-300 bg-white font-medium text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100'
