@@ -17,16 +17,16 @@ type mockReportingService struct {
 	gotStopID int
 }
 
-func (m *mockReportingService) Start(ctx context.Context, params reportingdomain.StartParams) (reportingdomain.Device, error) {
+func (m *mockReportingService) Start(ctx context.Context, sessionID string, params reportingdomain.StartParams) (reportingdomain.Device, error) {
 	return m.startDevice, m.startErr
 }
 
-func (m *mockReportingService) Stop(ctx context.Context, deviceID int) error {
+func (m *mockReportingService) Stop(ctx context.Context, sessionID string, deviceID int) error {
 	m.gotStopID = deviceID
 	return m.stopErr
 }
 
-func (m *mockReportingService) List() []reportingdomain.Device {
+func (m *mockReportingService) ListForSession(sessionID string) []reportingdomain.Device {
 	return m.list
 }
 
@@ -39,16 +39,16 @@ type mockScanningService struct {
 	gotStopID int
 }
 
-func (m *mockScanningService) Start(ctx context.Context, params scanningdomain.StartParams) (scanningdomain.Scan, error) {
+func (m *mockScanningService) Start(ctx context.Context, sessionID string, params scanningdomain.StartParams) (scanningdomain.Scan, error) {
 	return m.startScan, m.startErr
 }
 
-func (m *mockScanningService) Stop(ctx context.Context, scanID int) error {
+func (m *mockScanningService) Stop(ctx context.Context, sessionID string, scanID int) error {
 	m.gotStopID = scanID
 	return m.stopErr
 }
 
-func (m *mockScanningService) List() []scanningdomain.Scan {
+func (m *mockScanningService) ListForSession(sessionID string) []scanningdomain.Scan {
 	return m.list
 }
 

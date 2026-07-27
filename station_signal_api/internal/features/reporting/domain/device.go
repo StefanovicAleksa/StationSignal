@@ -45,4 +45,8 @@ type Device struct {
 	InterfaceID string      `json:"interfaceId"`
 	WSPort      int         `json:"wsPort"`
 	StartParams StartParams `json:"-"`
+	// SessionID is the browser session that started reporting on this device (see
+	// internal/core/session) — not daemon-facing, only used to scope this API's own
+	// List/Stream/Stop to their owner.
+	SessionID string `json:"-"`
 }

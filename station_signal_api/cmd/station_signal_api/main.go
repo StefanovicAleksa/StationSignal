@@ -120,25 +120,25 @@ func runRearm(ctx context.Context, client *daemonclient.Client, reportingSvc *re
 func rearm(ctx context.Context, reportingSvc *reportingsvc.Service, scanningSvc *scanningsvc.Service, logger *slog.Logger) {
 	logger.Warn("daemon reconnected after unexpected restart, re-arming active devices/scans")
 
-	deviceParams := reportingSvc.Snapshot()
+	devices := reportingSvc.Snapshot()
 	reportingSvc.Clear()
-	for _, params := range deviceParams {
-		device, err := reportingSvc.Start(ctx, params)
+	for _, d := range devices {
+		device, err := reportingSvc.Start(ctx, d.SessionID, d.StartParams)
 		if err != nil {
-			logger.Error("re-arm: failed to restart device reporting", "host", params.Host, "error", err)
+			logger.Error("re-arm: failed to restart device reporting", "host", d.StartParams.Host, "error", err)
 			continue
 		}
-		logger.Info("re-arm: device reporting restarted", "host", params.Host, "deviceId", device.ID)
+		logger.Info("re-arm: device reporting restarted", "host", d.StartParams.Host, "deviceId", device.ID)
 	}
 
-	scanParams := scanningSvc.Snapshot()
+	scans := scanningSvc.Snapshot()
 	scanningSvc.Clear()
-	for _, params := range scanParams {
-		scan, err := scanningSvc.Start(ctx, params)
+	for _, sc := range scans {
+		scan, err := scanningSvc.Start(ctx, sc.SessionID, sc.StartParams)
 		if err != nil {
-			logger.Error("re-arm: failed to restart scan", "interfaceId", params.InterfaceID, "error", err)
+			logger.Error("re-arm: failed to restart scan", "interfaceId", sc.StartParams.InterfaceID, "error", err)
 			continue
 		}
-		logger.Info("re-arm: scan restarted", "interfaceId", params.InterfaceID, "scanId", scan.ID)
+		logger.Info("re-arm: scan restarted", "interfaceId", sc.StartParams.InterfaceID, "scanId", scan.ID)
 	}
 }

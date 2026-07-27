@@ -30,4 +30,7 @@ type Scan struct {
 	MMSPort         int         `json:"mmsPort"`
 	SweepIntervalMs int         `json:"sweepIntervalMs"`
 	StartParams     StartParams `json:"-"`
+	// SessionID is the browser session that started this scan (see internal/core/session) —
+	// not daemon-facing, only used to scope this API's own List/Stream/Stop to their owner.
+	SessionID string `json:"-"`
 }

@@ -78,7 +78,9 @@ func (s *Store) IsConnected(host string, mmsPort int) bool {
 	return false
 }
 
-// List returns a snapshot of all currently active devices.
+// List returns a snapshot of all currently active devices, regardless of owning session —
+// callers outside this package should use ListForSession instead; this stays for internal use
+// (crash re-arm's Snapshot goes through the same map, see below).
 func (s *Store) List() []domain.Device {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -89,15 +91,24 @@ func (s *Store) List() []domain.Device {
 	return out
 }
 
-// Snapshot returns the original start params of every active device, for crash re-arm.
-func (s *Store) Snapshot() []domain.StartParams {
+// ListForSession returns a snapshot of the active devices owned by sessionID.
+func (s *Store) ListForSession(sessionID string) []domain.Device {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]domain.StartParams, 0, len(s.devices))
+	out := make([]domain.Device, 0, len(s.devices))
 	for _, r := range s.devices {
-		out = append(out, r.device.StartParams)
+		if r.device.SessionID == sessionID {
+			out = append(out, r.device)
+		}
 	}
 	return out
+}
+
+// Snapshot returns every active device (full record, including its owning SessionID), for
+// crash re-arm to replay against a freshly restarted daemon under the same sessions that
+// started them.
+func (s *Store) Snapshot() []domain.Device {
+	return s.List()
 }
 
 // Clear drops every device, closing each one's hub — used during crash re-arm, where the old

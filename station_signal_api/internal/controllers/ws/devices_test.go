@@ -32,6 +32,21 @@ func TestHandleDeviceStream_UnknownDeviceReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+func TestHandleDeviceStream_NotOwnedBySessionReturns404(t *testing.T) {
+	// A device that exists and is streamable, but not owned by this request's session, must
+	// be indistinguishable from "doesn't exist" — same 404, so a session can't tell the
+	// difference between "not mine" and "never existed" by probing IDs.
+	srv, url := newTestServer(&mockReportingStreamer{ok: true, denyOwnership: true}, &mockScanningStreamer{})
+	defer srv.Close()
+
+	//nolint:bodyclose // resp is nil on dial failure in the success case, checked below
+	_, resp, err := websocket.DefaultDialer.Dial(url+"/ws/devices/1", nil)
+
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestHandleDeviceStream_InvalidIDReturns400(t *testing.T) {
 	srv, url := newTestServer(&mockReportingStreamer{}, &mockScanningStreamer{})
 	defer srv.Close()

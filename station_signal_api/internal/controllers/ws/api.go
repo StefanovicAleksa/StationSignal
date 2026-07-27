@@ -24,10 +24,12 @@ const (
 type reportingStreamer interface {
 	StreamFor(deviceID int) (<-chan []byte, func(), bool)
 	IsConnected(host string, mmsPort int) bool
+	OwnsDevice(sessionID string, deviceID int) bool
 }
 
 type scanningStreamer interface {
 	StreamScans() (<-chan []byte, func(), bool)
+	OwnsScan(sessionID string, scanID int) bool
 }
 
 // API holds the dependencies every websocket handler needs.
@@ -60,6 +62,21 @@ func New(reporting reportingStreamer, scanning scanningStreamer, logger *slog.Lo
 func RegisterRoutes(r chi.Router, api *API) {
 	r.Get("/ws/devices/{id}", api.handleDeviceStream)
 	r.Get("/ws/scans", api.handleScanStream)
+}
+
+// pendingSetCookie carries any Set-Cookie header already added to w (e.g. by session.Middleware
+// minting a fresh session cookie) into a websocket upgrade response. gorilla/websocket's
+// Upgrade doesn't read w.Header() itself — it only writes whatever's passed as its own
+// responseHeader argument — so a cookie minted on a request whose first contact happens to be a
+// raw WS dial (no prior REST call) would otherwise never reach the browser.
+func pendingSetCookie(w http.ResponseWriter) http.Header {
+	cookies := w.Header().Values("Set-Cookie")
+	if len(cookies) == 0 {
+		return nil
+	}
+	h := http.Header{}
+	h["Set-Cookie"] = cookies
+	return h
 }
 
 // pump forwards every message on ch to conn until ch closes (the underlying device/scan went

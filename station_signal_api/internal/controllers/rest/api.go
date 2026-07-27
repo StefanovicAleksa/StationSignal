@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"station_signal_api/internal/core/session"
 	reportingdomain "station_signal_api/internal/features/reporting/domain"
 	scanningdomain "station_signal_api/internal/features/scanning/domain"
 )
@@ -22,15 +23,15 @@ import (
 // *reportingsvc.Service, *scanningsvc.Service, *daemonclient.Client, and
 // *supervisionsvc.Supervisor all satisfy these implicitly — main.go needs no changes.
 type reportingService interface {
-	Start(ctx context.Context, params reportingdomain.StartParams) (reportingdomain.Device, error)
-	Stop(ctx context.Context, deviceID int) error
-	List() []reportingdomain.Device
+	Start(ctx context.Context, sessionID string, params reportingdomain.StartParams) (reportingdomain.Device, error)
+	Stop(ctx context.Context, sessionID string, deviceID int) error
+	ListForSession(sessionID string) []reportingdomain.Device
 }
 
 type scanningService interface {
-	Start(ctx context.Context, params scanningdomain.StartParams) (scanningdomain.Scan, error)
-	Stop(ctx context.Context, scanID int) error
-	List() []scanningdomain.Scan
+	Start(ctx context.Context, sessionID string, params scanningdomain.StartParams) (scanningdomain.Scan, error)
+	Stop(ctx context.Context, sessionID string, scanID int) error
+	ListForSession(sessionID string) []scanningdomain.Scan
 }
 
 type daemonStatus interface {
@@ -81,6 +82,11 @@ func Router(api *API) *chi.Mux {
 		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type"},
 	}))
+	// Every browser gets its own session cookie so scans/device-reporting one browser starts
+	// aren't visible to or stoppable by another (see internal/core/session). This also covers
+	// the websocket endpoints controllers/ws mounts onto this same *chi.Mux (see main.go) —
+	// chi applies Use() middleware to routes registered on the mux afterward too.
+	r.Use(session.Middleware)
 
 	r.Get("/health", api.handleHealth)
 

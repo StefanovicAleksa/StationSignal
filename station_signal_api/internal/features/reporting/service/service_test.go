@@ -39,6 +39,8 @@ func newTestHub(t *testing.T) *streamrelay.Hub {
 	return streamrelay.NewHub(ctx, "ws://127.0.0.1:1", nil)
 }
 
+const testSessionID = "test-session"
+
 func newServiceWithMock(gw *mockGateway) *Service {
 	return &Service{gateway: gw, store: data.NewStore()}
 }
@@ -48,11 +50,11 @@ func TestService_Start_Success_StoresDevice(t *testing.T) {
 	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5"}, startHub: hub}
 	svc := newServiceWithMock(gw)
 
-	device, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	device, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, device.ID)
-	assert.Len(t, svc.List(), 1)
+	assert.Len(t, svc.ListForSession(testSessionID), 1)
 	ch, cancel, ok := svc.StreamFor(1)
 	require.True(t, ok)
 	cancel()
@@ -64,28 +66,28 @@ func TestService_Start_Failure_DoesNotStoreDevice(t *testing.T) {
 	gw := &mockGateway{startErr: wantErr}
 	svc := newServiceWithMock(gw)
 
-	_, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 
 	assert.Equal(t, wantErr, err)
-	assert.Empty(t, svc.List())
+	assert.Empty(t, svc.ListForSession(testSessionID))
 }
 
 func TestService_Stop_Success_RemovesDeviceAndClosesHub(t *testing.T) {
 	hub := newTestHub(t)
 	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: hub}
 	svc := newServiceWithMock(gw)
-	_, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
 	ch, cancel, ok := svc.StreamFor(1)
 	require.True(t, ok)
 	defer cancel()
 
-	err = svc.Stop(context.Background(), 1)
+	err = svc.Stop(context.Background(), testSessionID, 1)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, gw.gotStopID)
-	assert.Empty(t, svc.List())
+	assert.Empty(t, svc.ListForSession(testSessionID))
 	_, ok = <-ch
 	assert.False(t, ok, "hub should be closed after Stop()")
 }
@@ -94,21 +96,21 @@ func TestService_Stop_Failure_LeavesStoreUntouched(t *testing.T) {
 	hub := newTestHub(t)
 	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: hub}
 	svc := newServiceWithMock(gw)
-	_, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
 	gw.stopErr = &daemonproto.Error{Code: daemonproto.ErrOrchestrationFailed}
-	err = svc.Stop(context.Background(), 1)
+	err = svc.Stop(context.Background(), testSessionID, 1)
 
 	assert.Equal(t, gw.stopErr, err)
-	assert.Len(t, svc.List(), 1, "device should still be tracked since the failure is not DEVICE_NOT_FOUND")
+	assert.Len(t, svc.ListForSession(testSessionID), 1, "device should still be tracked since the failure is not DEVICE_NOT_FOUND")
 }
 
 func TestService_Stop_DeviceNotFound_StillClearsStore(t *testing.T) {
 	hub := newTestHub(t)
 	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: hub}
 	svc := newServiceWithMock(gw)
-	_, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
 	ch, cancel, ok := svc.StreamFor(1)
@@ -116,43 +118,72 @@ func TestService_Stop_DeviceNotFound_StillClearsStore(t *testing.T) {
 	defer cancel()
 
 	gw.stopErr = &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound}
-	err = svc.Stop(context.Background(), 1)
+	err = svc.Stop(context.Background(), testSessionID, 1)
 
 	assert.Equal(t, gw.stopErr, err, "the DEVICE_NOT_FOUND error should still be reported to the caller")
-	assert.Empty(t, svc.List(), "the daemon has no record of this device either way, so the stale entry should be dropped")
+	assert.Empty(t, svc.ListForSession(testSessionID), "the daemon has no record of this device either way, so the stale entry should be dropped")
 	_, ok = <-ch
 	assert.False(t, ok, "hub should be closed even though the daemon call failed")
 }
 
-func TestService_List_ReflectsActiveDevices(t *testing.T) {
-	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: newTestHub(t)}
+func TestService_Stop_OtherSessionsDeviceIsRejectedAsNotFound(t *testing.T) {
+	hub := newTestHub(t)
+	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: hub}
 	svc := newServiceWithMock(gw)
-	require.Empty(t, svc.List())
-
-	_, err := svc.Start(context.Background(), domain.StartParams{})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
-	assert.Len(t, svc.List(), 1)
+	err = svc.Stop(context.Background(), "someone-elses-session", 1)
+
+	var derr *daemonproto.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, daemonproto.ErrDeviceNotFound, derr.Code)
+	assert.Zero(t, gw.gotStopID, "the daemon should never be asked to stop a device this session doesn't own")
+	assert.Len(t, svc.ListForSession(testSessionID), 1, "the original session's device must be untouched")
 }
 
-func TestService_Snapshot_ReturnsOriginalStartParams(t *testing.T) {
+func TestService_ListForSession_ReflectsOwnActiveDevices(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	require.Empty(t, svc.ListForSession(testSessionID))
+
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{})
+	require.NoError(t, err)
+
+	assert.Len(t, svc.ListForSession(testSessionID), 1)
+	assert.Empty(t, svc.ListForSession("someone-elses-session"))
+}
+
+func TestService_OwnsDevice(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{})
+	require.NoError(t, err)
+
+	assert.True(t, svc.OwnsDevice(testSessionID, 1))
+	assert.False(t, svc.OwnsDevice("someone-elses-session", 1))
+	assert.False(t, svc.OwnsDevice(testSessionID, 999))
+}
+
+func TestService_Snapshot_ReturnsDevicesWithSessionAndStartParams(t *testing.T) {
 	params := domain.StartParams{Host: "10.0.0.5", InterfaceID: "eth0"}
 	gw := &mockGateway{startDevice: domain.Device{ID: 1, StartParams: params}, startHub: newTestHub(t)}
 	svc := newServiceWithMock(gw)
-	_, err := svc.Start(context.Background(), params)
+	_, err := svc.Start(context.Background(), testSessionID, params)
 	require.NoError(t, err)
 
 	got := svc.Snapshot()
 
 	require.Len(t, got, 1)
-	assert.Equal(t, params, got[0])
+	assert.Equal(t, params, got[0].StartParams)
+	assert.Equal(t, testSessionID, got[0].SessionID)
 }
 
 func TestService_Clear_EmptiesStoreAndClosesHubs(t *testing.T) {
 	hub := newTestHub(t)
 	gw := &mockGateway{startDevice: domain.Device{ID: 1}, startHub: hub}
 	svc := newServiceWithMock(gw)
-	_, err := svc.Start(context.Background(), domain.StartParams{})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{})
 	require.NoError(t, err)
 	ch, cancel, ok := svc.StreamFor(1)
 	require.True(t, ok)
@@ -160,7 +191,7 @@ func TestService_Clear_EmptiesStoreAndClosesHubs(t *testing.T) {
 
 	svc.Clear()
 
-	assert.Empty(t, svc.List())
+	assert.Empty(t, svc.ListForSession(testSessionID))
 	_, ok = <-ch
 	assert.False(t, ok)
 }
@@ -170,7 +201,7 @@ func TestService_IsConnected_ReflectsActiveDevices(t *testing.T) {
 	svc := newServiceWithMock(gw)
 	assert.False(t, svc.IsConnected("10.0.0.5", 102))
 
-	_, err := svc.Start(context.Background(), domain.StartParams{Host: "10.0.0.5"})
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
 	assert.True(t, svc.IsConnected("10.0.0.5", 102))

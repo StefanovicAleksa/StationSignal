@@ -15,6 +15,10 @@ type mockReportingStreamer struct {
 	ok           bool
 	cancelCalled int32
 	connected    []connectedDevice
+	// denyOwnership makes OwnsDevice return false, for tests exercising the not-owned-by-this-
+	// session path. Defaults to false (owns), so existing tests that don't care about session
+	// ownership need no changes.
+	denyOwnership bool
 }
 
 func (m *mockReportingStreamer) StreamFor(deviceID int) (<-chan []byte, func(), bool) {
@@ -37,6 +41,10 @@ func (m *mockReportingStreamer) IsConnected(host string, mmsPort int) bool {
 	return false
 }
 
+func (m *mockReportingStreamer) OwnsDevice(sessionID string, deviceID int) bool {
+	return !m.denyOwnership
+}
+
 func (m *mockReportingStreamer) cancelWasCalled() bool {
 	return atomic.LoadInt32(&m.cancelCalled) > 0
 }
@@ -46,6 +54,14 @@ type mockScanningStreamer struct {
 	ok           bool
 	ch           chan []byte
 	cancelCalled int32
+	// denyOwnership makes OwnsScan return false, for tests exercising the not-owned-by-this-
+	// session path. Defaults to false (owns), so existing tests that don't care about session
+	// ownership need no changes.
+	denyOwnership bool
+}
+
+func (m *mockScanningStreamer) OwnsScan(sessionID string, scanID int) bool {
+	return !m.denyOwnership
 }
 
 func (m *mockScanningStreamer) StreamScans() (<-chan []byte, func(), bool) {

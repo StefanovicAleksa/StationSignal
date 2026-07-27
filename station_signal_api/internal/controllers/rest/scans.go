@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"station_signal_api/internal/core/session"
 	scanningdomain "station_signal_api/internal/features/scanning/domain"
 )
 
@@ -14,7 +15,7 @@ func (a *API) handleStartScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scan, err := a.scanning.Start(r.Context(), params)
+	scan, err := a.scanning.Start(r.Context(), session.FromContext(r.Context()), params)
 	if err != nil {
 		a.writeError(w, err)
 		return
@@ -30,7 +31,7 @@ func (a *API) handleStopScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.scanning.Stop(r.Context(), id); err != nil {
+	if err := a.scanning.Stop(r.Context(), session.FromContext(r.Context()), id); err != nil {
 		a.writeError(w, err)
 		return
 	}
@@ -39,5 +40,5 @@ func (a *API) handleStopScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListScans(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.scanning.List())
+	writeJSON(w, http.StatusOK, a.scanning.ListForSession(session.FromContext(r.Context())))
 }

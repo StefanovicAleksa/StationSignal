@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"station_signal_api/internal/core/daemonproto"
+	"station_signal_api/internal/core/session"
 	reportingdomain "station_signal_api/internal/features/reporting/domain"
 )
 
@@ -45,7 +46,7 @@ func (a *API) handleStartReporting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	device, err := a.reporting.Start(r.Context(), params)
+	device, err := a.reporting.Start(r.Context(), session.FromContext(r.Context()), params)
 	if err != nil {
 		a.writeError(w, classifyStartReportingError(err))
 		return
@@ -61,7 +62,7 @@ func (a *API) handleStopReporting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.reporting.Stop(r.Context(), id); err != nil {
+	if err := a.reporting.Stop(r.Context(), session.FromContext(r.Context()), id); err != nil {
 		a.writeError(w, err)
 		return
 	}
@@ -70,5 +71,5 @@ func (a *API) handleStopReporting(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.reporting.List())
+	writeJSON(w, http.StatusOK, a.reporting.ListForSession(session.FromContext(r.Context())))
 }

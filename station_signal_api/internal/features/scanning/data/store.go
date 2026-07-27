@@ -73,7 +73,9 @@ func (s *Store) Hub() (*streamrelay.Hub, bool) {
 	return s.hub, s.hub != nil
 }
 
-// List returns a snapshot of all currently active scans.
+// List returns a snapshot of all currently active scans, regardless of owning session —
+// callers outside this package should use ListForSession instead; this stays for internal use
+// (crash re-arm's Snapshot goes through the same map, see below).
 func (s *Store) List() []domain.Scan {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -84,15 +86,23 @@ func (s *Store) List() []domain.Scan {
 	return out
 }
 
-// Snapshot returns the original start params of every active scan, for crash re-arm.
-func (s *Store) Snapshot() []domain.StartParams {
+// ListForSession returns a snapshot of the active scans owned by sessionID.
+func (s *Store) ListForSession(sessionID string) []domain.Scan {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]domain.StartParams, 0, len(s.scans))
+	out := make([]domain.Scan, 0, len(s.scans))
 	for _, sc := range s.scans {
-		out = append(out, sc.StartParams)
+		if sc.SessionID == sessionID {
+			out = append(out, sc)
+		}
 	}
 	return out
+}
+
+// Snapshot returns every active scan (full record, including its owning SessionID), for crash
+// re-arm to replay against a freshly restarted daemon under the same sessions that started them.
+func (s *Store) Snapshot() []domain.Scan {
+	return s.List()
 }
 
 // Clear drops every scan and closes the shared hub — used during crash re-arm, where the old

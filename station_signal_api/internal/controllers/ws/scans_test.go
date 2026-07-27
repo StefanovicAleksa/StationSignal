@@ -153,6 +153,28 @@ func TestHandleScanStream_OmitsAlreadyConnectedDeviceButRelaysOthers(t *testing.
 		"the connected device's result should have been skipped, so this must be the second message")
 }
 
+func TestHandleScanStream_OmitsScansNotOwnedByThisSession(t *testing.T) {
+	// The shared hub carries every active scan from every session — a scan not owned by this
+	// connection's session must be filtered out, same as an already-connected device.
+	ch := make(chan []byte, 2)
+	scanning := &mockScanningStreamer{ok: true, ch: ch, denyOwnership: true}
+	srv, url := newTestServer(&mockReportingStreamer{}, scanning)
+	defer srv.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(url+"/ws/scans", nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	ch <- []byte(`{"type":"SCAN_RESULT","scanId":1,"host":"10.0.0.5","mmsPort":102}`)
+
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, _, err = conn.ReadMessage()
+	require.Error(t, err)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	assert.True(t, netErr.Timeout(), "not-owned scan result should have been dropped, not relayed")
+}
+
 func TestHandleScanStream_ClientDisconnectDuringIdleStopsPolling(t *testing.T) {
 	streamer := &mockScanningStreamer{ok: false}
 	srv, url := newTestServer(&mockReportingStreamer{}, streamer)

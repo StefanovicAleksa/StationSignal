@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"station_signal_api/internal/core/daemonclient"
+	"station_signal_api/internal/core/daemonproto"
 	"station_signal_api/internal/features/scanning/data"
 	"station_signal_api/internal/features/scanning/domain"
 )
@@ -25,18 +26,26 @@ func New(client daemonclient.Caller, hubCtx context.Context, logger *slog.Logger
 	return &Service{gateway: data.NewGateway(client), store: data.NewStore(hubCtx, logger)}
 }
 
-// Start issues START_SCAN for params and records the resulting scan.
-func (s *Service) Start(ctx context.Context, params domain.StartParams) (domain.Scan, error) {
+// Start issues START_SCAN for params and records the resulting scan under sessionID, so only
+// that session's later List/Stream/Stop calls can see or affect it.
+func (s *Service) Start(ctx context.Context, sessionID string, params domain.StartParams) (domain.Scan, error) {
 	scan, err := s.gateway.Start(ctx, params)
 	if err != nil {
 		return domain.Scan{}, err
 	}
+	scan.SessionID = sessionID
 	s.store.Add(scan)
 	return scan, nil
 }
 
-// Stop issues STOP_SCAN for scanID and drops it from the active-scan store.
-func (s *Service) Stop(ctx context.Context, scanID int) error {
+// Stop issues STOP_SCAN for scanID and drops it from the active-scan store — but only if
+// sessionID is the one that started it. A scan owned by a different session (or one that
+// doesn't exist) is rejected identically, as SCAN_NOT_FOUND, so a session can't distinguish
+// "not yours" from "doesn't exist" by probing IDs.
+func (s *Service) Stop(ctx context.Context, sessionID string, scanID int) error {
+	if !s.OwnsScan(sessionID, scanID) {
+		return &daemonproto.Error{Code: daemonproto.ErrScanNotFound, Message: "scan not found"}
+	}
 	if err := s.gateway.Stop(ctx, scanID); err != nil {
 		return err
 	}
@@ -44,13 +53,19 @@ func (s *Service) Stop(ctx context.Context, scanID int) error {
 	return nil
 }
 
-// List returns every currently active scan.
-func (s *Service) List() []domain.Scan {
-	return s.store.List()
+// ListForSession returns every currently active scan owned by sessionID.
+func (s *Service) ListForSession(sessionID string) []domain.Scan {
+	return s.store.ListForSession(sessionID)
 }
 
-// Snapshot returns the original start params of every active scan, for crash re-arm.
-func (s *Service) Snapshot() []domain.StartParams {
+// OwnsScan reports whether sessionID is the session that started scanID.
+func (s *Service) OwnsScan(sessionID string, scanID int) bool {
+	sc, ok := s.store.Get(scanID)
+	return ok && sc.SessionID == sessionID
+}
+
+// Snapshot returns every active scan (including its owning session), for crash re-arm.
+func (s *Service) Snapshot() []domain.Scan {
 	return s.store.Snapshot()
 }
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"os/exec"
 	"syscall"
@@ -19,13 +20,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Harness is a running station_signal_api process, wired to a real daemon binary, with small
-// HTTP/WS client helpers for driving it exactly as a frontend would.
-type Harness struct {
+// Session is one independent, cookie-jar-backed client against a running station_signal_api —
+// everything a single "browser" needs to drive the API exactly as a frontend would, including
+// picking up and replaying whatever session cookie the API mints (see internal/core/session).
+// Harness (below) is the first session against a freshly started process; Harness.NewSession
+// returns additional independent ones against that same process, for tests that need to
+// simulate more than one browser talking to the same API/daemon at once.
+type Session struct {
 	t       *testing.T
 	baseURL string
 	wsBase  string
-	cmd     *exec.Cmd
+	client  *http.Client
+}
+
+func newSession(t *testing.T, baseURL, wsBase string) *Session {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	return &Session{t: t, baseURL: baseURL, wsBase: wsBase, client: &http.Client{Jar: jar}}
+}
+
+// Get issues a GET request against path (e.g. "/devices").
+func (s *Session) Get(path string) (*http.Response, error) {
+	return s.client.Get(s.baseURL + path)
+}
+
+// Post issues a POST request with a JSON body against path.
+func (s *Session) Post(path string, body any) (*http.Response, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Post(s.baseURL+path, "application/json", bytes.NewReader(data))
+}
+
+// Delete issues a DELETE request against path.
+func (s *Session) Delete(path string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodDelete, s.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Do(req)
+}
+
+// DialWS connects to one of this API's own websocket endpoints (path starting with "/ws/"),
+// carrying whatever session cookie this Session's prior HTTP calls picked up (and letting the
+// dial's own Set-Cookie response, if this is the session's first contact with the API at all,
+// flow back into the same jar for any subsequent Get/Post/Delete/DialWS call).
+func (s *Session) DialWS(t *testing.T, path string) *websocket.Conn {
+	t.Helper()
+	dialer := &websocket.Dialer{Jar: s.client.Jar}
+	conn, _, err := dialer.DialContext(context.Background(), s.wsBase+path, nil)
+	require.NoError(t, err)
+	return conn
+}
+
+// Harness is a running station_signal_api process, wired to a real daemon binary, plus the
+// first of potentially several independent Sessions against it.
+type Harness struct {
+	*Session
+	t   *testing.T
+	cmd *exec.Cmd
 }
 
 // StartAPI builds and spawns station_signal_api against daemonBin, waits for it to report
@@ -42,14 +97,21 @@ func StartAPI(t *testing.T, daemonBin string) *Harness {
 	require.NoError(t, cmd.Start())
 
 	h := &Harness{
+		Session: newSession(t, "http://"+addr, "ws://"+addr),
 		t:       t,
-		baseURL: "http://" + addr,
-		wsBase:  "ws://" + addr,
 		cmd:     cmd,
 	}
 	t.Cleanup(h.stop)
 	h.waitHealthy(10 * time.Second)
 	return h
+}
+
+// NewSession returns an additional, independent session (its own cookie jar, so its own
+// station_signal_api session — see internal/core/session) against this same running
+// process/daemon, for tests simulating more than one browser at once.
+func (h *Harness) NewSession(t *testing.T) *Session {
+	t.Helper()
+	return newSession(t, h.baseURL, h.wsBase)
 }
 
 // PID returns the OS process ID of the station_signal_api process itself.
@@ -125,29 +187,6 @@ func (h *Harness) waitHealthy(timeout time.Duration) {
 	h.t.Fatal("API did not become healthy in time")
 }
 
-// Get issues a GET request against path (e.g. "/devices").
-func (h *Harness) Get(path string) (*http.Response, error) {
-	return http.Get(h.baseURL + path)
-}
-
-// Post issues a POST request with a JSON body against path.
-func (h *Harness) Post(path string, body any) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	return http.Post(h.baseURL+path, "application/json", bytes.NewReader(data))
-}
-
-// Delete issues a DELETE request against path.
-func (h *Harness) Delete(path string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodDelete, h.baseURL+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	return http.DefaultClient.Do(req)
-}
-
 // ReadBody reads and closes resp.Body exactly once, returning the raw bytes. Use this
 // (rather than DecodeJSON) whenever the body is also needed for an assertion failure
 // message — e.g. `require.Equalf(t, want, resp.StatusCode, "body: %s", body)` — since a
@@ -194,12 +233,4 @@ func BodyString(resp *http.Response) string {
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	return string(data)
-}
-
-// DialWS connects to one of this API's own websocket endpoints (path starting with "/ws/").
-func (h *Harness) DialWS(t *testing.T, path string) *websocket.Conn {
-	t.Helper()
-	conn, _, err := websocket.DefaultDialer.DialContext(context.Background(), h.wsBase+path, nil)
-	require.NoError(t, err)
-	return conn
 }

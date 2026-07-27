@@ -119,15 +119,27 @@ func TestStore_ListEmptyReturnsEmptySliceNotNil(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestStore_ListForSession_OnlyReturnsMatchingSession(t *testing.T) {
+	s := newTestStore(t)
+	s.Add(domain.Scan{ID: 1, SessionID: "session-a"})
+	s.Add(domain.Scan{ID: 2, SessionID: "session-b"})
+
+	got := s.ListForSession("session-a")
+
+	require.Len(t, got, 1)
+	assert.Equal(t, 1, got[0].ID)
+}
+
 func TestStore_Snapshot(t *testing.T) {
 	s := newTestStore(t)
 	params := domain.StartParams{InterfaceID: "eth0"}
-	s.Add(domain.Scan{ID: 1, StartParams: params})
+	s.Add(domain.Scan{ID: 1, StartParams: params, SessionID: "session-a"})
 
 	got := s.Snapshot()
 
 	require.Len(t, got, 1)
-	assert.Equal(t, params, got[0])
+	assert.Equal(t, params, got[0].StartParams)
+	assert.Equal(t, "session-a", got[0].SessionID)
 }
 
 func TestStore_ClearClosesHubAndEmptiesStore(t *testing.T) {

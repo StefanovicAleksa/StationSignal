@@ -36,6 +36,14 @@ client code against it.
   error}`. Multiple clients may connect; every response is **broadcast to all of them**, not just
   the requester — filter on `requestId`. No unsolicited pushes on this channel (e.g. no
   "device disconnected" notification).
+  **Session isolation is layered on top of this by this API, not the daemon.** The daemon has no
+  concept of "who asked" — every browser talking to this API gets its own cookie-based session
+  (`internal/core/session`), and this API's own scanning/reporting stores tag each started scan/
+  device with the session that started it, filtering `GET`/list, the WS relays, and stop/delete
+  down to the caller's own session before anything reaches (or is asked of) the daemon. This
+  keeps the daemon's control channel exactly as broadcast-based as it already is above — the
+  daemon still doesn't know or care about sessions, this API just stops forwarding what a
+  session shouldn't see.
 - **Per-device report stream — `ws://127.0.0.1:<wsPort>`**: one per device, `wsPort` returned by
   a successful `START_REPORTING`. Push-only stream of normalized MMS report / GOOSE JSON for that
   one device.

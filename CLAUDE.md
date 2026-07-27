@@ -7,9 +7,12 @@ with a generic packet-capture tool is slow and requires reading raw protocol str
 this app instead gives a live, normalized, human-readable view of what an IED is actually
 reporting — GOOSE frames and MMS report control block updates alike, decoded and streamed as they
 happen. Deployment target is a single on-site box per substation: daemon, API, and frontend all
-run together on the same network as the IEDs being monitored, for one engineer/technician working
-one substation at a time. No multi-site, multi-tenant, or remote/cloud monitoring concerns are in
-scope today.
+run together on the same network as the IEDs being monitored, for one or more engineers/
+technicians working one substation at a time — each browser/session sees and controls only the
+scans and devices it started itself (see `station_signal_api/CLAUDE.md`'s session-isolation note),
+so multiple technicians can use the tool concurrently without interfering with each other. No
+multi-site, multi-tenant, or remote/cloud monitoring concerns are in scope today — this is still
+one box, one substation, just not necessarily one operator.
 
 ## Repo Layout
 Three sibling projects, each with its own `CLAUDE.md` governing its internals — this file only
