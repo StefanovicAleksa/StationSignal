@@ -84,8 +84,16 @@ sudo cp -r station_signal_frontend/dist/* /opt/station_signal/frontend-dist/
 sudo apt install nginx
 sudo cp deploy/nginx/stationsignal.conf /etc/nginx/sites-available/stationsignal.conf
 sudo ln -s /etc/nginx/sites-available/stationsignal.conf /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
+`stationsignal.conf` is `default_server` (see its own header comment), so it also answers any
+request nginx can't match by Host header — including a bare `http://<box-ip>`. This matters
+because the substation router's DHCP/DNS settings are often outside our control (client-owned
+network), so clients that never picked up `stationsignal.internal` via DNS (or can't — e.g. many
+Android phones don't resolve mDNS `.local` names in the browser either) can still open the app by
+IP alone, no client-side config needed. Removing the stock `default` site avoids nginx refusing to
+start over two conflicting `default_server` entries.
 
 ## 5. Install the systemd service
 ```
@@ -149,5 +157,10 @@ against the freshly-rebuilt ARM libraries) exactly as above. Two Pi-specific thi
    `http://stationsignal.internal` in a browser and confirm the UI loads, a device report stream
    connects, and a scan runs end-to-end (this is what actually proves the nginx WebSocket proxy
    headers are correct).
-3. Reboot the box and repeat step 2 without starting anything by hand, to confirm the systemd
+3. On any device (including one where DNS was never pointed at the box, e.g. a phone on a client
+   network you can't reconfigure): open `http://<box-ip>` directly. Because `stationsignal.conf`
+   is `default_server`, this should load the app the same as the hostname does — no DNS setup
+   required. If it instead shows nginx's stock "Welcome to nginx" page, `sudo rm -f
+   /etc/nginx/sites-enabled/default` and reload nginx (`deploy/setup.sh` does this automatically).
+4. Reboot the box and repeat step 2 without starting anything by hand, to confirm the systemd
    unit and nginx/dnsmasq's own service units all come back up on their own.

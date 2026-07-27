@@ -103,6 +103,10 @@ echo "==> Installing nginx config"
 command -v nginx >/dev/null 2>&1 || sudo apt-get install -y nginx
 sudo cp "$DEPLOY_DIR/nginx/stationsignal.conf" /etc/nginx/sites-available/stationsignal.conf
 sudo ln -sf /etc/nginx/sites-available/stationsignal.conf /etc/nginx/sites-enabled/stationsignal.conf
+# Our site is default_server (see the comment in deploy/nginx/stationsignal.conf) so that a
+# client can reach the app by bare IP even if the substation router's DNS was never pointed at
+# this box. The stock default site must go, or nginx will refuse to start (duplicate default_server).
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl reload nginx
 
