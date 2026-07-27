@@ -73,7 +73,9 @@ station_signal_daemon/rebuild_proj.sh /opt/station_signal/bin/station_signal_dae
 # API
 (cd station_signal_api && go build -o /opt/station_signal/bin/station_signal_api ./cmd/station_signal_api)
 
-# Frontend — .env.production (already in the repo) bakes in VITE_API_BASE_URL=http://stationsignal.internal
+# Frontend — .env.production (already in the repo) intentionally sets no VITE_API_BASE_URL, so
+# the built app calls the API on its own page origin (works for stationsignal.internal, a bare
+# box IP, or anything else nginx answers for — see apiClient.ts)
 (cd station_signal_frontend && npm install && npm run build)
 sudo mkdir -p /opt/station_signal/frontend-dist
 sudo cp -r station_signal_frontend/dist/* /opt/station_signal/frontend-dist/

@@ -1,6 +1,9 @@
 import { ApiError, type ApiErrorBody } from '@/types/api'
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+// Falls back to the page's own origin (not a hardcoded host) so the app works when opened by
+// any hostname or IP nginx answers for in production — VITE_API_BASE_URL only needs to be set
+// in dev, where the Vite dev server and the Go API run on different ports.
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? window.location.origin
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // FormData bodies must not get an explicit Content-Type: fetch/the browser sets one
