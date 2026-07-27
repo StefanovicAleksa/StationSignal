@@ -13,38 +13,6 @@
  * supervisorLoop's own comment on why. */
 #define MMS_REPORT_CLIENT_STABLE_CONNECTION_MS 5000
 
-/* TEMPORARY diagnostic aid - investigating a real-hardware report that
- * EntryID resumption (see enableOneTarget's own comment below) doesn't stop
- * a buffered RCB's backlog from being redelivered on reconnect when a value
- * genuinely changed while disconnected. Logs exactly what EntryID this
- * client sends on enable, for direct correlation against what
- * mms_report_client_report_adapter.c's own identical diagnostic logs on
- * receipt - if the server's own seqNum/entryId on the redelivered reports
- * never advances past what we requested to resume from, the server (or our
- * own GI request, sent unconditionally alongside EntryID on every enable) is
- * not honoring the resume. Remove once root-caused. Same
- * fopen(...,"a")-per-call, no-added-locking-needed idiom as the other
- * appendDebugLog helpers already in this feature (mms_report_client_api.c/
- * _usecases.c/_report_adapter.c). */
-static void
-appendDebugLog(const char* path, const char* text) {
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
-    fclose(f);
-}
-
-#define MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH "station_signal_debug_entryid.log"
-
-static void
-hexDump(const uint8_t* bytes, int size, char* out, size_t outSize) {
-    size_t pos = 0;
-    for (int i = 0; i < size && pos + 3 < outSize; i++) {
-        pos += (size_t) snprintf(out + pos, outSize - pos, "%02X", bytes[i]);
-    }
-    out[pos] = '\0';
-}
-
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
  * call IedConnection_getState or any blocking IedConnection_* function from
@@ -345,18 +313,6 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
                 ClientReportControlBlock_setEntryId(rcb, cacheEntry->lastEntryId);
                 mask |= RCB_ELEMENT_ENTRY_ID;
                 hasResumableEntryId = true;
-
-                char hex[256];
-                hexDump(MmsValue_getOctetStringBuffer(cacheEntry->lastEntryId),
-                        MmsValue_getOctetStringSize(cacheEntry->lastEntryId), hex, sizeof(hex));
-                char line[384];
-                snprintf(line, sizeof(line), "SEND rcb=%s entryId=%s gi=false", target->objectReference, hex);
-                appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
-            } else {
-                char line[256];
-                snprintf(line, sizeof(line), "SEND rcb=%s entryId=(none - first enable, full resume) gi=true",
-                        target->objectReference);
-                appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
             }
             Semaphore_post(handle->memberRefCacheLock);
         }

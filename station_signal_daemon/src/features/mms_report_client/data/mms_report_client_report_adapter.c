@@ -1,58 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hal_time.h"
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
-
-/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
- * the plan this landed under) - real-hardware reports of "<unsupported:structure>"
- * on every MMS data point persisted even after the LD-prefix fix, so these log
- * files give direct, persistent visibility into what the wire actually
- * delivers vs. what survives Gap-4 decomposition/filtering. Opens/closes the
- * file per call rather than holding a long-lived FILE* - keeps every write
- * flushed immediately and needs no added locking, since each fprintf here is
- * well under PIPE_BUF and fopen(..., "a") is append-only, so concurrent
- * report-reader threads from different devices (device_manager can run
- * several at once) interleave safely at the line level. */
-static void
-appendDebugLog(const char* path, const char* text) {
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
-    fclose(f);
-}
-
-/* TEMPORARY diagnostic aid - see mms_report_client_connection.c's own
- * identical-purpose log (SEND side of this same investigation). Logs what
- * the server actually sends back per buffered report - seqNum and EntryID -
- * for direct correlation: if these never advance past what enableOneTarget
- * requested to resume from across a burst of reports that look like a
- * redelivered backlog, that confirms the server (or our own unconditional GI
- * request) isn't honoring EntryID resumption. Remove once root-caused. */
-#define MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH "station_signal_debug_entryid.log"
-
-static void
-hexDump(const uint8_t* bytes, int size, char* out, size_t outSize) {
-    size_t pos = 0;
-    for (int i = 0; i < size && pos + 3 < outSize; i++) {
-        pos += (size_t) snprintf(out + pos, outSize - pos, "%02X", bytes[i]);
-    }
-    out[pos] = '\0';
-}
-
-/* Renders one MmsValue into a fixed local buffer via MmsValue_printToBuffer
- * (third_party/include/mms_value.h - "for debugging purposes only", but
- * exactly what's needed here since it can render an untouched MMS_STRUCTURE
- * too, not just scalars). NULL-safe. */
-static void
-debugFormatValue(const MmsValue* value, char* buffer, size_t bufferSize) {
-    if (!value) {
-        snprintf(buffer, bufferSize, "<null>");
-        return;
-    }
-    MmsValue_printToBuffer((MmsValue*) value, buffer, (int) bufferSize);
-}
 
 /* ClientReport doesn't expose buffered-ness directly - look it up in our own
  * cached target list (keyed by rcbReference) instead of re-deriving it. */
@@ -122,47 +72,6 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     bool hasTimestamp = ClientReport_hasTimestamp(report);
     bool hasSeqNum = ClientReport_hasSeqNum(report);
 
-    if (buffered) {
-        char line[384];
-        if (entryId) {
-            char hex[256];
-            hexDump(MmsValue_getOctetStringBuffer(entryId), MmsValue_getOctetStringSize(entryId),
-                    hex, sizeof(hex));
-            snprintf(line, sizeof(line), "RECV rcb=%s entryId=%s hasSeqNum=%d seqNum=%u entryCount=%d",
-                    rcbReference ? rcbReference : "(null)", hex, hasSeqNum,
-                    hasSeqNum ? ClientReport_getSeqNum(report) : 0, entryCount);
-        } else {
-            snprintf(line, sizeof(line), "RECV rcb=%s entryId=(none) hasSeqNum=%d seqNum=%u entryCount=%d",
-                    rcbReference ? rcbReference : "(null)", hasSeqNum,
-                    hasSeqNum ? ClientReport_getSeqNum(report) : 0, entryCount);
-        }
-        appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
-    }
-
-    /* Debug log point 1: raw report exactly as libiec61850 delivered it,
-     * before Gap-4 decomposition/value-diff filtering touch it at all. */
-    {
-        char header[256];
-        snprintf(header, sizeof(header), "==== rcbReference=%s entryCount=%d ====",
-                rcbReference ? rcbReference : "(null)", entryCount);
-        appendDebugLog("/tmp/station_signal_debug_mms_before.log", header);
-
-        for (int i = 0; i < entryCount; i++) {
-            MmsValue* rawValue = dataSetValues ? MmsValue_getElement(dataSetValues, i) : NULL;
-            char valueBuf[512];
-            debugFormatValue(rawValue, valueBuf, sizeof(valueBuf));
-
-            char line[896];
-            snprintf(line, sizeof(line), "  [%d] type=%s value=%s reason=%s dataReference=%s",
-                    i,
-                    rawValue ? MmsValue_getTypeString(rawValue) : "(none)",
-                    valueBuf,
-                    reasons ? ReasonForInclusion_getValueAsString(reasons[i]) : "(unknown)",
-                    (dataReferences && dataReferences[i]) ? dataReferences[i] : "(none)");
-            appendDebugLog("/tmp/station_signal_debug_mms_before.log", line);
-        }
-    }
-
     /* Guarded by memberRefCacheLock - buildReportRecord reads/mutates
      * fallback->lastForwardedValues (the value-diff cache), and the
      * lastEntryId update just below mutates fallback->lastEntryId - both are
@@ -183,16 +92,6 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * this path (a stale entry is by definition <= the current cached
      * value, so leaving it alone is correct either way). */
     if (fallback && MmsReportClientUseCases_isEntryIdStale(entryId, fallback->lastEntryId)) {
-        char hex[256];
-        char lastHex[256];
-        char line[1024];
-        hexDump(MmsValue_getOctetStringBuffer(entryId), MmsValue_getOctetStringSize(entryId), hex, sizeof(hex));
-        hexDump(MmsValue_getOctetStringBuffer(fallback->lastEntryId), MmsValue_getOctetStringSize(fallback->lastEntryId),
-                lastHex, sizeof(lastHex));
-        snprintf(line, sizeof(line), "DROP-STALE rcb=%s entryId=%s lastSeenEntryId=%s",
-                rcbReference ? rcbReference : "(null)", hex, lastHex);
-        appendDebugLog(MMS_REPORT_CLIENT_ENTRY_ID_DEBUG_LOG_PATH, line);
-
         Semaphore_post(handle->memberRefCacheLock);
         free(reasons);
         free(dataReferences);
@@ -225,33 +124,6 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     /* Allocation failure building the record: nothing safe to deliver - drop
      * this report rather than risk the caller dereferencing a partial one. */
     if (!record) return;
-
-    /* Debug log point 2: the decomposed/filtered record, about to be
-     * forwarded (pending only the cross-RCB dedup check below) - the direct
-     * view of whether Gap-4 decomposition actually ran for this device. */
-    {
-        char header[256];
-        snprintf(header, sizeof(header), "==== rcbReference=%s entryCount=%d ====",
-                record->rcbReference ? record->rcbReference : "(null)", record->entryCount);
-        appendDebugLog("/tmp/station_signal_debug_mms_after.log", header);
-
-        for (int i = 0; i < record->entryCount; i++) {
-            MmsReportEntry* entry = &record->entries[i];
-            char valueBuf[512];
-            char previousValueBuf[512];
-            debugFormatValue(entry->value, valueBuf, sizeof(valueBuf));
-            debugFormatValue(entry->previousValue, previousValueBuf, sizeof(previousValueBuf));
-
-            char line[1152];
-            snprintf(line, sizeof(line), "  [%d] reference=%s type=%s value=%s previousValue=%s",
-                    i,
-                    entry->reference ? entry->reference : "(null)",
-                    entry->value ? MmsValue_getTypeString(entry->value) : "(none)",
-                    valueBuf,
-                    previousValueBuf);
-            appendDebugLog("/tmp/station_signal_debug_mms_after.log", line);
-        }
-    }
 
     /* record->entryCount > 0: survived the per-RCB hybrid event filter.
      * shouldForwardAcrossRcb is the second, independent gate: even a report

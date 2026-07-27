@@ -1,27 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hal_time.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
-
-/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
- * the plan this landed under) - see mms_report_client_api.c's identical
- * helper's own comment for the full reasoning (duplicated here per this
- * codebase's own cross-feature convention). This is the report-time half of
- * the same investigation: mms_report_client_api.c's own debug log tells
- * whether decomposition METADATA exists (memberLeafCounts[i] > 0); this one
- * tells whether a report that HAS that metadata still gets rejected here,
- * at the point where the wire value is actually flattened and zipped. */
-static void
-appendDebugLog(const char* path, const char* text) {
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
-    fclose(f);
-}
-
-#define MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH "/tmp/station_signal_debug_decompose.log"
 
 static void
 freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
@@ -546,22 +527,6 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
                     continue; /* raw position i fully handled via decomposition */
                 }
                 free(reordered);
-            }
-
-            /* Metadata says this member SHOULD decompose (memberLeafCounts[i]
-             * > 0, reached this branch at all) but the report-time flatten
-             * still didn't match - logging exactly why (flatten failure,
-             * count mismatch, or an unresolvable q/t reorder) since this is
-             * the other of the two places decomposition can still silently
-             * fail even after the online-loader's model-build fix. */
-            {
-                char line[384];
-                snprintf(line, sizeof(line),
-                        "member=%d ref=%s REJECTED: flattenedCount=%d expectedCount=%d flattenNonNull=%d",
-                        i, memberRefCache->memberLeafReferences[i] && memberRefCache->memberLeafReferences[i][0]
-                                ? memberRefCache->memberLeafReferences[i][0] : "(unknown)",
-                        flattenedCount, memberRefCache->memberLeafCounts[i], flattened != NULL);
-                appendDebugLog(MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH, line);
             }
 
             /* Count mismatch, flatten failure, or unresolvable q/t reorder -

@@ -1,31 +1,8 @@
-#include <stdio.h>
 #include <stdlib.h>
-#include "hal_time.h"
 #include "features/mms_report_client/service/mms_report_client_api.h"
 #include "features/mms_report_client/data/mms_report_client_connection.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
-
-/* Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
- * the plan this landed under) - the online-loader's model-build fix (falling
- * back to getVariableSpecification when getDataDirectoryByFC finds nothing)
- * was confirmed via real-hardware logs to build real DataObject children now
- * (e.g. "Ind" got 3), but Gap-4 decomposition still wasn't picking them up
- * downstream - this logs, per dataset member, exactly what
- * IedModel_getDataSetMemberLeafReferences returned at buildMemberRefCache
- * time (the metadata half of decomposition), to tell whether the remaining
- * break is here or later at report-time flatten/type-matching (see
- * collectCandidates's own identical diagnostic in
- * mms_report_client_usecases.c). */
-static void
-appendDebugLog(const char* path, const char* text) {
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    fprintf(f, "[%llu] %s\n", (unsigned long long) Hal_getTimeInMs(), text);
-    fclose(f);
-}
-
-#define MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH "/tmp/station_signal_debug_decompose.log"
 
 void
 MmsReportClientConfig_defaults(MmsReportClientConfig* config) {
@@ -297,16 +274,6 @@ buildMemberRefCache(MmsReportClientHandle client) {
 
                     leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
                     leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
-
-                    if (target->datasetReference) {
-                        char line[384];
-                        snprintf(line, sizeof(line),
-                                "rcbReference=%s member=%d memberRef=%s -> leafCount=%d%s",
-                                target->objectReference ? target->objectReference : "(unknown)", m,
-                                (array && m < count && array[m]) ? array[m] : "(unknown)",
-                                leafCount, leafCount > 0 ? "" : " (NOT decomposed - metadata empty)");
-                        appendDebugLog(MMS_REPORT_CLIENT_DECOMPOSE_DEBUG_LOG_PATH, line);
-                    }
 
                     if (leafWireTypesArray && target->datasetReference) {
                         int leafWireTypeCount = 0;

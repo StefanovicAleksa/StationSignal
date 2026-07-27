@@ -184,17 +184,6 @@ the same shape of dynamic-model construction calls (`IedModel_create`,
 
 ### `data/ied_model_online_loader_connection.c` (the real work, 648 lines)
 
-**Debug logging.** `appendDebugLog` appends timestamped lines to
-`/tmp/station_signal_debug_model_build.log` (`IED_MODEL_ONLINE_LOADER_DEBUG_LOG_PATH`).
-This is a temporary diagnostic aid added after real-hardware testing against a
-device with no SCL file service showed Gap-4 decomposition never succeeding
-for any dataset member, with no way to tell whether the live MMS
-model-discovery walk itself was silently failing. It logs every ACSI-call
-failure site inside the tree-building functions, plus a per-DO
-built-child-count summary. Same append-per-call helper shape as
-`mms_report_client`/`ipc_dispatcher`'s own debug logs — duplicated per this
-codebase's cross-feature convention, not shared.
-
 **String helpers**: `joinWithSeparator(a, sep, b)`, `buildLnRef(ldName,
 lnName)` (→ `"LD/LN"`), `buildRcbDotRef(lnRef, buffered, rcbName)` (→
 `"LD/LN.BR.name"` or `"LD/LN.RP.name"`), `buildAppIdHex(appId)` (→ 4-hex-digit
@@ -427,10 +416,6 @@ All v1 limitations named in CLAUDE.md, verified against the code:
 
 Additional scope notes visible in the code but not spelled out as a numbered
 CLAUDE.md limitation:
-- The debug log (`appendDebugLog` → `/tmp/station_signal_debug_model_build.log`)
-  is explicitly a **temporary diagnostic aid** pending further real-hardware
-  confirmation, same pattern as `mms_report_client`'s own
-  `station_signal_debug_entryid.log` — not a permanent logging feature.
 - RCB `trgOps`/`options`/`bufTm`/`intgPd` are always created at 0 — this
   loader never attempts to discover or preserve a server's live trigger-option
   configuration.

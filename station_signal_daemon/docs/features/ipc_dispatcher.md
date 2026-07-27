@@ -244,21 +244,6 @@ above, operating on `MmsReportRecord` instead:
 `hasTimestamp=record->hasTimestamp`/`record->timestampMs`. Always calls
 `MmsReportClient_destroyReportRecord(record)` before returning.
 
-Contains one extra, temporary piece: `appendDebugLog(path, text)` — a
-diagnostic helper (duplicated from the identical helper in
-`mms_report_client_report_adapter.c`, per this codebase's own
-don't-share-across-features convention) that appends
-`[<Hal_getTimeInMs()>] <text>` lines to a log file. Here it's called once,
-logging the exact JSON string about to be handed to the ring buffer to
-`/tmp/station_signal_debug_mms_websocket.log`. This is pending real-hardware
-confirmation of the EntryID fix described in `mms_report_client`'s own
-Architecture bullet — see CLAUDE.md's "Current State" section — and is
-intended to be removed once confirmed. Note: the path logged to here
-(`/tmp/station_signal_debug_mms_websocket.log`) differs from the one CLAUDE.md
-names for `mms_report_client`'s own debug points
-(`station_signal_debug_entryid.log`) — this is a separate, third debug log
-point specific to this adapter's own JSON-serialization step.
-
 ### `data/ipc_dispatcher_json_writer.h` / `.c`
 The only file in this feature that touches `cJSON.h`. One function:
 `IpcDispatcherJsonWriter_write(const IpcMessage* message) -> char*` — returns
@@ -611,11 +596,6 @@ connected.
   register a second internal consumer of the same `MmsReportRecord`/
   `GooseSubscriberRecord` stream (only the external websocket fan-out to
   multiple *clients*, which is a different layer).
-- **Temporary debug logging** — `ipc_dispatcher_mms_adapter.c`'s
-  `appendDebugLog` call writes every serialized MMS-report JSON to
-  `/tmp/station_signal_debug_mms_websocket.log`, pending real-hardware
-  confirmation of `mms_report_client`'s EntryID fix (see CLAUDE.md's
-  "Current State"). Intended to be removed once confirmed.
 
 ## 6. Cross-feature dependencies
 

@@ -96,13 +96,7 @@ prompt — `control_dispatcher`'s four JSON commands (see Commands above) are th
 way to start/stop anything. Full history of how `main.c` got here (multi-IED support, the
 discovery-prompt removal, the earlier argv layout) is in `CHANGELOG.md`.
 
-A temporary debug-logging path exists pending real-hardware confirmation of the EntryID fix
-described in `mms_report_client/`'s own Architecture bullet below:
-`data/mms_report_client_connection.c`/`_report_adapter.c`'s `appendDebugLog` calls write to
-`station_signal_debug_entryid.log` — remove once confirmed the device is actually sending EntryID
-now. See `CHANGELOG.md` for the full diagnostic story.
-
-Every other historical bugfix (rollback ordering, reconnect races, value-diff cache semantics,
+Every historical bugfix (rollback ordering, reconnect races, value-diff cache semantics,
 quality-pairing, GI removal/reinstatement, dynamic dataset creation, EntryID resumption, Gap-4
 decomposition type-checking) is folded into the current-state description of the relevant
 feature under Architecture below — see `CHANGELOG.md` for the full root-cause narratives.
@@ -224,7 +218,6 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   chunking against `maxAttributes`; no per-LDevice dataset-count cap).
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
-  See "Current State" above for the pending confirmation and its debug log.
   **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered
   (`reorderFlattenedToMatchReferences`) to match a locally-resolved SCL reference list — "q"/"t"
   are matched by their fixed, CDC-independent wire type; any other leaf (e.g. a DPC's `stVal`/

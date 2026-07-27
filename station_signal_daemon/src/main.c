@@ -49,41 +49,8 @@ onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort, b
             authRequired ? " [auth required]" : "");
 }
 
-/*
- * Temporary diagnostic aid (see CLAUDE.md's ied_model_online_loader bullet /
- * the plans these landed under) - mms_report_client_report_adapter.c,
- * ipc_dispatcher_mms_adapter.c, and ied_model_online_loader_connection.c each
- * append to one of these paths via their own small appendDebugLog helper
- * (fopen(path, "a")), so without this, every run's log lines pile up on top
- * of whatever a previous run already wrote, making it hard to tell current
- * output from stale output. Truncating each path once here, before anything
- * else runs, gives every process run a fresh log - the per-call helpers stay
- * simple append-only ("a") for the rest of that run. Paths are duplicated
- * string literals (not shared constants) matching every other debug-log
- * duplication already in this codebase - see the plan/CLAUDE.md for that
- * convention. Failing to truncate (e.g. no write permission) isn't fatal -
- * the daemon just falls back to appending onto a stale file, same as before
- * this existed.
- */
-static void
-truncateDebugLogs(void) {
-    static const char* paths[] = {
-        "/tmp/station_signal_debug_mms_before.log",
-        "/tmp/station_signal_debug_mms_after.log",
-        "/tmp/station_signal_debug_mms_websocket.log",
-        "/tmp/station_signal_debug_model_build.log",
-        "/tmp/station_signal_debug_decompose.log",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
-        FILE* f = fopen(paths[i], "w");
-        if (f) fclose(f);
-    }
-}
-
 int
 main(void) {
-    truncateDebugLogs();
-
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
 

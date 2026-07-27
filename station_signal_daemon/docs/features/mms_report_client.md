@@ -103,19 +103,14 @@ every RCB target, purely from the already-parsed SCL model (never over the wire)
    populated exactly once, on its first-ever observation, and preserved for the client's whole
    lifetime.
 7. **`everPopulated`** — a single `bool`, set once at the end of the first report this RCB ever
-   processes. Purely a debug-logging gate — has no effect on forward/drop decisions.
+   processes. Gates a one-time `stderr` warning if a cache slot is unexpectedly `NULL` after this
+   RCB was already populated once — has no effect on forward/drop decisions.
 8. **`lastEntryId`** — `NULL` until the first report carrying an EntryID arrives. Backs EntryID
    resumption (§3, connection layer) for buffered RCBs.
 
 `linkedListToStringArray`/`linkedListToWireTypeArray`/`linkedListToSemanticArray` are small local
 helpers that drain a `LinkedList` of heap-boxed values into a flat owned array, freeing the list
 shell either way.
-
-A temporary `appendDebugLog` helper (writing to `/tmp/station_signal_debug_decompose.log`) logs,
-per dataset member, exactly what `IedModel_getDataSetMemberLeafReferences` returned at
-`buildMemberRefCache` time — the metadata half of a real-hardware Gap-4 decomposition
-investigation; its report-time counterpart lives in `mms_report_client_usecases.c`'s
-`collectCandidates`.
 
 ### `domain/mms_report_client_types.h`
 
@@ -271,8 +266,7 @@ leaf against `memberLeafReferences[i]`. **The per-leaf expected-vs-actual type c
 this is no longer consulted here** — `memberLeafWireTypes` is still populated at build time but
 removing the gate exposed no behavior change beyond no longer rejecting genuine decompositions
 that happened to fail the type check. A count mismatch, flatten failure, or unresolvable `q`/`t`
-reorder falls back to the raw, non-decomposed entry for that position, and is logged to
-`/tmp/station_signal_debug_decompose.log`.
+reorder falls back to the raw, non-decomposed entry for that position.
 
 **`splitReference`/`GroupAnchor`/`resolveGroupAnchor`** — quality-pairing support. Every `"q"`-named
 candidate's own `"$"`-prefix anchors a group scope; every candidate (including `"q"` itself)
@@ -479,11 +473,6 @@ already closed), which unconditionally posts `wakeSignal` — so the semaphore m
 when `IedConnection_destroy` runs; destroying it first would leave that callback posting to freed
 memory.
 
-A temporary `appendDebugLog`/`hexDump` pair (writing to `station_signal_debug_entryid.log`, relative
-path) logs, on every buffered-RCB enable, exactly what EntryID (if any) this client sends —
-correlated against `mms_report_client_report_adapter.c`'s own receive-side log of the same
-investigation.
-
 ### `data/mms_report_client_report_adapter.c` / `.h`
 
 The **only** file in this feature that touches the opaque `ClientReport` type. Installed as the
@@ -514,13 +503,6 @@ risk, per `ReportCallbackFunction`'s documented constraints).
    pass does `handle->reportCallback` fire (transferring ownership of `record`); otherwise the
    report adapter frees it itself, since the callback (which would otherwise own destroying it)
    never ran.
-
-Two temporary diagnostic blocks write to `/tmp/station_signal_debug_mms_before.log` (the raw report
-exactly as libiec61850 delivered it, before any decomposition/filtering) and
-`/tmp/station_signal_debug_mms_after.log` (the decomposed/filtered record about to be forwarded) —
-direct visibility into whether Gap-4 decomposition actually ran for a given device. A third,
-`station_signal_debug_entryid.log`, logs the server's per-report `seqNum`/EntryID for buffered RCBs,
-correlated against the connection layer's send-side log of the same investigation.
 
 ### `data/mms_report_client_auth.c` / `.h`
 
@@ -603,9 +585,7 @@ once, never mutated as a whole list afterward (only the per-entry cache fields i
   are still assigned positionally.
 - **A device sending zero EntryID under its current OptFlds configuration** makes EntryID
   resumption structurally inert until this client's proactive `RPT_OPT_ENTRY_ID` OR-in (see
-  `enableOneTarget`) is confirmed to actually change the device's behavior — a temporary debug-log
-  path (`station_signal_debug_entryid.log`, both this feature's connection and report-adapter files)
-  exists pending that real-hardware confirmation; see `CLAUDE.md`'s Current State section.
+  `enableOneTarget`) actually changes the device's behavior.
 - **A "reason that a value transiently changed and changed back within one buffer interval" is
   unrecoverable** — since `reason` is never trusted as a filtering bypass, a round-trip like that
   is invisible to the diff-based filter (only the net result at report time is ever compared).
