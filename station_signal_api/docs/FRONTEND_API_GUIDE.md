@@ -103,7 +103,8 @@ Lets a user pick or drag-and-drop a structure file in the browser and get back a
 the daemon it supervises), never uploaded to the daemon directly.
 
 **Request:** `multipart/form-data` with a single field named `file`. Accepted extensions:
-`.icd`, `.cid`, `.scd`, `.xml` (case-insensitive) — anything else is rejected. Max size 20 MiB.
+`.icd`, `.cid`, `.scd`, `.xml` (case-insensitive) — anything else is rejected. No size limit is
+enforced by this endpoint.
 
 **Success (`201 Created`):**
 
