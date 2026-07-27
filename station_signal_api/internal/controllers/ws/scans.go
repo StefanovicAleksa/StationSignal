@@ -46,9 +46,10 @@ func (a *API) handleScanStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// pumpScans forwards every scan-result message on ch to conn, omitting devices that already
-// have an active reporting session (still discovered by the daemon and will reappear in a later
-// scan once disconnected, they just aren't surfaced to the frontend while connected) and
+// pumpScans forwards every scan-result message on ch to conn, omitting devices sessionID itself
+// already has an active reporting attachment to (still discovered by the daemon and will
+// reappear in this session's scan results once it disconnects — this is purely about decluttering
+// one session's own view, not about whether some other session is watching the same device) and
 // omitting any scan result whose scan isn't owned by sessionID — the shared hub carries every
 // active scan from every session, but each connected browser should only see its own. Messages
 // that don't parse as a scan result are forwarded unfiltered, consistent with the rest of this
@@ -62,7 +63,7 @@ func pumpScans(conn *websocket.Conn, ch <-chan []byte, closed <-chan struct{}, r
 			}
 			var sr daemonproto.ScanResultMessage
 			if err := json.Unmarshal(msg, &sr); err == nil {
-				if reporting.IsConnected(sr.Host, sr.MMSPort) {
+				if reporting.IsConnected(sessionID, sr.Host, sr.MMSPort) {
 					continue
 				}
 				if !scanning.OwnsScan(sessionID, sr.ScanID) {

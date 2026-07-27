@@ -23,7 +23,7 @@ const (
 // these implicitly — main.go needs no changes.
 type reportingStreamer interface {
 	StreamFor(deviceID int) (<-chan []byte, func(), bool)
-	IsConnected(host string, mmsPort int) bool
+	IsConnected(sessionID, host string, mmsPort int) bool
 	OwnsDevice(sessionID string, deviceID int) bool
 }
 

@@ -78,6 +78,12 @@ after the API itself has just started.
 `deviceId` identifies this session for `DELETE`/streaming. `wsPort` is an internal daemon
 port — **ignore it**, you don't connect to it; use `/ws/devices/{deviceId}` instead (§4).
 
+**Multiple sessions can watch the same physical device.** If another browser session already
+has `host`/`mmsPort` active, this call attaches your session to that same device instead of
+starting a second connection to the IED — you get back its existing `deviceId`/`wsPort` with
+`201`, not an error. `DELETE /devices/{id}` only actually stops the physical device once every
+attached session has called it; until then it just detaches your own session's view.
+
 ### `DELETE /devices/{id}` — stop reporting
 
 **Success (`200 OK`):** `{ "deviceId": 1 }`. The device's stream (§4) closes.
@@ -253,7 +259,7 @@ reachable host, auth rejected, no SCL file found).
 | 400 | `INVALID_ARGUMENT` | bad/missing request field, malformed JSON body, or invalid `{id}` path param |
 | 401 | `AUTH_REQUIRED` | `POST /devices` was rejected because the device needs `acseAuthPassword` (missing or wrong) — see below |
 | 404 | `DEVICE_NOT_FOUND` / `SCAN_NOT_FOUND` | unknown or already-stopped id |
-| 409 | `HOST_ALREADY_RUNNING` | this exact `(host, mmsPort)` is already running or mid-start |
+| 409 | `HOST_ALREADY_RUNNING` | rare: another session already watching this `(host, mmsPort)` is the normal case and does **not** produce this error (see the sharing note in §2) — this only surfaces if this API process itself restarted while the daemon kept the device running, so its own bookkeeping no longer knows about it; retry shortly |
 | 409 | `START_IN_PROGRESS` | a start for this same target is already in flight — retry shortly |
 | 502 | `ORCHESTRATION_FAILED` | the device pipeline itself failed (see `stage`/`detail`) |
 | 503 | `OUT_OF_MEMORY`, `PORT_EXHAUSTED`, `DISPATCHER_START_FAILED`, `THREAD_CREATE_FAILED`, `DISCOVERY_CREATE_FAILED` | daemon-side resource/infra failure |

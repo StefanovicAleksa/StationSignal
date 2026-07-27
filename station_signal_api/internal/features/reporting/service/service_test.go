@@ -20,14 +20,18 @@ type mockGateway struct {
 
 	stopErr error
 
-	gotStopID int
+	startCalls int
+	gotStopID  int
+	stopCalls  int
 }
 
 func (m *mockGateway) Start(ctx context.Context, params domain.StartParams) (domain.Device, *streamrelay.Hub, error) {
+	m.startCalls++
 	return m.startDevice, m.startHub, m.startErr
 }
 
 func (m *mockGateway) Stop(ctx context.Context, deviceID int) error {
+	m.stopCalls++
 	m.gotStopID = deviceID
 	return m.stopErr
 }
@@ -42,7 +46,7 @@ func newTestHub(t *testing.T) *streamrelay.Hub {
 const testSessionID = "test-session"
 
 func newServiceWithMock(gw *mockGateway) *Service {
-	return &Service{gateway: gw, store: data.NewStore()}
+	return &Service{gateway: gw, store: data.NewStore(), locks: newKeyedLocks()}
 }
 
 func TestService_Start_Success_StoresDevice(t *testing.T) {
@@ -199,13 +203,28 @@ func TestService_Clear_EmptiesStoreAndClosesHubs(t *testing.T) {
 func TestService_IsConnected_ReflectsActiveDevices(t *testing.T) {
 	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: newTestHub(t)}
 	svc := newServiceWithMock(gw)
-	assert.False(t, svc.IsConnected("10.0.0.5", 102))
+	assert.False(t, svc.IsConnected(testSessionID, "10.0.0.5", 102))
 
 	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.5"})
 	require.NoError(t, err)
 
-	assert.True(t, svc.IsConnected("10.0.0.5", 102))
-	assert.False(t, svc.IsConnected("10.0.0.6", 102), "different host should not match")
+	assert.True(t, svc.IsConnected(testSessionID, "10.0.0.5", 102))
+	assert.False(t, svc.IsConnected(testSessionID, "10.0.0.6", 102), "different host should not match")
+}
+
+func TestService_IsConnected_FalseForASessionThatIsNotAttached(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), "session-a", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	assert.False(t, svc.IsConnected("session-b", "10.0.0.5", 102),
+		"session-a being connected must not make the device look connected for session-b's own scan filter")
+
+	_, err = svc.Start(context.Background(), "session-b", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	assert.True(t, svc.IsConnected("session-b", "10.0.0.5", 102), "true once session-b attaches to the shared device itself")
 }
 
 func TestService_StreamFor_UnknownDeviceReturnsFalse(t *testing.T) {
@@ -216,4 +235,75 @@ func TestService_StreamFor_UnknownDeviceReturnsFalse(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, ch)
 	assert.Nil(t, cancel)
+}
+
+func TestService_Start_SecondSessionSameHostPort_AttachesWithoutCallingDaemon(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	first, err := svc.Start(context.Background(), "session-a", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	second, err := svc.Start(context.Background(), "session-b", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, gw.startCalls, "the daemon must only be asked to START_REPORTING once for a shared device")
+	assert.Equal(t, first.ID, second.ID, "both sessions attach to the same underlying device")
+	assert.True(t, svc.OwnsDevice("session-a", 1))
+	assert.True(t, svc.OwnsDevice("session-b", 1))
+	assert.Len(t, svc.ListForSession("session-a"), 1)
+	assert.Len(t, svc.ListForSession("session-b"), 1)
+}
+
+func TestService_Start_DifferentHostPort_CallsDaemonAgain(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), "session-a", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	gw.startDevice = domain.Device{ID: 2, Host: "10.0.0.6", MMSPort: 102}
+	_, err = svc.Start(context.Background(), "session-b", domain.StartParams{Host: "10.0.0.6", MMSPort: 102})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, gw.startCalls, "a different physical device must still get its own START_REPORTING call")
+}
+
+func TestService_Stop_NonLastSession_DetachesWithoutCallingDaemon(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), "session-a", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+	_, err = svc.Start(context.Background(), "session-b", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	err = svc.Stop(context.Background(), "session-a", 1)
+
+	require.NoError(t, err)
+	assert.Zero(t, gw.stopCalls, "STOP_REPORTING must not be issued while another session is still attached")
+	assert.False(t, svc.OwnsDevice("session-a", 1))
+	assert.True(t, svc.OwnsDevice("session-b", 1), "the remaining session's attachment must survive")
+}
+
+func TestService_Stop_LastSession_CallsDaemonAndClosesHub(t *testing.T) {
+	hub := newTestHub(t)
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.5", MMSPort: 102}, startHub: hub}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), "session-a", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+	_, err = svc.Start(context.Background(), "session-b", domain.StartParams{Host: "10.0.0.5", MMSPort: 102})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Stop(context.Background(), "session-a", 1))
+	assert.Zero(t, gw.stopCalls, "still one session left, so the daemon must not be called yet")
+
+	ch, cancel, ok := svc.StreamFor(1)
+	require.True(t, ok)
+	defer cancel()
+
+	err = svc.Stop(context.Background(), "session-b", 1)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, gw.stopCalls, "the last session's Stop must actually tear the device down")
+	assert.Equal(t, 1, gw.gotStopID)
+	_, ok = <-ch
+	assert.False(t, ok, "hub should be closed once the last session detaches")
 }

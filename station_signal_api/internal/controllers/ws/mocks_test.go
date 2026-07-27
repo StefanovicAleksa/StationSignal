@@ -32,7 +32,7 @@ func (m *mockReportingStreamer) StreamFor(deviceID int) (<-chan []byte, func(), 
 	return m.ch, cancel, true
 }
 
-func (m *mockReportingStreamer) IsConnected(host string, mmsPort int) bool {
+func (m *mockReportingStreamer) IsConnected(sessionID, host string, mmsPort int) bool {
 	for _, d := range m.connected {
 		if d.host == host && d.mmsPort == mmsPort {
 			return true

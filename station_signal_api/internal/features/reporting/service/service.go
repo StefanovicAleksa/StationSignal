@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"station_signal_api/internal/core/daemonclient"
@@ -18,6 +19,7 @@ import (
 type Service struct {
 	gateway data.Gateway
 	store   *data.Store
+	locks   *keyedLocks
 }
 
 // New builds a Service backed by the real daemon gateway. hubCtx is the parent context for
@@ -27,32 +29,68 @@ func New(client daemonclient.Caller, hubCtx context.Context, logger *slog.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{gateway: data.NewGateway(client, hubCtx, logger), store: data.NewStore()}
+	return &Service{gateway: data.NewGateway(client, hubCtx, logger), store: data.NewStore(), locks: newKeyedLocks()}
 }
 
-// Start issues START_REPORTING for params and records the resulting device under sessionID,
-// so only that session's later List/Stream/Stop calls can see or affect it.
+func lockKey(host string, mmsPort int) string {
+	return fmt.Sprintf("%s|%d", host, mmsPort)
+}
+
+// Start attaches sessionID to the device at params.Host/params.MMSPort. If another session
+// already has that physical device active, this attaches to it directly — no daemon call, the
+// existing device is shared, and sessionID's later List/Stream/Stop calls affect only its own
+// attachment. Otherwise this issues START_REPORTING and becomes the device's creator.
 func (s *Service) Start(ctx context.Context, sessionID string, params domain.StartParams) (domain.Device, error) {
+	host := params.Host
+	port := domain.EffectiveMMSPort(params.MMSPort)
+
+	unlock := s.locks.Lock(lockKey(host, port))
+	defer unlock()
+
+	if existing, ok := s.store.FindByHostPort(host, port); ok {
+		device, _ := s.store.Attach(existing.ID, sessionID)
+		return device, nil
+	}
+
 	device, hub, err := s.gateway.Start(ctx, params)
 	if err != nil {
 		return domain.Device{}, err
 	}
 	device.SessionID = sessionID
-	s.store.Add(device, hub)
+	s.store.Add(device, hub, sessionID)
 	return device, nil
 }
 
-// Stop issues STOP_REPORTING for deviceID and drops it from the active-device store — but only
-// if sessionID is the one that started it. A device owned by a different session (or one that
-// doesn't exist) is rejected identically, as DEVICE_NOT_FOUND, so a session can't distinguish
-// "not yours" from "doesn't exist" by probing IDs. A DEVICE_NOT_FOUND failure from the daemon
-// itself still drops the store entry — the daemon has no record of this device either way, so
-// the entry is stale bookkeeping rather than something worth retrying — while any other error
-// leaves the store untouched so a genuinely transient failure can be retried.
+// Stop detaches sessionID from deviceID — but only if sessionID is currently attached to it. A
+// device not attached to this session (whether owned solely by a different session or
+// nonexistent) is rejected identically, as DEVICE_NOT_FOUND, so a session can't distinguish
+// "not yours" from "doesn't exist" by probing IDs.
+//
+// If another session is still attached afterward, this is purely a local detach — the daemon is
+// never called, and the device keeps running for the remaining session(s). Only when this is the
+// last attached session does it issue STOP_REPORTING and close the shared stream hub. A
+// DEVICE_NOT_FOUND failure from the daemon itself still drops this session's attachment (and the
+// whole record, if it was the last one) — the daemon has no record of this device either way, so
+// it's stale bookkeeping rather than something worth retrying — while any other error leaves the
+// record and this session's attachment untouched so a genuinely transient failure can be retried.
 func (s *Service) Stop(ctx context.Context, sessionID string, deviceID int) error {
-	if !s.OwnsDevice(sessionID, deviceID) {
+	device, ok := s.store.Get(deviceID)
+	if !ok {
 		return &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound, Message: "device not found"}
 	}
+
+	unlock := s.locks.Lock(lockKey(device.Host, device.MMSPort))
+	defer unlock()
+
+	if !s.store.IsAttached(deviceID, sessionID) {
+		return &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound, Message: "device not found"}
+	}
+
+	if s.store.AttachedSessionCount(deviceID) > 1 {
+		s.store.Detach(deviceID, sessionID)
+		return nil
+	}
+
 	err := s.gateway.Stop(ctx, deviceID)
 	if err != nil {
 		var derr *daemonproto.Error
@@ -60,31 +98,32 @@ func (s *Service) Stop(ctx context.Context, sessionID string, deviceID int) erro
 			return err
 		}
 	}
-	if hub, ok := s.store.Remove(deviceID); ok && hub != nil {
+	if hub, wasLast := s.store.Detach(deviceID, sessionID); wasLast && hub != nil {
 		hub.Close()
 	}
 	return err
 }
 
-// ListForSession returns every currently active device owned by sessionID.
+// ListForSession returns every currently active device attached to sessionID.
 func (s *Service) ListForSession(sessionID string) []domain.Device {
 	return s.store.ListForSession(sessionID)
 }
 
-// OwnsDevice reports whether sessionID is the session that started deviceID.
+// OwnsDevice reports whether sessionID is currently attached to deviceID.
 func (s *Service) OwnsDevice(sessionID string, deviceID int) bool {
-	d, ok := s.store.Get(deviceID)
-	return ok && d.SessionID == sessionID
+	return s.store.IsAttached(deviceID, sessionID)
 }
 
-// Snapshot returns every active device (including its owning session), for crash re-arm.
+// Snapshot returns every active device (one row per attached session, including its owning
+// session), for crash re-arm.
 func (s *Service) Snapshot() []domain.Device {
 	return s.store.Snapshot()
 }
 
-// IsConnected reports whether host:mmsPort currently has an active reporting session.
-func (s *Service) IsConnected(host string, mmsPort int) bool {
-	return s.store.IsConnected(host, mmsPort)
+// IsConnected reports whether sessionID currently has an active reporting attachment to the
+// device at host:mmsPort — another session being attached to it doesn't count.
+func (s *Service) IsConnected(sessionID, host string, mmsPort int) bool {
+	return s.store.IsConnected(sessionID, host, mmsPort)
 }
 
 // Clear drops every active device, closing their (already-dead) hubs — used only by crash
