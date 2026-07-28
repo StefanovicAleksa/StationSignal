@@ -1,0 +1,13 @@
+# Lets the unprivileged station-signal user (running station_signal_api) invoke exactly one
+# root-owned, fixed-vocabulary script for the Settings page's remote static-IP reconfiguration
+# feature — never a shell, never arbitrary root. Mirrors the daemon binary's own narrow setcap
+# grant in spirit (see deploy/setup.sh's "Granting the daemon raw-socket capability" step).
+#
+# Grants the whole script, not a wildcarded argument pattern — sudoers argument-matching is
+# string-prefix based and easy to get subtly wrong; station-signal-netconfig.sh does its own
+# strict input validation and is the real trust boundary here.
+#
+# Install as /etc/sudoers.d/station-signal-netconfig (mode 0440), always via `visudo -cf` first
+# — deploy/setup.sh does this automatically; never write this file into /etc/sudoers.d/ directly
+# without that syntax check, a broken sudoers file can lock out sudo entirely.
+station-signal ALL=(root) NOPASSWD: /opt/station_signal/bin/station-signal-netconfig.sh

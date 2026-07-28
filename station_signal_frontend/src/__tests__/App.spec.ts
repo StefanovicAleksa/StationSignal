@@ -19,6 +19,7 @@ describe('App', () => {
         { path: '/', name: 'scan', component: { template: '<div>scan page</div>' } },
         { path: '/devices', name: 'devices', component: { template: '<div>devices page</div>' } },
         { path: '/reports', name: 'reports', component: { template: '<div>reports page</div>' } },
+        { path: '/settings', name: 'settings', component: { template: '<div>settings page</div>' } },
       ],
     })
     router.push('/')

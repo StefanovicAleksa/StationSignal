@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Radar, Server, FileText, Sun, Moon } from '@lucide/vue'
+import { Radar, Server, FileText, Settings, Sun, Moon } from '@lucide/vue'
 
 import { useTheme } from '@/composables/useTheme'
 
@@ -9,6 +9,7 @@ const navItems = [
   { to: { name: 'scan' }, label: 'Scan', icon: Radar },
   { to: { name: 'devices' }, label: 'Devices', icon: Server },
   { to: { name: 'reports' }, label: 'Reports', icon: FileText },
+  { to: { name: 'settings' }, label: 'Settings', icon: Settings },
 ]
 </script>
 

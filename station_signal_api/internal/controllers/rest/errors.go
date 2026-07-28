@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"station_signal_api/internal/core/daemonproto"
+	networkdomain "station_signal_api/internal/features/network/domain"
 )
 
 // errorStatus maps a daemonproto.Error.Code to the HTTP status this API responds with. This
@@ -36,19 +37,44 @@ func errorStatus(code string) int {
 	}
 }
 
-// writeError renders err as a JSON error body with the appropriate status code. If err
-// isn't a *daemonproto.Error (i.e. it's a bug on this side, not a daemon-reported
-// condition), it's logged and reported as a generic 500 without leaking internals.
+// networkErrorStatus maps a networkdomain.Error.Code to the HTTP status this API responds with.
+// These codes are entirely local to the network feature (never daemon-reported), unlike
+// errorStatus above.
+func networkErrorStatus(code string) int {
+	switch code {
+	case networkdomain.ErrInvalidArgument:
+		return http.StatusBadRequest
+	case networkdomain.ErrSessionsActive, networkdomain.ErrChangeAlreadyPending, networkdomain.ErrNoPendingChange:
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func networkInvalidArgument(msg string) *networkdomain.Error {
+	return &networkdomain.Error{Code: networkdomain.ErrInvalidArgument, Message: msg}
+}
+
+// writeError renders err as a JSON error body with the appropriate status code. If err is
+// neither a *daemonproto.Error nor a *networkdomain.Error (i.e. it's a bug on this side, not a
+// reported condition), it's logged and reported as a generic 500 without leaking internals.
 func (a *API) writeError(w http.ResponseWriter, err error) {
 	var derr *daemonproto.Error
-	if !errors.As(err, &derr) {
-		a.logger.Error("unexpected internal error handling request", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]any{"code": "INTERNAL", "message": "internal error"},
-		})
+	if errors.As(err, &derr) {
+		writeJSON(w, errorStatus(derr.Code), map[string]any{"error": derr})
 		return
 	}
-	writeJSON(w, errorStatus(derr.Code), map[string]any{"error": derr})
+
+	var nerr *networkdomain.Error
+	if errors.As(err, &nerr) {
+		writeJSON(w, networkErrorStatus(nerr.Code), map[string]any{"error": nerr})
+		return
+	}
+
+	a.logger.Error("unexpected internal error handling request", "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{
+		"error": map[string]any{"code": "INTERNAL", "message": "internal error"},
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

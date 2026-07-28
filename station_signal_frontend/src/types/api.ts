@@ -12,6 +12,15 @@ export type ErrorCode =
   | 'THREAD_CREATE_FAILED'
   | 'DISCOVERY_CREATE_FAILED'
   | 'DAEMON_UNREACHABLE'
+  | 'SESSIONS_ACTIVE'
+  | 'CHANGE_ALREADY_PENDING'
+  | 'NO_PENDING_CHANGE'
+  | 'APPLY_FAILED'
+  // Synthesized client-side by apiClient.ts's request() when fetch() itself rejects (DNS
+  // failure, connection refused/reset, timeout) rather than returning a non-2xx response — e.g.
+  // exactly what a mid-flight box IP change looks like from the browser's perspective. Never
+  // sent by the server.
+  | 'NETWORK_ERROR'
   | string
 
 export interface ApiErrorBody {
@@ -147,3 +156,20 @@ export interface ConnectionStatusMessage {
 }
 
 export type DeviceStreamMessage = MmsReportMessage | GooseMessage | ConnectionStatusMessage
+
+export interface NetworkConfig {
+  cidr: string
+  gateway?: string
+}
+
+export interface NetworkPendingChange {
+  new: NetworkConfig
+  expiresAt: string
+}
+
+export interface NetworkStatus {
+  interface: string
+  current: NetworkConfig
+  recoveryAddress: string
+  pending?: NetworkPendingChange
+}

@@ -24,9 +24,10 @@ Other PC's browser → http://stationsignal.local  (or http://<box-ip> directly)
 ```
 
 ## Quick install
-Once the box has the toolchains this needs (`gcc`, `go`, `npm`), `deploy/setup.sh` automates
-steps 1-3 below: it builds the daemon/API/frontend, detects the box's current LAN IP, and
-installs the avahi/nginx configs and the systemd service in one run.
+Once the box has the toolchains this needs (`gcc`, `go`, `npm`, and `nmcli`/NetworkManager),
+`deploy/setup.sh` automates steps 1-5 below: it builds the daemon/API/frontend, detects the box's
+current LAN IP/interface/NetworkManager connection, and installs the avahi/nginx configs, the
+fixed recovery address + privileged network-config helper, and the systemd service in one run.
 ```
 ./deploy/setup.sh
 ```
@@ -50,9 +51,10 @@ sudo systemctl restart avahi-daemon
 ```
 Because mDNS resolves to whatever address the box's interface currently has, giving the box a
 static IP isn't required for `stationsignal.local` to keep working — only for other reasons you
-might still want one (predictable SSH access, documentation). If you do give it one, that's a
-normal OS/network-stack step (netplan/NetworkManager on Debian/Ubuntu) outside the scope of this
-repo.
+might still want one (predictable SSH access, documentation, and the IED-facing addressing plan
+most substations actually need). Setting that first static IP by hand (`nmcli`) remains a normal
+OS-level step, outside the scope of this repo — but *changing* it later, once the box is already
+deployed and remote, is in scope: see "5. Enable remote network reconfiguration" below.
 
 Known gap: some Android browsers don't resolve `.local` names reliably — those clients fall back
 to the bare-IP path (step 3's `default_server`).
@@ -100,6 +102,64 @@ See the comments in `deploy/systemd/station-signal-api.service` — this picks `
 binary over running the whole service as root, which resolves the "privilege model for spawning
 the daemon" open question in `station_signal_api/CLAUDE.md`. Confirm that's acceptable before
 relying on it in production.
+
+## 5. Enable remote network reconfiguration (Settings page)
+
+The Settings page (`/settings` in the frontend) lets a technician change the box's static IP from
+their own laptop's browser — no physical/serial access needed, even when relocating the box to a
+substation with a completely different addressing plan. `deploy/setup.sh` automates everything in
+this section; it's spelled out here for the manual/step-by-step path and so the safety model is on
+the record.
+
+**This assumes NetworkManager (`nmcli`) manages the box's networking** — Raspberry Pi OS
+Bookworm's default. If an older image still uses `dhcpcd` (Bullseye and earlier) or
+`systemd-networkd`, migrate to NetworkManager first; nothing here supports those.
+
+**The bootstrapping problem this solves**: reaching a box whose current static IP might be wrong
+for the network it's just been plugged into is a chicken-and-egg problem — see the top of this
+section's design rationale in `station_signal_api/internal/features/network/domain`. The fix is a
+second, **permanent, fixed** address every box carries on its LAN interface *in addition to*
+whatever primary IP the Settings page manages, established once here and never touched by the
+feature itself:
+
+```
+sudo nmcli connection modify <connection-name> +ipv4.addresses 169.254.1.1/24
+sudo nmcli connection up <connection-name>
+```
+
+**Recovering network access** if a box's current primary IP is unknown or unreachable: connect a
+laptop directly to the box (or via a switch with nothing else live on that segment), manually set
+the laptop's own NIC to a static IP in the same block — e.g. `169.254.1.2/24`, no gateway needed
+— then browse to `http://169.254.1.1`. This works regardless of whatever the box's primary IP is
+currently set to, with no dependency on DHCP or automatic OS self-addressing (on-site technician
+laptops were found to always have hand-configured static IPs already — see the mDNS design note
+above — so this manual step matches how technicians already work, rather than relying on
+OS auto-negotiation that a statically-addressed laptop would never actually trigger).
+
+**Install the privileged helper** the API shells out to (via a narrowly-scoped `sudo` rule) to
+actually apply/confirm/revert a change — this is the *only* place `station_signal_api` reaches
+root, mirroring the daemon's own `setcap` grant in spirit rather than running anything as root
+persistently:
+
+```
+sudo cp deploy/scripts/station-signal-netconfig.sh /opt/station_signal/bin/
+sudo chown root:root /opt/station_signal/bin/station-signal-netconfig.sh
+sudo chmod 0700 /opt/station_signal/bin/station-signal-netconfig.sh
+sudo mkdir -p /etc/station-signal /opt/station_signal/netconfig-state
+echo "CONNECTION_NAME=<connection-name>" | sudo tee /etc/station-signal/netconfig.conf
+
+sudo visudo -cf deploy/sudoers/station-signal-netconfig   # validate syntax first — always
+sudo install -m 0440 -o root -g root deploy/sudoers/station-signal-netconfig /etc/sudoers.d/
+```
+
+**The no-brick guarantee**: submitting a new IP from the Settings page applies it *provisionally*
+— the helper snapshots the current config, applies the new one, and schedules an OS-level,
+`station-signal-api`-process-independent auto-revert (`systemd-run --on-active=...`) that fires
+in 90s (`STATION_SIGNAL_API_NETCONFIG_REVERT_TIMEOUT_SECONDS`, see the systemd unit) unless the
+frontend confirms reachability at the new address first. Even if that timed revert somehow never
+fires, the fixed `169.254.1.1` address from the step above is untouched by any of this and is
+always there as the last resort — there is no scenario where this feature can require physical or
+serial access to recover the box.
 
 ## Raspberry Pi (ARM)
 
@@ -152,3 +212,10 @@ against the freshly-rebuilt ARM libraries) exactly as above. Two Pi-specific thi
    does this automatically).
 4. Reboot the box and repeat step 2 without starting anything by hand, to confirm the systemd
    unit and nginx/avahi's own service units all come back up on their own.
+5. Confirm the fixed recovery address is live and independent of the box's primary IP:
+   `ping 169.254.1.1` from a laptop with a manually-set `169.254.x.x/24` address on the same
+   segment, then open `http://169.254.1.1` and confirm the Settings page loads. Then, on the
+   Settings page, submit a deliberately unreachable IP and confirm the box auto-reverts and
+   becomes reachable again at its original address without any manual intervention within the
+   configured timeout — this is the one guarantee that must never fail before this feature is
+   trusted on a field-deployed box.

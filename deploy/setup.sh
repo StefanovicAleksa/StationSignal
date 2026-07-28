@@ -35,19 +35,40 @@ INSTALL_ROOT="/opt/station_signal"
 SERVICE_USER="station-signal"
 HOSTNAME_NAME="stationsignal.local"
 AVAHI_HOST_NAME="stationsignal"
+# Fixed, permanent secondary address every box carries on its LAN interface, independent of
+# whatever primary static IP the Settings page later manages — see the "Recovering network
+# access" section of deploy/README.md and internal/features/network/domain.RecoveryAddress
+# (station_signal_api), which this must be kept in sync with by hand.
+RECOVERY_ADDR="169.254.1.1"
+RECOVERY_CIDR="$RECOVERY_ADDR/24"
 
 echo "==> Preflight: checking required tools"
-for tool in gcc go npm curl sudo ip sed; do
+for tool in gcc go npm curl sudo ip sed nmcli visudo; do
     command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' is required but not found on PATH" >&2; exit 1; }
 done
 
-echo "==> Detecting this box's LAN IP (read-only — no network config is changed)"
+echo "==> Detecting this box's LAN IP and interface (read-only — no network config is changed yet)"
 BOX_IP="${BOX_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}')}"
-if [ -z "$BOX_IP" ]; then
-    echo "error: could not auto-detect this box's LAN IP. Re-run with BOX_IP=<ip> ./deploy/setup.sh" >&2
+BOX_IFACE="${BOX_IFACE:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}')}"
+if [ -z "$BOX_IP" ] || [ -z "$BOX_IFACE" ]; then
+    echo "error: could not auto-detect this box's LAN IP/interface. Re-run with BOX_IP=<ip>" >&2
+    echo "       BOX_IFACE=<iface> ./deploy/setup.sh" >&2
     exit 1
 fi
-echo "    box IP: $BOX_IP"
+echo "    box IP:        $BOX_IP"
+echo "    box interface: $BOX_IFACE"
+
+echo "==> Detecting the NetworkManager connection profile for $BOX_IFACE"
+CONNECTION_NAME="${CONNECTION_NAME:-$(nmcli -g GENERAL.CONNECTION device show "$BOX_IFACE" 2>/dev/null)}"
+if [ -z "$CONNECTION_NAME" ] || [ "$CONNECTION_NAME" = "--" ]; then
+    echo "error: could not find an active NetworkManager connection on $BOX_IFACE." >&2
+    echo "       This feature assumes NetworkManager (nmcli) manages the box's networking —" >&2
+    echo "       Raspberry Pi OS Bookworm's default. Re-run with CONNECTION_NAME=<name>" >&2
+    echo "       ./deploy/setup.sh if it's managed under a different name, or configure" >&2
+    echo "       NetworkManager first if something else (dhcpcd, systemd-networkd) owns $BOX_IFACE." >&2
+    exit 1
+fi
+echo "    connection:    $CONNECTION_NAME"
 
 echo "==> Building daemon"
 DAEMON_BUILD="$(mktemp -d)/station_signal_daemon"
@@ -76,6 +97,36 @@ sudo setcap cap_net_raw+ep "$INSTALL_ROOT/bin/station_signal_daemon"
 echo "==> Ensuring service user '$SERVICE_USER' exists"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || sudo useradd --system --no-create-home "$SERVICE_USER"
 sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_ROOT/structure_files"
+
+echo "==> Adding the fixed recovery address ($RECOVERY_CIDR) to $CONNECTION_NAME"
+# Permanent and independent of whatever primary IP the Settings page manages later — this is
+# the guaranteed-reachable fallback if a remote IP change ever goes wrong. `+ipv4.addresses`
+# appends rather than replaces; nmcli silently no-ops if it's already present, so this is safe
+# to re-run.
+#
+# Also force ipv4.method=manual explicitly here rather than assuming it's already set: this
+# connection is expected to already be statically configured before setup.sh ever runs, but if
+# it isn't (or drifted back to "auto" — e.g. after a manual `ip addr` intervention that bypassed
+# NetworkManager, or an interrupted netconfig apply/revert cycle), `nmcli connection up` below
+# would otherwise silently retry DHCP against a network with no DHCP server for up to 45s per
+# attempt, forever, with a confusing "IP configuration could not be reserved" error. Cheap to
+# assert unconditionally; a no-op if it's already manual.
+sudo nmcli connection modify "$CONNECTION_NAME" ipv4.method manual +ipv4.addresses "$RECOVERY_CIDR"
+sudo nmcli connection up "$CONNECTION_NAME" >/dev/null
+
+echo "==> Installing the privileged network-config helper (Settings page IP changes)"
+sudo cp "$DEPLOY_DIR/scripts/station-signal-netconfig.sh" "$INSTALL_ROOT/bin/station-signal-netconfig.sh"
+sudo chown root:root "$INSTALL_ROOT/bin/station-signal-netconfig.sh"
+sudo chmod 0700 "$INSTALL_ROOT/bin/station-signal-netconfig.sh"
+sudo mkdir -p /etc/station-signal "$INSTALL_ROOT/netconfig-state"
+printf 'CONNECTION_NAME=%s\n' "$CONNECTION_NAME" | sudo tee /etc/station-signal/netconfig.conf >/dev/null
+# Always validate with `visudo -cf` against a staged copy before touching /etc/sudoers.d — a
+# malformed sudoers file can lock out sudo entirely.
+STAGED_SUDOERS="$(mktemp)"
+cp "$DEPLOY_DIR/sudoers/station-signal-netconfig" "$STAGED_SUDOERS"
+sudo visudo -cf "$STAGED_SUDOERS"
+sudo install -m 0440 -o root -g root "$STAGED_SUDOERS" /etc/sudoers.d/station-signal-netconfig
+rm -f "$STAGED_SUDOERS"
 
 echo "==> Installing avahi (mDNS) so $HOSTNAME_NAME resolves"
 command -v avahi-daemon >/dev/null 2>&1 || sudo apt-get install -y avahi-daemon
@@ -119,3 +170,7 @@ echo "Verify:"
 echo "  On this box:   curl http://127.0.0.1:8080/health"
 echo "                 curl -H \"Host: $HOSTNAME_NAME\" http://127.0.0.1/"
 echo "  From a LAN PC: open http://$HOSTNAME_NAME in a browser"
+echo ""
+echo "Fixed recovery address: http://$RECOVERY_ADDR (always reachable, never changed by the"
+echo "Settings page) — see 'Recovering network access' in deploy/README.md if a remote IP"
+echo "change ever needs to be undone by hand."

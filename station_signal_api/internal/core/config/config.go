@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // Config holds station_signal_api's startup configuration.
@@ -26,6 +27,15 @@ type Config struct {
 	// StructureFileDir is the directory (on this process's own host) where uploaded
 	// SCL/ICD/CID structure files are stored — see internal/core/structurefiles.
 	StructureFileDir string
+
+	// NetconfigHelperPath is the absolute path to the privileged network-config helper script
+	// (deploy/scripts/station-signal-netconfig.sh) this process shells out to via sudo — see
+	// internal/features/network/data.ScriptRunner.
+	NetconfigHelperPath string
+
+	// NetconfigRevertTimeoutSeconds is how long a provisionally-applied network change waits
+	// for confirmation before it's auto-reverted.
+	NetconfigRevertTimeoutSeconds int
 }
 
 // Load parses configuration from command-line flags, falling back to environment variables,
@@ -41,16 +51,22 @@ func Load(args []string) (Config, error) {
 		"log level: debug, info, warn, error")
 	structureFileDir := fs.String("structure-file-dir", envOrDefault("STATION_SIGNAL_API_STRUCTURE_FILE_DIR", defaultStructureFileDir()),
 		"directory where uploaded SCL/ICD/CID structure files are stored")
+	netconfigHelperPath := fs.String("netconfig-helper", envOrDefault("STATION_SIGNAL_API_NETCONFIG_HELPER", "/opt/station_signal/bin/station-signal-netconfig.sh"),
+		"path to the privileged network-config helper script (invoked via sudo)")
+	netconfigRevertTimeoutSeconds := fs.Int("netconfig-revert-timeout-seconds", envIntOrDefault("STATION_SIGNAL_API_NETCONFIG_REVERT_TIMEOUT_SECONDS", 90),
+		"seconds a provisional network change waits for confirmation before auto-reverting")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
 
 	cfg := Config{
-		DaemonBinPath:    *daemonBinPath,
-		HTTPAddr:         *httpAddr,
-		LogLevel:         *logLevel,
-		StructureFileDir: *structureFileDir,
+		DaemonBinPath:                 *daemonBinPath,
+		HTTPAddr:                      *httpAddr,
+		LogLevel:                      *logLevel,
+		StructureFileDir:              *structureFileDir,
+		NetconfigHelperPath:           *netconfigHelperPath,
+		NetconfigRevertTimeoutSeconds: *netconfigRevertTimeoutSeconds,
 	}
 
 	if cfg.DaemonBinPath == "" {
@@ -68,6 +84,18 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envIntOrDefault(key string, def int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func defaultStructureFileDir() string {

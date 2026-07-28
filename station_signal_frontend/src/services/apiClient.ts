@@ -16,7 +16,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ? { ...init?.headers }
     : { 'Content-Type': 'application/json', ...init?.headers }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers })
+  } catch (err) {
+    // fetch() itself rejects (not a non-2xx response) on a network-level failure — DNS
+    // failure, connection refused/reset, timeout. This is exactly what a mid-flight box IP
+    // change looks like from here: the request that triggered it may never get a response at
+    // all, so callers need a typed, distinguishable error rather than an unhandled rejection.
+    throw new ApiError(
+      { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'Network request failed', stage: null, detail: null },
+      0,
+    )
+  }
 
   if (!response.ok) {
     let body: ApiErrorBody

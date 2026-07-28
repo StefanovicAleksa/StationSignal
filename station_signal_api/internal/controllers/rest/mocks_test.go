@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	networkdomain "station_signal_api/internal/features/network/domain"
 	reportingdomain "station_signal_api/internal/features/reporting/domain"
 	scanningdomain "station_signal_api/internal/features/scanning/domain"
 )
@@ -72,6 +73,29 @@ func (m *mockStructureFileStore) Save(originalName string, r io.Reader) (string,
 	return m.path, m.err
 }
 
+type mockNetworkService struct {
+	status     networkdomain.Status
+	statusErr  error
+	pending    networkdomain.PendingChange
+	applyErr   error
+	confirmErr error
+
+	gotApplyConfig networkdomain.Config
+}
+
+func (m *mockNetworkService) GetStatus(ctx context.Context) (networkdomain.Status, error) {
+	return m.status, m.statusErr
+}
+
+func (m *mockNetworkService) Apply(ctx context.Context, cfg networkdomain.Config) (networkdomain.PendingChange, error) {
+	m.gotApplyConfig = cfg
+	return m.pending, m.applyErr
+}
+
+func (m *mockNetworkService) Confirm(ctx context.Context) error {
+	return m.confirmErr
+}
+
 func newTestAPI(reporting *mockReportingService, scanning *mockScanningService, sup *mockDaemonSupervisor, daemon *mockDaemonStatus) *API {
 	if reporting == nil {
 		reporting = &mockReportingService{}
@@ -85,5 +109,5 @@ func newTestAPI(reporting *mockReportingService, scanning *mockScanningService, 
 	if daemon == nil {
 		daemon = &mockDaemonStatus{}
 	}
-	return New(reporting, scanning, sup, daemon, &mockStructureFileStore{}, nil)
+	return New(reporting, scanning, sup, daemon, &mockStructureFileStore{}, &mockNetworkService{}, nil)
 }

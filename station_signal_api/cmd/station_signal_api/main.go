@@ -18,6 +18,8 @@ import (
 	"station_signal_api/internal/core/config"
 	"station_signal_api/internal/core/daemonclient"
 	"station_signal_api/internal/core/structurefiles"
+	networkdata "station_signal_api/internal/features/network/data"
+	networksvc "station_signal_api/internal/features/network/service"
 	reportingsvc "station_signal_api/internal/features/reporting/service"
 	scanningsvc "station_signal_api/internal/features/scanning/service"
 	supervisionsvc "station_signal_api/internal/features/supervision/service"
@@ -66,7 +68,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	api := rest.New(reportingSvc, scanningSvc, sup, client, structureFiles, logger)
+	networkSvc := networksvc.New(
+		func() int { return len(reportingSvc.Snapshot()) },
+		func() int { return len(scanningSvc.Snapshot()) },
+		networkdata.NewScriptRunner(cfg.NetconfigHelperPath),
+		networkdata.IPStatusReader{},
+		time.Duration(cfg.NetconfigRevertTimeoutSeconds)*time.Second,
+		logger,
+	)
+
+	api := rest.New(reportingSvc, scanningSvc, sup, client, structureFiles, networkSvc, logger)
 	mux := rest.Router(api)
 	ws.RegisterRoutes(mux, ws.New(reportingSvc, scanningSvc, logger))
 

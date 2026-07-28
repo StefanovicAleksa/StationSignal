@@ -45,4 +45,11 @@ describe('apiClient', () => {
 
     await expect(apiClient.get('/scans')).rejects.toMatchObject({ code: 'UNKNOWN', httpStatus: 500 })
   })
+
+  it('throws a NETWORK_ERROR-coded ApiError when fetch() itself rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    await expect(apiClient.get('/health')).rejects.toMatchObject({ code: 'NETWORK_ERROR', httpStatus: 0 })
+    await expect(apiClient.get('/health')).rejects.toBeInstanceOf(ApiError)
+  })
 })

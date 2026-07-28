@@ -6,6 +6,7 @@ const router = createRouter({
     { path: '/', name: 'scan', component: () => import('../views/ScanView.vue') },
     { path: '/devices', name: 'devices', component: () => import('../views/DevicesView.vue') },
     { path: '/reports', name: 'reports', component: () => import('../views/ReportsView.vue') },
+    { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },
     {
       path: '/devices/:id',
       name: 'device-detail',
