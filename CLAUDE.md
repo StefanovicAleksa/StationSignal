@@ -52,7 +52,11 @@ oversight, unless a future decision explicitly changes it.
 - **API**: implemented (feature-sliced domain/data/service layers), with a unit + integration
   test suite (the latter against the real daemon binary) and full docs — see
   `station_signal_api/CLAUDE.md`.
-- **Frontend**: scaffolded (Vue 3 + TypeScript + Vue Router + Pinia + Vitest), no application
-  code yet — see `station_signal_frontend/CLAUDE.md`.
+- **Frontend**: implemented (Vue 3 + TypeScript + Vue Router + Pinia + Vitest) — devices, scan,
+  reports, and settings views are built out; see `station_signal_frontend/CLAUDE.md` (its own
+  "Current State" section is still stale and describes the pre-implementation scaffold).
+
+The full stack has been deployed and verified working end-to-end on real Raspberry Pi 4 hardware
+(daemon + API + frontend + nginx + avahi + systemd, per `deploy/`).
 
 Update this section as each piece progresses, same convention as the daemon's own `CLAUDE.md`.
