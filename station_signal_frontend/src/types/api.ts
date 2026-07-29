@@ -165,6 +165,11 @@ export interface NetworkConfig {
 export interface NetworkPendingChange {
   new: NetworkConfig
   expiresAt: string
+  // Seconds remaining until the box's own auto-revert, computed fresh by the API at response
+  // time. Use this (anchored to the browser's own clock) for any deadline math — expiresAt is an
+  // absolute timestamp from the box's own clock and isn't safe to compare against Date.now(), see
+  // stores/settings.ts.
+  remainingSeconds: number
 }
 
 export interface NetworkStatus {

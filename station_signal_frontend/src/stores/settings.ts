@@ -108,7 +108,11 @@ export const useSettingsStore = defineStore('settings', () => {
     applyError.value = null
     try {
       const pending = await applyNetworkConfig(config)
-      pendingExpiresAt.value = new Date(pending.expiresAt).getTime()
+      // Anchored to this browser's own clock, not the box's: remainingSeconds is a relative
+      // duration, so it stays correct even if the box's clock is wrong (e.g. no NTP reachable
+      // over a bare direct-Ethernet link with no upstream internet) — comparing the box's
+      // absolute expiresAt against our Date.now() doesn't survive that.
+      pendingExpiresAt.value = Date.now() + pending.remainingSeconds * 1000
       newOrigin.value = computeOrigin(pending.new.cidr)
       phase.value = 'waitingForReconnect'
       pollAttempt = 0

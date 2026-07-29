@@ -34,7 +34,11 @@ describe('settingsApi', () => {
   })
 
   it('applyNetworkConfig posts to /settings/network with the request body', async () => {
-    const pending = { new: { cidr: '192.168.1.60/24' }, expiresAt: '2026-01-01T00:00:00Z' }
+    const pending = {
+      new: { cidr: '192.168.1.60/24' },
+      expiresAt: '2026-01-01T00:00:00Z',
+      remainingSeconds: 90,
+    }
     vi.mocked(apiClient.post).mockResolvedValue(pending)
 
     const result = await applyNetworkConfig({ cidr: '192.168.1.60/24' })

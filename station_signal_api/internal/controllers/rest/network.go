@@ -3,9 +3,51 @@ package rest
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	networkdomain "station_signal_api/internal/features/network/domain"
 )
+
+// pendingChangeResponse is the wire shape for a pending change. expiresAt is the box's own
+// clock's view of the deadline, kept for display only — remainingSeconds is what the frontend
+// actually gates its reconnect-confirmation loop on (stores/settings.ts). A relative duration
+// needs no agreement between the box's clock and the browser's; comparing an absolute timestamp
+// across the two breaks silently whenever the box's clock is wrong, e.g. a bare direct-Ethernet
+// link with no upstream internet/NTP — the box then reports "not confirmed reachable" even though
+// the address change and its auto-revert both worked correctly.
+type pendingChangeResponse struct {
+	New              networkdomain.Config `json:"new"`
+	ExpiresAt        time.Time            `json:"expiresAt"`
+	RemainingSeconds int                  `json:"remainingSeconds"`
+}
+
+func toPendingChangeResponse(p networkdomain.PendingChange) pendingChangeResponse {
+	remaining := int(time.Until(p.ExpiresAt).Seconds())
+	if remaining < 0 {
+		remaining = 0
+	}
+	return pendingChangeResponse{New: p.New, ExpiresAt: p.ExpiresAt, RemainingSeconds: remaining}
+}
+
+type statusResponse struct {
+	Interface       string                 `json:"interface"`
+	Current         networkdomain.Config   `json:"current"`
+	RecoveryAddress string                 `json:"recoveryAddress"`
+	Pending         *pendingChangeResponse `json:"pending,omitempty"`
+}
+
+func toStatusResponse(s networkdomain.Status) statusResponse {
+	resp := statusResponse{
+		Interface:       s.Interface,
+		Current:         s.Current,
+		RecoveryAddress: s.RecoveryAddress,
+	}
+	if s.Pending != nil {
+		pc := toPendingChangeResponse(*s.Pending)
+		resp.Pending = &pc
+	}
+	return resp
+}
 
 func (a *API) handleGetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	status, err := a.network.GetStatus(r.Context())
@@ -13,7 +55,7 @@ func (a *API) handleGetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	writeJSON(w, http.StatusOK, toStatusResponse(status))
 }
 
 // handleApplyNetworkConfig provisionally applies a new static IP for the box's LAN interface.
@@ -33,7 +75,7 @@ func (a *API) handleApplyNetworkConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, pending)
+	writeJSON(w, http.StatusAccepted, toPendingChangeResponse(pending))
 }
 
 // handleConfirmNetworkConfig cancels the pending auto-revert and makes the last-applied change

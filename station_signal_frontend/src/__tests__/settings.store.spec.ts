@@ -79,7 +79,8 @@ describe('useSettingsStore', () => {
 
   it('submit success computes newOrigin from the submitted CIDR and moves to waitingForReconnect', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     const store = useSettingsStore()
 
@@ -93,7 +94,8 @@ describe('useSettingsStore', () => {
   it('preserves the current page port when computing newOrigin (dev server case)', async () => {
     stubLocation({ protocol: 'http:', port: '5173' })
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '10.0.0.5/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '10.0.0.5/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     const store = useSettingsStore()
 
@@ -104,7 +106,8 @@ describe('useSettingsStore', () => {
 
   it('polls with backoff until the new address answers, then confirms and redirects', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability)
       .mockResolvedValueOnce({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
       .mockResolvedValueOnce({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
@@ -128,7 +131,8 @@ describe('useSettingsStore', () => {
 
   it('a confirm failure after reachability surfaces as an error phase', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'ok', status: 200, durationMs: 5 })
     vi.mocked(confirmNetworkConfigAt).mockRejectedValue(new Error('confirm failed with status 409'))
     const store = useSettingsStore()
@@ -142,7 +146,8 @@ describe('useSettingsStore', () => {
 
   it('gives up and reports reverted once past the expiry grace period without reachability', async () => {
     const expiresAt = new Date(Date.now() + 1000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 1
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     const store = useSettingsStore()
 
@@ -156,7 +161,8 @@ describe('useSettingsStore', () => {
 
   it('pollNow triggers an immediate check instead of waiting for the scheduled delay', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'ok', status: 200, durationMs: 5 })
     vi.mocked(confirmNetworkConfigAt).mockResolvedValue(undefined)
     const store = useSettingsStore()
@@ -172,7 +178,8 @@ describe('useSettingsStore', () => {
 
   it('dispose stops polling — no further probeReachability calls after it', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     const store = useSettingsStore()
 
@@ -205,7 +212,8 @@ describe('useSettingsStore', () => {
   // address swap consumed the entire 90s confirmation window in a single attempt.
   it('a probe that never resolves does not stall the reconnect loop', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     // First probe hangs forever; every later one answers normally.
     vi.mocked(probeReachability)
       .mockReturnValueOnce(new Promise(() => {}))
@@ -224,7 +232,8 @@ describe('useSettingsStore', () => {
   // Probes can now overlap, and doConfirm POSTs — it must not be able to fire twice.
   it('overlapping reachable probes only confirm once', async () => {
     const expiresAt = new Date(Date.now() + 90_000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 90
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'ok', status: 200, durationMs: 5 })
     vi.mocked(confirmNetworkConfigAt).mockResolvedValue(undefined)
     const store = useSettingsStore()
@@ -238,7 +247,8 @@ describe('useSettingsStore', () => {
   // Even with probes permanently in flight, the deadline still has to be honoured.
   it('gives up past the expiry grace period even while a probe is still hanging', async () => {
     const expiresAt = new Date(Date.now() + 1000).toISOString()
-    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt })
+    const remainingSeconds = 1
+    vi.mocked(applyNetworkConfig).mockResolvedValue({ new: { cidr: '192.168.1.60/24' }, expiresAt, remainingSeconds })
     vi.mocked(probeReachability).mockReturnValue(new Promise(() => {}))
     vi.mocked(getNetworkStatus).mockResolvedValue({
       interface: 'eth0',
@@ -262,7 +272,7 @@ describe('useSettingsStore', () => {
       interface: 'eth0',
       current: { cidr: '192.168.1.50/24' },
       recoveryAddress: '169.254.1.1',
-      pending: { new: { cidr: '192.168.1.77/24' }, expiresAt: new Date().toISOString() },
+      pending: { new: { cidr: '192.168.1.77/24' }, expiresAt: new Date().toISOString(), remainingSeconds: 45 },
     })
     const store = useSettingsStore()
 
@@ -342,6 +352,7 @@ describe('useSettingsStore', () => {
     vi.mocked(applyNetworkConfig).mockResolvedValue({
       new: { cidr: '192.168.1.77/24' },
       expiresAt: new Date(Date.now() + 90_000).toISOString(),
+      remainingSeconds: 90,
     })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     vi.mocked(revertNetworkConfig).mockResolvedValue(undefined)
@@ -367,13 +378,14 @@ describe('useSettingsStore', () => {
     vi.mocked(applyNetworkConfig).mockResolvedValue({
       new: { cidr: '192.168.1.77/24' },
       expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      remainingSeconds: 1,
     })
     vi.mocked(probeReachability).mockResolvedValue({ outcome: 'unreachable', error: 'TypeError: Failed to fetch', durationMs: 5 })
     vi.mocked(getNetworkStatus).mockResolvedValue({
       interface: 'eth0',
       current: { cidr: '192.168.1.50/24' },
       recoveryAddress: '169.254.1.1',
-      pending: { new: { cidr: '192.168.1.77/24' }, expiresAt: new Date().toISOString() },
+      pending: { new: { cidr: '192.168.1.77/24' }, expiresAt: new Date().toISOString(), remainingSeconds: 45 },
     })
     const store = useSettingsStore()
     await store.submit({ cidr: '192.168.1.77/24' })
