@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Play } from '@lucide/vue'
 import Button from '@/components/ui/Button.vue'
+import { useSettingsStore } from '@/stores/settings'
 
 const props = withDefaults(
   defineProps<{
@@ -14,11 +15,24 @@ const emit = defineEmits<{
   start: [interfaceId: string, mmsPort: number]
 }>()
 
-const DEFAULT_INTERFACE_ID = 'enp34s0'
+// Defaults to the box's own active network interface (from the Settings page's network status)
+// rather than a hardcoded name — a technician almost always wants to scan on the interface the
+// box is actually configured on, and a fixed default here previously leaked a dev machine's own
+// interface name into the shipped app.
+const settingsStore = useSettingsStore()
 
-const interfaceId = ref(DEFAULT_INTERFACE_ID)
+const interfaceId = ref('')
 const mmsPortInput = ref('102')
 const touched = ref(false)
+
+onMounted(async () => {
+  if (!settingsStore.status) {
+    await settingsStore.loadStatus()
+  }
+  if (!interfaceId.value && settingsStore.status?.interface) {
+    interfaceId.value = settingsStore.status.interface
+  }
+})
 
 const interfaceError = computed(() => {
   if (!touched.value) return null
@@ -48,7 +62,7 @@ function handleSubmit() {
   touched.value = true
   if (!isValid.value) return
   emit('start', interfaceId.value.trim(), Number(mmsPortInput.value))
-  interfaceId.value = DEFAULT_INTERFACE_ID
+  interfaceId.value = settingsStore.status?.interface ?? ''
   touched.value = false
 }
 </script>
@@ -61,7 +75,7 @@ function handleSubmit() {
         id="interfaceId"
         v-model="interfaceId"
         type="text"
-        placeholder="enp34s0"
+        placeholder="eth0"
         :disabled="props.disabled"
         class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
       />

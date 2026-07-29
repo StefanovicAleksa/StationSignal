@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Plug } from '@lucide/vue'
 
 import StructureFileUpload from '@/components/device/StructureFileUpload.vue'
 import Button from '@/components/ui/Button.vue'
+import { useSettingsStore } from '@/stores/settings'
 
 const props = withDefaults(
   defineProps<{
@@ -22,12 +23,25 @@ const emit = defineEmits<{
   ]
 }>()
 
+// Defaults to the box's own active network interface (from the Settings page's network status)
+// rather than a hardcoded name — see ScanForm.vue's identical rationale.
+const settingsStore = useSettingsStore()
+
 const host = ref('')
 const mmsPortInput = ref('102')
-const interfaceId = ref('enp34s0')
+const interfaceId = ref('')
 const iedName = ref('')
 const sclFilePath = ref('')
 const touched = ref(false)
+
+onMounted(async () => {
+  if (!settingsStore.status) {
+    await settingsStore.loadStatus()
+  }
+  if (!interfaceId.value && settingsStore.status?.interface) {
+    interfaceId.value = settingsStore.status.interface
+  }
+})
 
 const hostError = computed(() => {
   if (!touched.value) return null
@@ -123,7 +137,7 @@ function handleStructureFilePath(path: string | undefined) {
         id="manualInterfaceId"
         v-model="interfaceId"
         type="text"
-        placeholder="enp34s0"
+        placeholder="eth0"
         :disabled="props.disabled"
         class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
       />
