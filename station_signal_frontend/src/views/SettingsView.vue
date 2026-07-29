@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle, Save } from '@lucide/vue'
+import { AlertTriangle, Save, Undo2 } from '@lucide/vue'
 
 import { useSettingsStore } from '@/stores/settings'
 import Panel from '@/components/ui/Panel.vue'
@@ -23,7 +23,14 @@ onMounted(async () => {
   }
 })
 
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    now.value = Date.now()
+  }, 500)
+})
+
 onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
   store.dispose()
 })
 
@@ -44,12 +51,39 @@ const isValid = computed(
   () => cidrPattern.test(cidrInput.value.trim()) && (!gatewayInput.value.trim() || gatewayPattern.test(gatewayInput.value.trim())),
 )
 
-const isBusy = computed(() => store.phase === 'applying' || store.phase === 'waitingForReconnect' || store.phase === 'confirming')
+const isBusy = computed(
+  () =>
+    store.phase === 'applying' ||
+    store.phase === 'waitingForReconnect' ||
+    store.phase === 'confirming' ||
+    store.phase === 'reverting',
+)
+
+// `Date.now()` is not reactive, so a computed that reads it only re-evaluates when some *other*
+// dependency changes — here, only when the store schedules the next poll. The countdown therefore
+// rendered the full delay once and then froze, never reaching 0, which made an actively-retrying
+// reconnect look like a hung one. A ticking ref is the reactive clock it was missing.
+const now = ref(Date.now())
+let clockTimer: ReturnType<typeof setInterval> | null = null
 
 const retrySecondsLeft = computed(() => {
   if (!store.nextPollAt) return 0
-  return Math.max(0, Math.ceil((store.nextPollAt - Date.now()) / 1000))
+  return Math.max(0, Math.ceil((store.nextPollAt - now.value) / 1000))
 })
+
+function formatTime(at: number) {
+  return new Date(at).toLocaleTimeString()
+}
+
+const lastProbe = computed(() => store.pollLog[store.pollLog.length - 1] ?? null)
+
+const probeExplanation: Record<string, string> = {
+  ok: 'answered and allowed this page to read the response',
+  'http-error': 'answered, but with an error status — the proxy is up and the API behind it may not be',
+  'blocked-by-cors': 'answered, but refused this page permission to read it (CORS)',
+  unreachable: 'nothing answered at that address',
+  timeout: 'accepted the connection but did not answer in time — retrying',
+}
 
 const statusBannerClass = computed(() => {
   switch (store.phase) {
@@ -166,6 +200,23 @@ function prefillCurrent() {
           If this box doesn't confirm reachable in time, it will automatically revert to its previous address on its own
           — no action needed.
         </p>
+
+        <!-- Each attempt and its outcome, because "still waiting" on its own can't distinguish a
+             box that never came up from one that came up and refused this page. -->
+        <div v-if="store.pollLog.length" class="mt-3 border-t border-amber-300/40 pt-2 dark:border-amber-800/60">
+          <p class="text-xs font-semibold">Connection attempts</p>
+          <ul class="mt-1 space-y-0.5 font-mono text-xs">
+            <li v-for="attempt in [...store.pollLog].reverse()" :key="attempt.at">
+              {{ formatTime(attempt.at) }} — {{ attempt.outcome
+              }}<template v-if="attempt.status"> ({{ attempt.status }})</template> · {{ attempt.durationMs }}ms<template
+                v-if="attempt.error"
+              >
+                · {{ attempt.error }}</template
+              >
+            </li>
+          </ul>
+          <p v-if="lastProbe" class="mt-1 text-xs">{{ probeExplanation[lastProbe.outcome] }}</p>
+        </div>
       </template>
 
       <p v-else-if="store.phase === 'confirming'">Confirming…</p>
@@ -174,13 +225,49 @@ function prefillCurrent() {
         >…
       </p>
 
-      <p v-else-if="store.phase === 'reverted'">
-        The box did not confirm reachable in time and should have automatically reverted to its previous configuration.
-        Reload this page — if it still doesn't respond, see the fixed recovery address below.
-      </p>
+      <p v-else-if="store.phase === 'reverting'">Clearing the pending change and restoring the previous address…</p>
 
-      <p v-else-if="store.phase === 'error' && store.applyError">{{ store.applyError.message }} ({{ store.applyError.code }})</p>
+      <template v-else-if="store.phase === 'reverted'">
+        <p>
+          The box did not confirm reachable in time. It should have reverted to its previous configuration on its own —
+          reload this page to check. If it still doesn't respond, use "Clear pending change" below, or the fixed
+          recovery address.
+        </p>
+      </template>
+
+      <p v-else-if="store.phase === 'error' && store.applyError">
+        <template v-if="store.applyError.code === 'CHANGE_ALREADY_PENDING'">
+          This box is still holding an earlier network change open, so a new one can't be applied yet. If that change
+          isn't one you're waiting on, clear it below.
+        </template>
+        <template v-else>{{ store.applyError.message }} ({{ store.applyError.code }})</template>
+      </p>
     </div>
+
+    <!-- A change the box refuses to let go of is the one failure mode that can't be waited out:
+         until it's cleared, every apply is rejected. Surfacing it as its own panel with a direct
+         action is what keeps it from needing shell access to the box to resolve. -->
+    <Panel v-if="store.stuckPending">
+      <template #header>
+        <h2 class="flex items-center gap-1.5 text-sm font-semibold text-slate-800 dark:text-slate-200">
+          <AlertTriangle :size="14" />
+          A network change is still pending
+        </h2>
+      </template>
+      <p class="text-sm text-slate-600 dark:text-slate-400">
+        <template v-if="store.status?.pending">
+          This box is holding
+          <span class="font-mono">{{ store.status.pending.new.cidr }}</span> open, awaiting confirmation. Until it's
+          confirmed or cleared, no new address can be applied.
+        </template>
+        <template v-else>
+          This box is holding an earlier change open. Until it's cleared, no new address can be applied.
+        </template>
+      </p>
+      <div class="mt-3">
+        <Button variant="secondary" :icon="Undo2" :disabled="isBusy" @click="store.revert">Clear pending change</Button>
+      </div>
+    </Panel>
 
     <Panel>
       <template #header>

@@ -9,7 +9,13 @@ vi.mock('@/services/apiClient', () => ({
 }))
 
 import { apiClient } from '@/services/apiClient'
-import { getNetworkStatus, applyNetworkConfig, isReachableAt, confirmNetworkConfigAt } from '@/services/settingsApi'
+import {
+  getNetworkStatus,
+  applyNetworkConfig,
+  probeReachability,
+  confirmNetworkConfigAt,
+  revertNetworkConfig,
+} from '@/services/settingsApi'
 
 describe('settingsApi', () => {
   afterEach(() => {
@@ -37,31 +43,85 @@ describe('settingsApi', () => {
     expect(result).toEqual(pending)
   })
 
-  it('isReachableAt returns true for a 2xx response from the given origin, bypassing apiClient', async () => {
+  it('probeReachability reports ok for a 2xx response from the given origin, bypassing apiClient', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const result = await isReachableAt('http://192.168.1.60')
+    const result = await probeReachability('http://192.168.1.60')
 
-    expect(result).toBe(true)
-    expect(fetchMock).toHaveBeenCalledWith('http://192.168.1.60/health')
+    expect(result.outcome).toBe('ok')
+    expect(result.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://192.168.1.60/health',
+      expect.objectContaining({ cache: 'no-store', signal: expect.anything() }),
+    )
     expect(apiClient.get).not.toHaveBeenCalled()
   })
 
-  it('isReachableAt returns false for a non-2xx response', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 503 })))
+  // A reverse proxy that is up while the API behind it is down looks nothing like an address
+  // that never came up, and the reconnect loop needs to be able to say which it saw.
+  it('probeReachability reports http-error for a non-2xx response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 502 })))
 
-    const result = await isReachableAt('http://192.168.1.60')
+    const result = await probeReachability('http://192.168.1.60')
 
-    expect(result).toBe(false)
+    expect(result.outcome).toBe('http-error')
+    expect(result.status).toBe(502)
   })
 
-  it('isReachableAt returns false (not throw) when fetch itself rejects', async () => {
+  // The distinction that matters most: the box answered, but refused this page permission to
+  // read the response. Indistinguishable from "unreachable" to a plain fetch, which is why an
+  // IP change that visibly worked could still poll forever without ever confirming.
+  it('probeReachability reports blocked-by-cors when the opaque re-probe succeeds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      // A real opaque response has type 'opaque' and status 0, which the Response constructor
+      // refuses to build. The probe never inspects this response — resolving at all is the whole
+      // signal — so a stand-in is faithful to what the code actually depends on.
+      .mockResolvedValueOnce({ type: 'opaque', status: 0, ok: false } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await probeReachability('http://192.168.1.60')
+
+    expect(result.outcome).toBe('blocked-by-cors')
+    expect(result.error).toContain('Failed to fetch')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://192.168.1.60/health',
+      expect.objectContaining({ mode: 'no-cors', signal: expect.anything() }),
+    )
+  })
+
+  it('probeReachability reports unreachable when even the opaque re-probe fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
 
-    const result = await isReachableAt('http://192.168.1.60')
+    const result = await probeReachability('http://192.168.1.60')
 
-    expect(result).toBe(false)
+    expect(result.outcome).toBe('unreachable')
+    expect(result.error).toContain('Failed to fetch')
+  })
+
+  // THE ONE THAT MATTERS. A probe opened while the box swaps its address hangs until the
+  // browser's own connection timeout (~90s in Firefox) — longer than the entire confirmation
+  // window it is supposed to be polling within. Every probe must be bounded.
+  it('probeReachability reports timeout when the request exceeds its deadline', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('signal timed out', 'TimeoutError')))
+
+    const result = await probeReachability('http://192.168.1.60')
+
+    expect(result.outcome).toBe('timeout')
+    expect(result.error).toContain('TimeoutError')
+  })
+
+  // A timeout has already settled the question the opaque re-probe exists to answer, so paying
+  // for it again would double the worst-case cost of an attempt.
+  it('probeReachability skips the opaque re-probe on the timeout path', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await probeReachability('http://192.168.1.60')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('confirmNetworkConfigAt posts to /settings/network/confirm at the given origin', async () => {
@@ -77,5 +137,15 @@ describe('settingsApi', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 409 })))
 
     await expect(confirmNetworkConfigAt('http://192.168.1.60')).rejects.toThrow('409')
+  })
+
+  // Unlike confirm, revert always targets the page's own origin: it's used when the new address
+  // never came up, so the box is still answering where it was.
+  it('revertNetworkConfig posts to /settings/network/revert', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue(undefined)
+
+    await revertNetworkConfig()
+
+    expect(apiClient.post).toHaveBeenCalledWith('/settings/network/revert')
   })
 })
