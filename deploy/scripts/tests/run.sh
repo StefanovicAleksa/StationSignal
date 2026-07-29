@@ -32,6 +32,10 @@ setup() {
     export STATE_DIR="$WORK/state"
     export CONF_FILE="$WORK/netconfig.conf"
     export STUB_LOG="$WORK/stub.log"
+    # Never the real /etc/avahi/hosts — left non-existent by default (not touch'd) so
+    # sync_avahi_hosts's `[ -f ... ] || return 0` gate makes it a no-op for every test that
+    # doesn't opt in by creating it, same as production before avahi is installed.
+    export AVAHI_HOSTS_FILE="$WORK/avahi-hosts"
     export REQUIRE_ROOT=0
     export PATH="$STUBS:$PATH"
     mkdir -p "$STATE_DIR"
@@ -332,6 +336,46 @@ t_invalid_input_is_rejected_without_touching_anything() {
     assert_log_missing "connection modify" || return 1
 }
 
+# sync_avahi_hosts must publish the primary address only — never the recovery address that's
+# always present alongside it — and reload avahi so the change actually takes effect. This is the
+# fix for the ~10s stationsignal.local load time: avahi's own auto-publishing used to advertise
+# both addresses as A records for the same hostname.
+t_activate_syncs_avahi_hosts_to_primary_address() {
+    : >"$AVAHI_HOSTS_FILE"
+    apply_ok || return 1
+    run_script activate
+    assert_rc 0 || return 1
+    assert_file_contains "$AVAHI_HOSTS_FILE" "192.168.1.50 stationsignal.local" || return 1
+    assert_log_contains "systemctl reload avahi-daemon" || return 1
+    case "$(cat "$AVAHI_HOSTS_FILE")" in
+        *169.254.1.1*) fail "recovery address leaked into $AVAHI_HOSTS_FILE" "$(cat "$AVAHI_HOSTS_FILE")"; return 1 ;;
+    esac
+}
+
+# Re-syncing (e.g. confirm following activate, or a revert) must replace the previous managed
+# entry rather than appending a second one alongside it.
+t_sync_avahi_hosts_replaces_stale_entry_on_revert() {
+    : >"$AVAHI_HOSTS_FILE"
+    apply_ok || return 1
+    run_script activate
+    assert_rc 0 || return 1
+    run_script revert
+    assert_rc 0 || return 1
+    local occurrences
+    occurrences="$(grep -c 'stationsignal.local' "$AVAHI_HOSTS_FILE" 2>/dev/null || true)"
+    [ "$occurrences" = "1" ] || fail "expected exactly one managed entry, found $occurrences" "$(cat "$AVAHI_HOSTS_FILE")"
+}
+
+# Without avahi installed (the file doesn't exist yet), sync_avahi_hosts must no-op rather than
+# create the file itself or fail the network operation over it.
+t_sync_avahi_hosts_is_a_noop_when_file_absent() {
+    rm -f "$AVAHI_HOSTS_FILE"
+    apply_ok || return 1
+    run_script activate
+    assert_rc 0 || return 1
+    [ ! -e "$AVAHI_HOSTS_FILE" ] || fail "sync_avahi_hosts created $AVAHI_HOSTS_FILE when avahi isn't installed"
+}
+
 # --- main -------------------------------------------------------------------------------------
 
 echo "station-signal-netconfig.sh"
@@ -357,6 +401,9 @@ test_case "revert clears state when conf is broken"            t_revert_clears_s
 test_case "status reports pending and activation result"       t_status_reports_pending_and_activation_result
 test_case "status reports nothing pending"                     t_status_reports_nothing_pending
 test_case "invalid input touches nothing"                      t_invalid_input_is_rejected_without_touching_anything
+test_case "activate syncs avahi hosts to primary address"      t_activate_syncs_avahi_hosts_to_primary_address
+test_case "sync avahi hosts replaces stale entry on revert"    t_sync_avahi_hosts_replaces_stale_entry_on_revert
+test_case "sync avahi hosts is a no-op when file absent"       t_sync_avahi_hosts_is_a_noop_when_file_absent
 
 echo ""
 echo "$PASS passed, $FAIL failed"

@@ -135,7 +135,7 @@ Don't commit the ARM-rebuilt `third_party/*.a` archives back onto a branch other
 machines build from — this is a Pi-only working-tree change.
 
 **Verify**
-1. On the Pi: `curl http://127.0.0.1:8080/health`
+1. On the Pi: `curl http://127.0.0.1:8080/api/health`
 2. From another machine on the LAN: open `http://stationsignal.local` in a browser and confirm
    the UI loads, a device report stream connects, and a scan runs end-to-end.
 3. Reboot the Pi and repeat step 2 without starting anything by hand, to confirm the systemd

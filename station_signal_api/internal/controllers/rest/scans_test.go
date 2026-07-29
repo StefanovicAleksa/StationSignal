@@ -18,7 +18,7 @@ func TestHandleStartScan_Success(t *testing.T) {
 	scanning := &mockScanningService{startScan: scanningdomain.Scan{ID: 1}}
 	mux := Router(newTestAPI(nil, scanning, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/scans", strings.NewReader(`{"interfaceId":"eth0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/scans", strings.NewReader(`{"interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -31,7 +31,7 @@ func TestHandleStartScan_Success(t *testing.T) {
 func TestHandleStartScan_MalformedJSON(t *testing.T) {
 	mux := Router(newTestAPI(nil, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/scans", strings.NewReader(`not json`))
+	req := httptest.NewRequest(http.MethodPost, "/api/scans", strings.NewReader(`not json`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -56,7 +56,7 @@ func TestHandleStartScan_DaemonErrors(t *testing.T) {
 			scanning := &mockScanningService{startErr: &daemonproto.Error{Code: tt.code}}
 			mux := Router(newTestAPI(nil, scanning, nil, nil))
 
-			req := httptest.NewRequest(http.MethodPost, "/scans", strings.NewReader(`{"interfaceId":"eth0"}`))
+			req := httptest.NewRequest(http.MethodPost, "/api/scans", strings.NewReader(`{"interfaceId":"eth0"}`))
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 
@@ -70,7 +70,7 @@ func TestHandleStopScan_Success(t *testing.T) {
 	scanning := &mockScanningService{}
 	mux := Router(newTestAPI(nil, scanning, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/scans/2", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/scans/2", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -84,7 +84,7 @@ func TestHandleStopScan_Success(t *testing.T) {
 func TestHandleStopScan_InvalidIDParam(t *testing.T) {
 	mux := Router(newTestAPI(nil, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/scans/nope", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/scans/nope", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -96,7 +96,7 @@ func TestHandleStopScan_ScanNotFound(t *testing.T) {
 	scanning := &mockScanningService{stopErr: &daemonproto.Error{Code: daemonproto.ErrScanNotFound}}
 	mux := Router(newTestAPI(nil, scanning, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/scans/999", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/scans/999", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -110,7 +110,7 @@ func TestHandleListScans(t *testing.T) {
 	}}
 	mux := Router(newTestAPI(nil, scanning, nil, nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/scans", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/scans", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -124,7 +124,7 @@ func TestHandleListScans(t *testing.T) {
 func TestHandleListScans_EmptyReturnsEmptyArrayNotNull(t *testing.T) {
 	mux := Router(newTestAPI(nil, &mockScanningService{list: []scanningdomain.Scan{}}, nil, nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/scans", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/scans", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

@@ -13,11 +13,13 @@ loopback-only websockets. This doc is the map — for current-state facts and ha
 1. Spawns the configured `station_signal_daemon` binary and supervises it — detects unexpected
    exit, respawns with backoff, and re-arms every device/scan that was active immediately
    before a crash.
-2. Exposes REST endpoints (`/devices`, `/scans`, `/health`) that translate frontend requests
-   into the daemon's control-channel JSON (`START_REPORTING`/`STOP_REPORTING`/`START_SCAN`/
-   `STOP_SCAN`) over one shared, long-lived connection to `ws://127.0.0.1:8767`. Also exposes
-   `POST /structure-files`, a local-only file upload endpoint with no daemon interaction — see
-   `internal/core/structurefiles` below.
+2. Exposes REST endpoints (`/api/devices`, `/api/scans`, `/api/health`) that translate frontend
+   requests into the daemon's control-channel JSON (`START_REPORTING`/`STOP_REPORTING`/
+   `START_SCAN`/`STOP_SCAN`) over one shared, long-lived connection to `ws://127.0.0.1:8767`.
+   Also exposes `POST /api/structure-files`, a local-only file upload endpoint with no daemon
+   interaction — see `internal/core/structurefiles` below. Every REST route is mounted under
+   `/api` (`internal/controllers/rest/api.go`) so nginx can proxy that whole subtree without
+   colliding with frontend SPA page routes of the same resource names.
 3. Exposes WS endpoints (`/ws/devices/{id}`, `/ws/scans`) that fan the daemon's per-device
    report stream and shared scan-result stream out to any number of frontend subscribers —
    the frontend never dials the daemon's own ports directly.
@@ -52,7 +54,7 @@ domain/data/service split, holding what every feature's `data/` layer depends on
 | `daemonclient` | the single long-lived control-channel connection, request/response correlation by `requestId` |
 | `streamrelay` | `Hub`: fans one daemon-side push-only stream out to N frontend subscribers, drop-not-queue on backpressure |
 | `config` | startup flags/env (daemon binary path, HTTP listen address, log level, structure file storage dir) |
-| `structurefiles` | saves uploaded SCL/ICD/CID files to local disk for `POST /structure-files`; no daemon interaction — the returned path is read by the daemon directly, since it always runs on the same box |
+| `structurefiles` | saves uploaded SCL/ICD/CID files to local disk for `POST /api/structure-files`; no daemon interaction — the returned path is read by the daemon directly, since it always runs on the same box |
 
 `internal/controllers/{rest,ws}` is the HTTP/WS handler layer — not itself a "feature" — that
 calls into each feature's `service/` only, translating REST/WS requests into service calls and

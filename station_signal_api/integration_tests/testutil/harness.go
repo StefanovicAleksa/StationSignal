@@ -40,9 +40,16 @@ func newSession(t *testing.T, baseURL, wsBase string) *Session {
 	return &Session{t: t, baseURL: baseURL, wsBase: wsBase, client: &http.Client{Jar: jar}}
 }
 
+// apiPath prefixes a bare REST resource path (e.g. "/devices") with the API's /api mount point —
+// centralized here so every Get/Post/Delete call site below can keep passing the short form. See
+// internal/controllers/rest/api.go's own comment for why the prefix exists at all.
+func apiPath(path string) string {
+	return "/api" + path
+}
+
 // Get issues a GET request against path (e.g. "/devices").
 func (s *Session) Get(path string) (*http.Response, error) {
-	return s.client.Get(s.baseURL + path)
+	return s.client.Get(s.baseURL + apiPath(path))
 }
 
 // Post issues a POST request with a JSON body against path.
@@ -51,12 +58,12 @@ func (s *Session) Post(path string, body any) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.client.Post(s.baseURL+path, "application/json", bytes.NewReader(data))
+	return s.client.Post(s.baseURL+apiPath(path), "application/json", bytes.NewReader(data))
 }
 
 // Delete issues a DELETE request against path.
 func (s *Session) Delete(path string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodDelete, s.baseURL+path, nil)
+	req, err := http.NewRequest(http.MethodDelete, s.baseURL+apiPath(path), nil)
 	if err != nil {
 		return nil, err
 	}

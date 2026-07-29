@@ -69,7 +69,7 @@ type PendingChange struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// Status is the full current-state response for GET /settings/network.
+// Status is the full current-state response for GET /api/settings/network.
 type Status struct {
 	Interface       string         `json:"interface"`
 	Current         Config         `json:"current"`

@@ -52,7 +52,7 @@ export function formatApiErrorDetail(err: { code: string; message: string; stage
 }
 
 // True for the API's synthesized AUTH_REQUIRED code (see FRONTEND_API_GUIDE.md §5) - a
-// POST /devices call was rejected because the device needs acseAuthPassword (missing or wrong).
+// POST /api/devices call was rejected because the device needs acseAuthPassword (missing or wrong).
 export function isAuthRequiredError(err: unknown): err is ApiError {
   return err instanceof ApiError && err.code === 'AUTH_REQUIRED'
 }
@@ -144,7 +144,7 @@ export interface GooseMessage extends DeviceStreamMessageBase {
   source: GooseSource
 }
 
-// Diagnostic-only, not report/GOOSE data - can arrive after a device's POST /devices already
+// Diagnostic-only, not report/GOOSE data - can arrive after a device's POST /api/devices already
 // returned success (the MMS report connection retries in the background). "Rejected" reuses
 // the underlying protocol library's one "connection didn't succeed" code, so this isn't
 // exclusively a wrong-password signal, even though that's the most common real cause - see

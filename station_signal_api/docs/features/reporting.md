@@ -3,7 +3,7 @@
 ## 1. Overview
 
 Owns `START_REPORTING`/`STOP_REPORTING` and the per-device stream hub lifecycle. Everything
-the frontend sees under `/devices` and `/ws/devices/{id}` is this feature.
+the frontend sees under `/api/devices` and `/ws/devices/{id}` is this feature.
 
 ## 2. Public API surface
 
@@ -24,7 +24,7 @@ func (s *Service) StreamFor(deviceID int) (<-chan []byte, func(), bool)
 directly.
 
 `domain.Device` and `domain.StartParams` (see `domain/device.go`) are also part of the public
-contract — `Device`'s JSON tags are the exact shape `GET /devices` serializes.
+contract — `Device`'s JSON tags are the exact shape `GET /api/devices` serializes.
 
 ## 3. Per-file breakdown
 
@@ -71,7 +71,7 @@ device) plus a broadcast-under-lock to however many frontend WS subscribers are 
   this feature or the daemon actually do.
 - **The daemon's per-device push stream can also carry a `CONNECTION_STATUS` message**
   (`{"type":"CONNECTION_STATUS","status":"CONNECTION_REJECTED"}`) after a successful
-  `POST /devices`, if the device's actual MMS report connection (as opposed to the SCL
+  `POST /api/devices`, if the device's actual MMS report connection (as opposed to the SCL
   bootstrap fetch) is later rejected — most commonly a device that requires
   `acseAuthPassword` on the report association specifically. This API relays it verbatim
   (`core/streamrelay.Hub` is a byte-for-byte opaque relay, no special-casing needed here).

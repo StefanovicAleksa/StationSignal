@@ -19,8 +19,8 @@ running unattended and across reboots.
 Other PC's browser → http://stationsignal.local  (or http://<box-ip> directly)
    (1) mDNS: avahi answers stationsignal.local with the box's current interface address — no DNS
        server, no DHCP, no client-side config, works the same for static or dynamic IPs
-   (2) HTTP to box:80 → nginx: "/" serves frontend dist/, "/health|/devices|/scans|
-       /structure-files|/ws/*" proxy to 127.0.0.1:8080 (the unchanged Go API)
+   (2) HTTP to box:80 → nginx: "/" serves frontend dist/, "/api/*|/ws/*" proxy to
+       127.0.0.1:8080 (the unchanged Go API)
 ```
 
 ## Quick install
@@ -45,16 +45,39 @@ host-name=stationsignal
 ```
 (avahi always publishes under `.local`, so this alone gives `stationsignal.local` — no separate
 domain setting needed, and none should be added: mDNS resolvers only ever look up `.local` per
-RFC 6762.) Then:
+RFC 6762.)
+
+**Publish exactly one address, by hand, instead of avahi's default of "every address on every
+interface"**. This box's LAN interface always carries two IPv4 addresses once "5. Enable remote
+network reconfiguration" below is set up — its real IP, plus the fixed `169.254.1.1` recovery
+address. Avahi's default (`publish-addresses=yes`) auto-publishes an A record for both, and a
+client that races/tries the unreachable recovery address first stalls through a TCP connect
+timeout (~10s) before falling back to the one that actually works — the exact cause of a slow
+`stationsignal.local` load. Fix it by disabling that auto-publishing and adding a single static
+entry instead. Under `[publish]` in `/etc/avahi/avahi-daemon.conf`:
+```
+publish-addresses=no
+```
+Then add this box's real LAN IP to `/etc/avahi/hosts` (create the file if it doesn't exist):
+```
+<box-ip> stationsignal.local
+```
+Then:
 ```
 sudo systemctl restart avahi-daemon
 ```
-Because mDNS resolves to whatever address the box's interface currently has, giving the box a
-static IP isn't required for `stationsignal.local` to keep working — only for other reasons you
-might still want one (predictable SSH access, documentation, and the IED-facing addressing plan
-most substations actually need). Setting that first static IP by hand (`nmcli`) remains a normal
-OS-level step, outside the scope of this repo — but *changing* it later, once the box is already
-deployed and remote, is in scope: see "5. Enable remote network reconfiguration" below.
+This entry must be kept in sync with whatever the box's primary IP actually is — `deploy/setup.sh`
+and `deploy/scripts/station-signal-netconfig.sh`'s `sync_avahi_hosts` (see its own comment)
+automate this for both the initial install and every later change made through the Settings page;
+if setting this up by hand instead, re-run the `/etc/avahi/hosts` step above after any manual IP
+change too.
+
+Because mDNS resolves to whatever address is published this way, giving the box a static IP isn't
+required for `stationsignal.local` to keep working — only for other reasons you might still want
+one (predictable SSH access, documentation, and the IED-facing addressing plan most substations
+actually need). Setting that first static IP by hand (`nmcli`) remains a normal OS-level step,
+outside the scope of this repo — but *changing* it later, once the box is already deployed and
+remote, is in scope: see "5. Enable remote network reconfiguration" below.
 
 Known gap: some Android browsers don't resolve `.local` names reliably — those clients fall back
 to the bare-IP path (step 3's `default_server`).
@@ -185,7 +208,7 @@ exercises every one of them against stubbed `nmcli`/`systemd`:
   reboot or crash.
 
 If a marker somehow still outlives all of that, the Settings page shows a **Clear pending change**
-action (`POST /settings/network/revert`) — no shell access needed. By hand, it is
+action (`POST /api/settings/network/revert`) — no shell access needed. By hand, it is
 `sudo rm -f /opt/station_signal/netconfig-state/{pending,previous.env}`.
 
 ## Raspberry Pi (ARM)
@@ -227,7 +250,7 @@ against the freshly-rebuilt ARM libraries) exactly as above. Two Pi-specific thi
   `nvm` rather than the distro package.
 
 ## Verification
-1. On the box: `curl http://127.0.0.1:8080/health` and `curl -H "Host: stationsignal.local" http://127.0.0.1/`.
+1. On the box: `curl http://127.0.0.1:8080/api/health` and `curl -H "Host: stationsignal.local" http://127.0.0.1/`.
 2. On a second LAN PC (a statically-addressed one is the normal case here): open
    `http://stationsignal.local` in a browser and confirm the UI loads, a device report stream
    connects, and a scan runs end-to-end (this is what actually proves the nginx WebSocket proxy

@@ -19,6 +19,21 @@ describe('apiClient', () => {
     expect(result).toEqual({ scanId: 1 })
   })
 
+  // Every REST resource is mounted under /api (see station_signal_api's rest.Router) so nginx
+  // can proxy the whole subtree without colliding with frontend SPA page routes of the same
+  // name (e.g. /devices, /settings) — apiClient must add that prefix on every call.
+  it('prefixes every request path with /api', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await apiClient.get('/devices')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/devices$/),
+      expect.anything(),
+    )
+  })
+
   it('throws a typed ApiError for a non-2xx error envelope', async () => {
     vi.stubGlobal(
       'fetch',

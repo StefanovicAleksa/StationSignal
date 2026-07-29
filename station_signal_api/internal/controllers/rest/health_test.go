@@ -25,7 +25,7 @@ func TestHandleHealth_ReportsUnderlyingState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mux := Router(newTestAPI(nil, nil, &mockDaemonSupervisor{running: tt.running}, &mockDaemonStatus{connected: tt.connected}))
 
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 

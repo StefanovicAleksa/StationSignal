@@ -52,7 +52,7 @@ describe('settingsApi', () => {
     expect(result.outcome).toBe('ok')
     expect(result.status).toBe(200)
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://192.168.1.60/health',
+      'http://192.168.1.60/api/health',
       expect.objectContaining({ cache: 'no-store', signal: expect.anything() }),
     )
     expect(apiClient.get).not.toHaveBeenCalled()
@@ -87,7 +87,7 @@ describe('settingsApi', () => {
     expect(result.outcome).toBe('blocked-by-cors')
     expect(result.error).toContain('Failed to fetch')
     expect(fetchMock).toHaveBeenLastCalledWith(
-      'http://192.168.1.60/health',
+      'http://192.168.1.60/api/health',
       expect.objectContaining({ mode: 'no-cors', signal: expect.anything() }),
     )
   })
@@ -130,7 +130,7 @@ describe('settingsApi', () => {
 
     await confirmNetworkConfigAt('http://192.168.1.60')
 
-    expect(fetchMock).toHaveBeenCalledWith('http://192.168.1.60/settings/network/confirm', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith('http://192.168.1.60/api/settings/network/confirm', { method: 'POST' })
   })
 
   it('confirmNetworkConfigAt throws on a non-2xx response', async () => {

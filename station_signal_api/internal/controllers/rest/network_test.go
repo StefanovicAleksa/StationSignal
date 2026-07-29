@@ -29,7 +29,7 @@ func TestHandleGetNetworkStatus_Success(t *testing.T) {
 	}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodGet, "/settings/network", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/network", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -44,7 +44,7 @@ func TestHandleGetNetworkStatus_Failure(t *testing.T) {
 	network := &mockNetworkService{statusErr: &networkdomain.Error{Code: networkdomain.ErrApplyFailed, Message: "ip: not found"}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodGet, "/settings/network", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/network", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -59,7 +59,7 @@ func TestHandleApplyNetworkConfig_Success(t *testing.T) {
 	}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network", strings.NewReader(`{"cidr":"192.168.1.60/24"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network", strings.NewReader(`{"cidr":"192.168.1.60/24"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -75,7 +75,7 @@ func TestHandleApplyNetworkConfig_Success(t *testing.T) {
 func TestHandleApplyNetworkConfig_MalformedJSON(t *testing.T) {
 	mux := Router(newNetworkTestAPI(nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network", strings.NewReader(`not json`))
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network", strings.NewReader(`not json`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -99,7 +99,7 @@ func TestHandleApplyNetworkConfig_ServiceErrors(t *testing.T) {
 			network := &mockNetworkService{applyErr: &networkdomain.Error{Code: tt.code, Message: "boom"}}
 			mux := Router(newNetworkTestAPI(network))
 
-			req := httptest.NewRequest(http.MethodPost, "/settings/network", strings.NewReader(`{"cidr":"192.168.1.60/24"}`))
+			req := httptest.NewRequest(http.MethodPost, "/api/settings/network", strings.NewReader(`{"cidr":"192.168.1.60/24"}`))
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 
@@ -112,7 +112,7 @@ func TestHandleApplyNetworkConfig_ServiceErrors(t *testing.T) {
 func TestHandleApplyNetworkConfig_IsNotReachableViaGET(t *testing.T) {
 	mux := Router(newNetworkTestAPI(nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/settings/network/confirm", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/network/confirm", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -123,7 +123,7 @@ func TestHandleConfirmNetworkConfig_Success(t *testing.T) {
 	network := &mockNetworkService{}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network/confirm", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network/confirm", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -137,7 +137,7 @@ func TestHandleConfirmNetworkConfig_NoPendingChange(t *testing.T) {
 	network := &mockNetworkService{confirmErr: &networkdomain.Error{Code: networkdomain.ErrNoPendingChange, Message: "nothing pending"}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network/confirm", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network/confirm", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -149,7 +149,7 @@ func TestHandleRevertNetworkConfig_Success(t *testing.T) {
 	network := &mockNetworkService{}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network/revert", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -164,7 +164,7 @@ func TestHandleRevertNetworkConfig_NoPendingChange(t *testing.T) {
 	network := &mockNetworkService{revertErr: &networkdomain.Error{Code: networkdomain.ErrNoPendingChange, Message: "nothing pending"}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network/revert", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -178,7 +178,7 @@ func TestHandleRevertNetworkConfig_PartialFailureIsReported(t *testing.T) {
 	network := &mockNetworkService{revertErr: &networkdomain.Error{Code: networkdomain.ErrApplyFailed, Message: "reverted, but nmcli could not reactivate"}}
 	mux := Router(newNetworkTestAPI(network))
 
-	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/network/revert", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

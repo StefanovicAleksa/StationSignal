@@ -88,8 +88,8 @@ func Router(api *API) *chi.Mux {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	// No auth, no TLS, local-network trust model (see station_signal_api/CLAUDE.md) — and the
-	// Settings page's network-reconfiguration flow needs cross-origin GET /health and POST
-	// /settings/network/confirm to work against whatever new address it just configured, from
+	// Settings page's network-reconfiguration flow needs cross-origin GET /api/health and POST
+	// /api/settings/network/confirm to work against whatever new address it just configured, from
 	// whatever origin the technician's browser happens to be on (production nginx origin, the
 	// fixed recovery address, or the Vite dev server) — a fixed single-origin allowlist can never
 	// cover that, so any origin is allowed rather than guessing at one. No credentials are ever
@@ -106,22 +106,30 @@ func Router(api *API) *chi.Mux {
 	// chi applies Use() middleware to routes registered on the mux afterward too.
 	r.Use(session.Middleware)
 
-	r.Get("/health", api.handleHealth)
+	// Every REST resource lives under /api so nginx can proxy the whole subtree unambiguously —
+	// several of these names (devices, settings) also happen to be frontend SPA page routes, and
+	// a bare top-level path collided with the frontend's own client-side routes on a hard reload
+	// (the browser's real page navigation to /devices got proxied straight to this handler
+	// instead of the SPA shell). WS routes (controllers/ws) are unaffected and stay unprefixed —
+	// they don't collide with any SPA route.
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/health", api.handleHealth)
 
-	r.Get("/devices", api.handleListDevices)
-	r.Post("/devices", api.handleStartReporting)
-	r.Delete("/devices/{id}", api.handleStopReporting)
+		r.Get("/devices", api.handleListDevices)
+		r.Post("/devices", api.handleStartReporting)
+		r.Delete("/devices/{id}", api.handleStopReporting)
 
-	r.Get("/scans", api.handleListScans)
-	r.Post("/scans", api.handleStartScan)
-	r.Delete("/scans/{id}", api.handleStopScan)
+		r.Get("/scans", api.handleListScans)
+		r.Post("/scans", api.handleStartScan)
+		r.Delete("/scans/{id}", api.handleStopScan)
 
-	r.Post("/structure-files", api.handleUploadStructureFile)
+		r.Post("/structure-files", api.handleUploadStructureFile)
 
-	r.Get("/settings/network", api.handleGetNetworkStatus)
-	r.Post("/settings/network", api.handleApplyNetworkConfig)
-	r.Post("/settings/network/confirm", api.handleConfirmNetworkConfig)
-	r.Post("/settings/network/revert", api.handleRevertNetworkConfig)
+		r.Get("/settings/network", api.handleGetNetworkStatus)
+		r.Post("/settings/network", api.handleApplyNetworkConfig)
+		r.Post("/settings/network/confirm", api.handleConfirmNetworkConfig)
+		r.Post("/settings/network/revert", api.handleRevertNetworkConfig)
+	})
 
 	return r
 }

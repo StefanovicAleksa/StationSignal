@@ -3,7 +3,7 @@
 ## 1. Overview
 
 Owns `START_SCAN`/`STOP_SCAN` and the shared scan-result hub's 0↔1 lifecycle. Everything the
-frontend sees under `/scans` and `/ws/scans` is this feature.
+frontend sees under `/api/scans` and `/ws/scans` is this feature.
 
 ## 2. Public API surface
 

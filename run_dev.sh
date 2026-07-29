@@ -86,7 +86,7 @@ API_PID=$!
 echo "==> Waiting for the API to become ready"
 api_ready=""
 for _ in $(seq 1 30); do
-    if curl -fsS "http://127.0.0.1:${API_PORT}/health" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:${API_PORT}/api/health" >/dev/null 2>&1; then
         api_ready=1
         break
     fi
@@ -97,7 +97,7 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 if [ -z "$api_ready" ]; then
-    echo "error: API did not respond on http://127.0.0.1:${API_PORT}/health after 30s" >&2
+    echo "error: API did not respond on http://127.0.0.1:${API_PORT}/api/health after 30s" >&2
     exit 1
 fi
 

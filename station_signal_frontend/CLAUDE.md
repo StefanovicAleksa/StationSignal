@@ -23,8 +23,8 @@ orientation, not a substitute for reading it.
 
 - Base URL is this API's own HTTP address (e.g. `http://<host>:8080`) — **never** the daemon's
   ports (8767/8766/9000-9999). This frontend has no reason to know those exist.
-- Two REST resource groups, `/devices` and `/scans` (`POST` to start, `DELETE /{id}` to stop,
-  `GET` to list), plus `GET /health`.
+- Two REST resource groups, `/api/devices` and `/api/scans` (`POST` to start, `DELETE /{id}` to
+  stop, `GET` to list), plus `GET /api/health`.
 - Two WS endpoints for live data: `/ws/devices/{deviceId}` (one connection per watched
   device) and `/ws/scans` (one shared connection, accepts and idles even with no scan active).
   Both are push-only — never send anything on them.

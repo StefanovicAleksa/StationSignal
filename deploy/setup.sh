@@ -143,6 +143,30 @@ elif grep -q '^#host-name=' /etc/avahi/avahi-daemon.conf; then
 else
     sudo sed -i "/^\[server\]/a host-name=$AVAHI_HOST_NAME" /etc/avahi/avahi-daemon.conf
 fi
+# Stop avahi auto-publishing an A record for every address on every interface — this box's LAN
+# interface always carries two (its real IP, plus the fixed recovery address below), and avahi's
+# default here made $HOSTNAME_NAME resolve to *both*. A client that raced/tried the recovery
+# address first got no response (it's not on that segment) and stalled through a TCP connect
+# timeout — ~10s — before falling back to the address that actually works. Publish exactly one,
+# by hand, via the static /etc/avahi/hosts mechanism instead — kept in sync with the box's actual
+# live primary address by station-signal-netconfig.sh's sync_avahi_hosts (see its own comment;
+# this is the same kind of hand-maintained cross-reference as RECOVERY_CIDR above).
+if grep -q '^publish-addresses=' /etc/avahi/avahi-daemon.conf; then
+    sudo sed -i "s/^publish-addresses=.*/publish-addresses=no/" /etc/avahi/avahi-daemon.conf
+elif grep -q '^#publish-addresses=' /etc/avahi/avahi-daemon.conf; then
+    sudo sed -i "s/^#publish-addresses=.*/publish-addresses=no/" /etc/avahi/avahi-daemon.conf
+else
+    sudo sed -i "/^\[publish\]/a publish-addresses=no" /etc/avahi/avahi-daemon.conf
+fi
+AVAHI_HOSTS_MARKER_BEGIN="# station-signal: managed entry, do not edit by hand (see deploy/setup.sh / deploy/scripts/station-signal-netconfig.sh)"
+AVAHI_HOSTS_MARKER_END="# station-signal: end managed entry"
+sudo touch /etc/avahi/hosts
+sudo sed -i "\|^$AVAHI_HOSTS_MARKER_BEGIN\$|,\|^$AVAHI_HOSTS_MARKER_END\$|d" /etc/avahi/hosts
+{
+    echo "$AVAHI_HOSTS_MARKER_BEGIN"
+    echo "$BOX_IP $HOSTNAME_NAME"
+    echo "$AVAHI_HOSTS_MARKER_END"
+} | sudo tee -a /etc/avahi/hosts >/dev/null
 sudo systemctl enable --now avahi-daemon >/dev/null
 sudo systemctl restart avahi-daemon
 
@@ -173,7 +197,7 @@ echo "Android browsers don't resolve .local names reliably — those can still r
 echo "http://$BOX_IP directly (nginx's default_server)."
 echo ""
 echo "Verify:"
-echo "  On this box:   curl http://127.0.0.1:8080/health"
+echo "  On this box:   curl http://127.0.0.1:8080/api/health"
 echo "                 curl -H \"Host: $HOSTNAME_NAME\" http://127.0.0.1/"
 echo "  From a LAN PC: open http://$HOSTNAME_NAME in a browser"
 echo ""

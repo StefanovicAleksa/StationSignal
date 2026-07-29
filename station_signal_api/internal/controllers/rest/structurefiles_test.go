@@ -28,7 +28,7 @@ func multipartUploadRequest(t *testing.T, fieldName, filename string, content []
 	}
 	require.NoError(t, writer.Close())
 
-	req := httptest.NewRequest(http.MethodPost, "/structure-files", &body)
+	req := httptest.NewRequest(http.MethodPost, "/api/structure-files", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
 }

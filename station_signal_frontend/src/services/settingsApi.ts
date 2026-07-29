@@ -66,7 +66,7 @@ export async function probeReachability(baseUrl: string): Promise<ProbeResult> {
   const init = (): RequestInit => ({ signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), cache: 'no-store' })
 
   try {
-    const res = await fetch(`${baseUrl}/health`, init())
+    const res = await fetch(`${baseUrl}/api/health`, init())
     return { outcome: res.ok ? 'ok' : 'http-error', status: res.status, durationMs: elapsed() }
   } catch (err) {
     const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
@@ -82,7 +82,7 @@ export async function probeReachability(baseUrl: string): Promise<ProbeResult> {
     // opaque no-cors response still resolves whenever the server answered at all, and still
     // rejects when nothing is listening — the one way to tell them apart from inside a browser.
     try {
-      await fetch(`${baseUrl}/health`, { ...init(), mode: 'no-cors' })
+      await fetch(`${baseUrl}/api/health`, { ...init(), mode: 'no-cors' })
       return { outcome: 'blocked-by-cors', error: reason, durationMs: elapsed() }
     } catch (reprobeErr) {
       if (isTimeout(reprobeErr)) {
@@ -94,7 +94,7 @@ export async function probeReachability(baseUrl: string): Promise<ProbeResult> {
 }
 
 export async function confirmNetworkConfigAt(baseUrl: string): Promise<void> {
-  const res = await fetch(`${baseUrl}/settings/network/confirm`, { method: 'POST' })
+  const res = await fetch(`${baseUrl}/api/settings/network/confirm`, { method: 'POST' })
   if (!res.ok) {
     throw new Error(`confirm failed with status ${res.status}`)
   }

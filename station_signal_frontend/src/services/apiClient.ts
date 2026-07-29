@@ -18,7 +18,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   let response: Response
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers })
+    // /api: every REST resource is mounted there (see station_signal_api's rest.Router) so
+    // nginx can proxy the whole subtree unambiguously — some resource names (devices, settings)
+    // are also frontend SPA page routes, and a bare top-level path collided with them on a hard
+    // reload.
+    response = await fetch(`${API_BASE_URL}/api${path}`, { ...init, headers })
   } catch (err) {
     // fetch() itself rejects (not a non-2xx response) on a network-level failure — DNS
     // failure, connection refused/reset, timeout. This is exactly what a mid-flight box IP

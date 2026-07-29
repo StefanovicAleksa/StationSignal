@@ -61,6 +61,7 @@ set -Eeuo pipefail
 # confirm land in the same second as the revert it was racing. Neither timer here is a
 # power-management concern; both want to fire when they say they will.
 : "${TIMER_ACCURACY:=100ms}"
+: "${AVAHI_HOSTS_FILE:=/etc/avahi/hosts}"
 
 PREV_FILE="$STATE_DIR/previous.env"
 PENDING_FILE="$STATE_DIR/pending"
@@ -76,6 +77,15 @@ EXIT_PENDING=3   # refused: a genuine, not-yet-expired change is already pending
 # domain.RecoveryAddress/recoveryBlock — if that ever changes, update it here too.
 RECOVERY_CIDR="169.254.1.1/24"
 RECOVERY_BLOCK_RE='^169\.254\.'
+
+# The fixed mDNS hostname avahi answers for and its static-hosts publishing mechanism — see
+# deploy/setup.sh's avahi step, which sets publish-addresses=no and writes the first copy of this
+# same marker-delimited entry. Kept in sync by hand: if either the hostname or the marker text
+# changes, update it in both places. AVAHI_HOSTS_FILE itself is env-overridable above, alongside
+# CONF_FILE/STATE_DIR, for the same reason: tests must never write to the real /etc/avahi/hosts.
+AVAHI_HOSTNAME="stationsignal.local"
+AVAHI_HOSTS_MARKER_BEGIN="# station-signal: managed entry, do not edit by hand (see deploy/setup.sh / deploy/scripts/station-signal-netconfig.sh)"
+AVAHI_HOSTS_MARKER_END="# station-signal: end managed entry"
 
 usage() {
     echo "usage: $0 {apply <cidr> <gateway|-> <timeoutSeconds>|activate|confirm|revert|reconcile|status}" >&2
@@ -127,13 +137,64 @@ resolve_device() {
 # full reactivation); it still pins the device explicitly.
 activate_profile() {
     if [ -n "${DEVICE:-}" ] && nmcli device reapply "$DEVICE"; then
+        sync_avahi_hosts
         return 0
     fi
     if [ -n "${DEVICE:-}" ]; then
-        nmcli connection up "$CONNECTION_NAME" ifname "$DEVICE"
+        nmcli connection up "$CONNECTION_NAME" ifname "$DEVICE" || return 1
     else
-        nmcli connection up "$CONNECTION_NAME"
+        nmcli connection up "$CONNECTION_NAME" || return 1
     fi
+    sync_avahi_hosts
+}
+
+# sync_avahi_hosts re-publishes AVAHI_HOSTNAME to whatever this box's actual primary
+# (non-recovery) IPv4 address currently is, per the just-activated connection profile. Called
+# from activate_profile's success path only — that one function is the chokepoint every code path
+# that changes the live address already goes through (cmd_activate, restore_previous, and
+# therefore cmd_revert/apply_rollback), so this self-heals the mDNS record after apply->activate,
+# confirm, revert, and abandoned-pending recovery alike, without having to track "old vs. new IP"
+# through each call site separately. Reads the address back from the connection profile (same
+# `nmcli -g ipv4.addresses connection show` query/format already used for PREV_ADDRESSES above)
+# rather than querying the live interface, since activate_profile has just made this profile live.
+#
+# Without this, avahi's default per-interface auto-publishing would advertise both this address
+# and the fixed 169.254.1.1 recovery address (always present on the same interface — see
+# RECOVERY_CIDR above) as A records for the same hostname, and a client racing/trying the
+# recovery address first would stall through a TCP connect timeout before falling back — see
+# deploy/setup.sh's publish-addresses=no comment for the full story.
+#
+# Best-effort by design: an mDNS hiccup must never fail the network change that triggered it, so
+# every failure path here is a warning, not a hard error.
+sync_avahi_hosts() {
+    [ -f "$AVAHI_HOSTS_FILE" ] || return 0
+
+    local ip
+    ip="$(nmcli -g ipv4.addresses connection show "$CONNECTION_NAME" 2>/dev/null \
+        | tr ',' '\n' \
+        | tr -d ' ' \
+        | cut -d/ -f1 \
+        | grep -v -E "$RECOVERY_BLOCK_RE" \
+        | head -n1)"
+    if [ -z "$ip" ]; then
+        echo "warning: could not determine a primary (non-recovery) IPv4 address for $CONNECTION_NAME — leaving $AVAHI_HOSTS_FILE unchanged" >&2
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+    sed "\\|^$AVAHI_HOSTS_MARKER_BEGIN\$|,\\|^$AVAHI_HOSTS_MARKER_END\$|d" "$AVAHI_HOSTS_FILE" >"$tmp" 2>/dev/null
+    {
+        echo "$AVAHI_HOSTS_MARKER_BEGIN"
+        echo "$ip $AVAHI_HOSTNAME"
+        echo "$AVAHI_HOSTS_MARKER_END"
+    } >>"$tmp"
+    if cp "$tmp" "$AVAHI_HOSTS_FILE"; then
+        systemctl reload avahi-daemon 2>/dev/null || echo "warning: could not reload avahi-daemon after updating $AVAHI_HOSTS_FILE — mDNS may serve a stale address until the next reload/restart" >&2
+    else
+        echo "warning: could not update $AVAHI_HOSTS_FILE with this box's current address" >&2
+    fi
+    rm -f "$tmp"
 }
 
 # clear_state tears down the pending change's bookkeeping: both transient units and both state

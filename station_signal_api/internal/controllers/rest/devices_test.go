@@ -19,7 +19,7 @@ func TestHandleStartReporting_Success(t *testing.T) {
 	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -33,7 +33,7 @@ func TestHandleStartReporting_Success(t *testing.T) {
 func TestHandleStartReporting_MalformedJSON(t *testing.T) {
 	mux := Router(newTestAPI(nil, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`not json`))
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`not json`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -61,7 +61,7 @@ func TestHandleStartReporting_DaemonErrors(t *testing.T) {
 			reporting := &mockReportingService{startErr: &daemonproto.Error{Code: tt.code, Message: "boom"}}
 			mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-			req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+			req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
 
@@ -87,7 +87,7 @@ func TestHandleStartReporting_AuthRequired_ReturnsUnauthorized(t *testing.T) {
 	}}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -109,7 +109,7 @@ func TestHandleStartReporting_OrchestrationFailedOtherwiseUnaffected(t *testing.
 	}}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -123,7 +123,7 @@ func TestHandleStartReporting_NonDaemonErrorIsInternalServerErrorWithoutLeakingD
 	reporting := &mockReportingService{startErr: errors.New("nil pointer dereference in some internal helper")}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodPost, "/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -135,7 +135,7 @@ func TestHandleStopReporting_Success(t *testing.T) {
 	reporting := &mockReportingService{}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/devices/5", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices/5", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -149,7 +149,7 @@ func TestHandleStopReporting_Success(t *testing.T) {
 func TestHandleStopReporting_InvalidIDParam(t *testing.T) {
 	mux := Router(newTestAPI(nil, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/devices/not-a-number", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices/not-a-number", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -161,7 +161,7 @@ func TestHandleStopReporting_DeviceNotFound(t *testing.T) {
 	reporting := &mockReportingService{stopErr: &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound}}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodDelete, "/devices/999", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices/999", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -175,7 +175,7 @@ func TestHandleListDevices(t *testing.T) {
 	}}
 	mux := Router(newTestAPI(reporting, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -190,7 +190,7 @@ func TestHandleListDevices(t *testing.T) {
 func TestHandleListDevices_EmptyReturnsEmptyArrayNotNull(t *testing.T) {
 	mux := Router(newTestAPI(&mockReportingService{list: []reportingdomain.Device{}}, nil, nil, nil))
 
-	req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

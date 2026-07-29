@@ -8,7 +8,7 @@ import (
 )
 
 // handleUploadStructureFile saves a browsed/dropped SCL/ICD/CID file to local disk and returns
-// its path, for the frontend to then pass back as sclFilePath in a later POST /devices call.
+// its path, for the frontend to then pass back as sclFilePath in a later POST /api/devices call.
 // The file is stored on this API's own host, which always runs on the same box as the daemon
 // (see station_signal_api/CLAUDE.md's single-box deployment model), so the returned path is one
 // the daemon can read directly.
