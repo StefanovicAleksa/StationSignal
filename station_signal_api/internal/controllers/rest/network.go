@@ -46,3 +46,16 @@ func (a *API) handleConfirmNetworkConfig(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"confirmed": true})
 }
+
+// handleRevertNetworkConfig undoes a provisionally-applied change without waiting out the
+// OS-level auto-revert, and clears the pending state that would otherwise refuse every later
+// apply. It's the Settings page's recovery action for a change that never came up — and for a
+// marker an earlier failed revert left behind, which is only reachable this way short of shell
+// access to the box.
+func (a *API) handleRevertNetworkConfig(w http.ResponseWriter, r *http.Request) {
+	if err := a.network.Revert(r.Context()); err != nil {
+		a.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reverted": true})
+}

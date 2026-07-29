@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stub systemctl for deploy/scripts/tests/run.sh.
+#
+#   SYSTEMCTL_TIMER_ACTIVE=1   `is-active` reports the auto-revert timer as still armed
+set -uo pipefail
+
+echo "systemctl $*" >>"$STUB_LOG"
+
+if [ "${1:-}" = "is-active" ]; then
+    if [ "${SYSTEMCTL_TIMER_ACTIVE:-0}" = "1" ]; then
+        exit 0
+    fi
+    exit 3
+fi
+
+exit 0

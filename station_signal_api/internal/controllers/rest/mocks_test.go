@@ -79,7 +79,9 @@ type mockNetworkService struct {
 	pending    networkdomain.PendingChange
 	applyErr   error
 	confirmErr error
+	revertErr  error
 
+	revertCalls    int
 	gotApplyConfig networkdomain.Config
 }
 
@@ -94,6 +96,11 @@ func (m *mockNetworkService) Apply(ctx context.Context, cfg networkdomain.Config
 
 func (m *mockNetworkService) Confirm(ctx context.Context) error {
 	return m.confirmErr
+}
+
+func (m *mockNetworkService) Revert(ctx context.Context) error {
+	m.revertCalls++
+	return m.revertErr
 }
 
 func newTestAPI(reporting *mockReportingService, scanning *mockScanningService, sup *mockDaemonSupervisor, daemon *mockDaemonStatus) *API {

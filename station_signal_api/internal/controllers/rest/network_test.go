@@ -144,3 +144,44 @@ func TestHandleConfirmNetworkConfig_NoPendingChange(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assertErrorCode(t, rec, networkdomain.ErrNoPendingChange)
 }
+
+func TestHandleRevertNetworkConfig_Success(t *testing.T) {
+	network := &mockNetworkService{}
+	mux := Router(newNetworkTestAPI(network))
+
+	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, true, body["reverted"])
+	assert.Equal(t, 1, network.revertCalls)
+}
+
+func TestHandleRevertNetworkConfig_NoPendingChange(t *testing.T) {
+	network := &mockNetworkService{revertErr: &networkdomain.Error{Code: networkdomain.ErrNoPendingChange, Message: "nothing pending"}}
+	mux := Router(newNetworkTestAPI(network))
+
+	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assertErrorCode(t, rec, networkdomain.ErrNoPendingChange)
+}
+
+// A revert that cleared the wedge but couldn't restore the old address still has to reach the
+// technician as a failure — the box may not be back where they expect it.
+func TestHandleRevertNetworkConfig_PartialFailureIsReported(t *testing.T) {
+	network := &mockNetworkService{revertErr: &networkdomain.Error{Code: networkdomain.ErrApplyFailed, Message: "reverted, but nmcli could not reactivate"}}
+	mux := Router(newNetworkTestAPI(network))
+
+	req := httptest.NewRequest(http.MethodPost, "/settings/network/revert", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assertErrorCode(t, rec, networkdomain.ErrApplyFailed)
+}

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stub systemd-run for deploy/scripts/tests/run.sh. Records the scheduling call rather than
+# actually scheduling anything — tests drive the `activate`/`revert` subcommands directly.
+#
+#   SYSTEMD_RUN_FAIL=1   this invocation fails (stands in for "Unit ... already exists")
+#   SYSTEMD_RUN_SLEEP=N  hang for N seconds first, so a test can signal the script mid-apply
+set -uo pipefail
+
+echo "systemd-run $*" >>"$STUB_LOG"
+
+if [ -n "${SYSTEMD_RUN_SLEEP:-}" ]; then
+    sleep "$SYSTEMD_RUN_SLEEP"
+fi
+
+if [ "${SYSTEMD_RUN_FAIL:-0}" = "1" ]; then
+    echo "stub systemd-run: injected failure" >&2
+    exit 1
+fi
+
+exit 0

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stub nmcli for deploy/scripts/tests/run.sh. Logs every invocation to $STUB_LOG and answers the
+# handful of queries station-signal-netconfig.sh makes, with failures injectable by env var:
+#
+#   NMCLI_FAIL_RE        bash regex; any invocation whose full argument string matches exits 4
+#                        (nmcli's own "connection activation failed" code — the one this
+#                        feature's real-world wedge was caused by)
+#   NMCLI_CONN_MISSING   `connection show <name>` existence check fails
+#   STUB_IFACE/_ADDRS/_GW/_METHOD   what the -g property queries report
+set -uo pipefail
+
+echo "nmcli $*" >>"$STUB_LOG"
+
+if [ -n "${NMCLI_FAIL_RE:-}" ] && [[ "$*" =~ $NMCLI_FAIL_RE ]]; then
+    echo "stub nmcli: injected failure for: $*" >&2
+    exit 4
+fi
+
+if [ "${1:-}" = "-g" ]; then
+    # `nmcli -g <field> connection show <name>`; the script only ever asks for one field.
+    case "${2:-}" in
+        connection.interface-name|GENERAL.DEVICES) echo "${STUB_IFACE-wlan0}" ;;
+        ipv4.addresses) echo "${STUB_ADDRS-192.168.1.50/24, 169.254.1.1/24}" ;;
+        ipv4.gateway) echo "${STUB_GW-192.168.1.1}" ;;
+        ipv4.method) echo "${STUB_METHOD-manual}" ;;
+        *) echo "" ;;
+    esac
+    exit 0
+fi
+
+# Bare `nmcli connection show <name>` — the existence check in load_conf.
+if [ "${1:-}" = "connection" ] && [ "${2:-}" = "show" ] && [ "${NMCLI_CONN_MISSING:-0}" = "1" ]; then
+    echo "stub nmcli: no such connection" >&2
+    exit 10
+fi
+
+exit 0

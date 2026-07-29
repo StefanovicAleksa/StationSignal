@@ -112,7 +112,13 @@ echo "==> Adding the fixed recovery address ($RECOVERY_CIDR) to $CONNECTION_NAME
 # attempt, forever, with a confusing "IP configuration could not be reserved" error. Cheap to
 # assert unconditionally; a no-op if it's already manual.
 sudo nmcli connection modify "$CONNECTION_NAME" ipv4.method manual +ipv4.addresses "$RECOVERY_CIDR"
-sudo nmcli connection up "$CONNECTION_NAME" >/dev/null
+# Pin the device, same as station-signal-netconfig.sh's activate_profile does and for the same
+# reason: a bare `nmcli connection up <name>` lets NetworkManager choose the device, and it can
+# choose a different one and then fail outright ("No suitable device found for this connection
+# (device <other> not available because profile is not compatible with device (mismatching
+# interface name))"). That failure here would abort setup.sh under `set -e` partway through the
+# install, with the interface already reconfigured — the worst possible moment for it.
+sudo nmcli connection up "$CONNECTION_NAME" ifname "$BOX_IFACE" >/dev/null
 
 echo "==> Installing the privileged network-config helper (Settings page IP changes)"
 sudo cp "$DEPLOY_DIR/scripts/station-signal-netconfig.sh" "$INSTALL_ROOT/bin/station-signal-netconfig.sh"

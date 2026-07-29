@@ -127,6 +127,12 @@ sudo nmcli connection modify <connection-name> +ipv4.addresses 169.254.1.1/24
 sudo nmcli connection up <connection-name>
 ```
 
+**This leaves the LAN interface carrying two IPv4 addresses**, and the kernel lists the link-local
+one first — so anything resolving an interface name to "its" address and subnet has to choose.
+The daemon's scan does exactly that, and prefers the routable address; taking the first one made
+it sweep `169.254.1.0/24` and silently find nothing (see `station_signal_daemon/CHANGELOG.md`).
+Worth knowing before adding any other code that maps an interface to a subnet.
+
 **Recovering network access** if a box's current primary IP is unknown or unreachable: connect a
 laptop directly to the box (or via a switch with nothing else live on that segment), manually set
 the laptop's own NIC to a static IP in the same block — e.g. `169.254.1.2/24`, no gateway needed
@@ -160,6 +166,27 @@ frontend confirms reachability at the new address first. Even if that timed reve
 fires, the fixed `169.254.1.1` address from the step above is untouched by any of this and is
 always there as the last resort — there is no scenario where this feature can require physical or
 serial access to recover the box.
+
+**The no-wedge guarantee** is the separate one, and it was learned the hard way: the helper's
+on-disk "a change is pending" marker refuses any further apply while it exists, and it survives
+reboots even though the transient systemd timer meant to clear it does not. A failed activation
+whose auto-revert *also* failed once left a box unable to change its own address at all until the
+marker was deleted by hand. Four things now prevent that, and `deploy/scripts/tests/run.sh`
+exercises every one of them against stubbed `nmcli`/`systemd`:
+
+- Activation names its device explicitly and prefers `nmcli device reapply` over `connection up`,
+  so NetworkManager can't pick a different device and fail with "no suitable device found".
+- The detached activation runs `station-signal-netconfig.sh activate`, which **reverts itself
+  immediately** if activation fails, instead of leaving the box dark until the 90s watchdog.
+- `revert` clears its state files from an `EXIT` trap, so a revert that can't reactivate the
+  interface still unblocks the next attempt; and a marker past its own `EXPIRES_AT` is treated as
+  abandoned rather than authoritative.
+- `station-signal-netconfig.sh reconcile` runs at API startup and clears a marker orphaned by a
+  reboot or crash.
+
+If a marker somehow still outlives all of that, the Settings page shows a **Clear pending change**
+action (`POST /settings/network/revert`) — no shell access needed. By hand, it is
+`sudo rm -f /opt/station_signal/netconfig-state/{pending,previous.env}`.
 
 ## Raspberry Pi (ARM)
 

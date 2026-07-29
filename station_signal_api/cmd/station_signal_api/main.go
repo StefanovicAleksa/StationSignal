@@ -76,6 +76,11 @@ func main() {
 		time.Duration(cfg.NetconfigRevertTimeoutSeconds)*time.Second,
 		logger,
 	)
+	// Clear any network change orphaned by a reboot or crash. The helper's auto-revert is a
+	// transient systemd timer, which does not survive a reboot — but its on-disk pending marker
+	// does, and that marker refuses every subsequent apply. Without this, a box that went down
+	// mid-change comes back up permanently unable to change its own address.
+	networkSvc.Reconcile(ctx)
 
 	api := rest.New(reportingSvc, scanningSvc, sup, client, structureFiles, networkSvc, logger)
 	mux := rest.Router(api)

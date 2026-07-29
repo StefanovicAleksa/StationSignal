@@ -51,6 +51,7 @@ type networkService interface {
 	GetStatus(ctx context.Context) (networkdomain.Status, error)
 	Apply(ctx context.Context, cfg networkdomain.Config) (networkdomain.PendingChange, error)
 	Confirm(ctx context.Context) error
+	Revert(ctx context.Context) error
 }
 
 // structureFileStore is the seam unit tests mock instead of the concrete
@@ -120,6 +121,7 @@ func Router(api *API) *chi.Mux {
 	r.Get("/settings/network", api.handleGetNetworkStatus)
 	r.Post("/settings/network", api.handleApplyNetworkConfig)
 	r.Post("/settings/network/confirm", api.handleConfirmNetworkConfig)
+	r.Post("/settings/network/revert", api.handleRevertNetworkConfig)
 
 	return r
 }
