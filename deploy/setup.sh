@@ -125,7 +125,10 @@ sudo cp "$DEPLOY_DIR/scripts/station-signal-netconfig.sh" "$INSTALL_ROOT/bin/sta
 sudo chown root:root "$INSTALL_ROOT/bin/station-signal-netconfig.sh"
 sudo chmod 0700 "$INSTALL_ROOT/bin/station-signal-netconfig.sh"
 sudo mkdir -p /etc/station-signal "$INSTALL_ROOT/netconfig-state"
-printf 'CONNECTION_NAME=%s\n' "$CONNECTION_NAME" | sudo tee /etc/station-signal/netconfig.conf >/dev/null
+# %q, not %s: station-signal-netconfig.sh sources this file, and NetworkManager's own default
+# connection name ("Wired connection 1") has spaces — unquoted, that breaks the sourced
+# assignment into a bogus command invocation ("connection: command not found").
+printf 'CONNECTION_NAME=%q\n' "$CONNECTION_NAME" | sudo tee /etc/station-signal/netconfig.conf >/dev/null
 # Always validate with `visudo -cf` against a staged copy before touching /etc/sudoers.d — a
 # malformed sudoers file can lock out sudo entirely.
 STAGED_SUDOERS="$(mktemp)"

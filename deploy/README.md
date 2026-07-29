@@ -175,7 +175,10 @@ sudo cp deploy/scripts/station-signal-netconfig.sh /opt/station_signal/bin/
 sudo chown root:root /opt/station_signal/bin/station-signal-netconfig.sh
 sudo chmod 0700 /opt/station_signal/bin/station-signal-netconfig.sh
 sudo mkdir -p /etc/station-signal /opt/station_signal/netconfig-state
-echo "CONNECTION_NAME=<connection-name>" | sudo tee /etc/station-signal/netconfig.conf
+# %q, not %s: station-signal-netconfig.sh sources this file, and NetworkManager's own default
+# connection name ("Wired connection 1") has spaces — unquoted, that breaks the sourced
+# assignment into a bogus command invocation.
+printf 'CONNECTION_NAME=%q\n' "<connection-name>" | sudo tee /etc/station-signal/netconfig.conf
 
 sudo visudo -cf deploy/sudoers/station-signal-netconfig   # validate syntax first — always
 sudo install -m 0440 -o root -g root deploy/sudoers/station-signal-netconfig /etc/sudoers.d/
