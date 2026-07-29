@@ -110,6 +110,36 @@ test_buildCandidateList_returnsNull_whenHostCountExceedsMaxHosts(void) {
     TEST_ASSERT_NULL(candidates);
 }
 
+/*
+ * The address-selection predicate behind the "scan finds nothing" bug: every box permanently
+ * carries a 169.254.1.1/24 recovery address next to its real static IP, and the kernel lists the
+ * link-local one first, so the sweep enumerated an empty range. See ied_discovery_netif.c.
+ */
+void
+test_isLinkLocal_trueForThe169_254_Block(void) {
+    TEST_ASSERT_TRUE(IedDiscoveryCidr_isLinkLocal(0xA9FE0101u));  /* 169.254.1.1, the recovery address */
+    TEST_ASSERT_TRUE(IedDiscoveryCidr_isLinkLocal(0xA9FE0000u));  /* 169.254.0.0, first in block */
+    TEST_ASSERT_TRUE(IedDiscoveryCidr_isLinkLocal(0xA9FEFFFFu));  /* 169.254.255.255, last in block */
+}
+
+void
+test_isLinkLocal_falseOutsideTheBlockIncludingItsBoundaries(void) {
+    TEST_ASSERT_FALSE(IedDiscoveryCidr_isLinkLocal(0xC0A80132u)); /* 192.168.1.50, the real address */
+    TEST_ASSERT_FALSE(IedDiscoveryCidr_isLinkLocal(0x7F000001u)); /* 127.0.0.1 - loopback stays selectable */
+    TEST_ASSERT_FALSE(IedDiscoveryCidr_isLinkLocal(0xA9FDFFFFu)); /* 169.253.255.255, just below */
+    TEST_ASSERT_FALSE(IedDiscoveryCidr_isLinkLocal(0xA9FF0000u)); /* 169.255.0.0, just above */
+    TEST_ASSERT_FALSE(IedDiscoveryCidr_isLinkLocal(0x00000000u));
+}
+
+void
+test_prefixLength_countsSetBits(void) {
+    TEST_ASSERT_EQUAL_UINT32(24, IedDiscoveryCidr_prefixLength(0xFFFFFF00u));
+    TEST_ASSERT_EQUAL_UINT32(30, IedDiscoveryCidr_prefixLength(0xFFFFFFFCu));
+    TEST_ASSERT_EQUAL_UINT32(8, IedDiscoveryCidr_prefixLength(0xFF000000u));
+    TEST_ASSERT_EQUAL_UINT32(32, IedDiscoveryCidr_prefixLength(0xFFFFFFFFu));
+    TEST_ASSERT_EQUAL_UINT32(0, IedDiscoveryCidr_prefixLength(0x00000000u));
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -124,6 +154,10 @@ main(void) {
     RUN_TEST(test_buildCandidateList_slash30_hasTwoHosts);
     RUN_TEST(test_buildCandidateList_slash31_isValidEmptyList);
     RUN_TEST(test_buildCandidateList_returnsNull_whenHostCountExceedsMaxHosts);
+
+    RUN_TEST(test_isLinkLocal_trueForThe169_254_Block);
+    RUN_TEST(test_isLinkLocal_falseOutsideTheBlockIncludingItsBoundaries);
+    RUN_TEST(test_prefixLength_countsSetBits);
 
     return UNITY_END();
 }

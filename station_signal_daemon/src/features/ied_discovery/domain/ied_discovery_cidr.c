@@ -19,6 +19,23 @@ IedDiscoveryCidr_hostCount(uint32_t netmask) {
     return rangeSize - 1;
 }
 
+bool
+IedDiscoveryCidr_isLinkLocal(uint32_t address) {
+    return (address & 0xFFFF0000u) == 0xA9FE0000u; /* 169.254.0.0/16 */
+}
+
+uint32_t
+IedDiscoveryCidr_prefixLength(uint32_t netmask) {
+    /* Plain popcount - correct for any contiguous mask, which is the only
+     * kind getifaddrs can hand us. */
+    uint32_t bits = 0;
+    while (netmask) {
+        bits += netmask & 1u;
+        netmask >>= 1;
+    }
+    return bits;
+}
+
 static char*
 formatDottedQuad(uint32_t address) {
     char* buf = malloc(16); /* "255.255.255.255" + NUL */

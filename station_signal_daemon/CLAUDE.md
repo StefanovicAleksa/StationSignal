@@ -338,6 +338,18 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   verify every host on a subnet, capped by `IedDiscoveryConfig.maxHosts`) and
   `IedDiscovery_verifyHost` (verify one host). Optionally gated behind ACSE password auth (one
   retry) via `IedDiscoveryConfig.acseAuthPassword`. Driven purely by `scan_orchestration`'s worker.
+  **Address selection matters and is not "the interface's address"**: an interface routinely
+  carries more than one IPv4 address here — every deployed box permanently holds a fixed
+  `169.254.1.1/24` recovery address next to its real static IP (the parent repo's
+  `deploy/setup.sh`), and the kernel lists the link-local one *first*.
+  `IedDiscoveryNetif_getInterfaceIpv4` therefore prefers the first non-link-local address
+  (`IedDiscoveryCidr_isLinkLocal`), falling back to a link-local one only when it is the
+  interface's only address; loopback is deliberately still selectable, since `lo`'s `/8` being
+  rejected as `SUBNET_TOO_LARGE` is itself an asserted behavior. Taking the first address instead
+  silently swept `169.254.1.0/24` and confirmed nothing, with no error — see `CHANGELOG.md`.
+  `IedDiscovery_scanSubnet` prints one `[scan] sweeping <network>/<prefix> on <iface> (N hosts)`
+  line per sweep (the only logging in this feature) precisely because that failure was otherwise
+  indistinguishable from an empty network.
   **A host whose real MMS/ACSE association is specifically access-denied (not merely
   non-responsive/non-MMS) is still a discovered device, not a dropped one**: `IedDiscoveryMmsProbe_associate`
   reports this distinction via an `outAccessDenied` out-param (previously computed internally then

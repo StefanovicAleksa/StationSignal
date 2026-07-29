@@ -290,11 +290,16 @@ test_ied_discovery_cidr: ied_discovery/test_ied_discovery_cidr.c \
 		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
 
-# netif.c is plain POSIX getifaddrs()/freeifaddrs() - no libiec61850 symbols
-# touched at all, no extra link flags beyond unity itself.
+# netif.c itself is plain POSIX getifaddrs()/freeifaddrs(), but it now calls
+# IedDiscoveryCidr_isLinkLocal to decide which of an interface's addresses to
+# derive a sweep range from, so domain/ied_discovery_cidr.c comes with it - and
+# that file's buildCandidateList pulls in LinkedList (implemented in
+# libiec61850.a), so this rule needs the same extra link flags as
+# test_ied_discovery_cidr above even though nothing here calls that function.
 test_ied_discovery_netif: ied_discovery/test_ied_discovery_netif.c \
-		$(IED_DISCOVERY)/data/ied_discovery_netif.c
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+		$(IED_DISCOVERY)/data/ied_discovery_netif.c \
+		$(IED_DISCOVERY)/domain/ied_discovery_cidr.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
 
 # api.c pulls in ied_discovery's full stack plus scl_bootstrap's full source
 # set (the TCP-probe delegate created in IedDiscovery_create calls into

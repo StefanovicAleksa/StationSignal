@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include "features/ied_discovery/service/ied_discovery_api.h"
 #include "features/ied_discovery/domain/ied_discovery_cidr.h"
 #include "features/ied_discovery/data/ied_discovery_netif.h"
@@ -110,6 +111,15 @@ IedDiscovery_scanSubnet(IedDiscoveryHandle handle, const char* interfaceId, int 
         if (outError) *outError = IED_DISCOVERY_ERR_SUBNET_TOO_LARGE;
         return NULL;
     }
+
+    /* Say which range is actually being swept. Nothing used to report this, so a sweep of the
+     * wrong subnet (see ied_discovery_netif.c's address-selection comment) was indistinguishable
+     * from "there are no devices here" - same empty result, no error, no output. */
+    uint32_t network = IedDiscoveryCidr_networkAddress(address, netmask);
+    printf("[scan] sweeping %u.%u.%u.%u/%u on %s (%u hosts)\n",
+            (network >> 24) & 0xFF, (network >> 16) & 0xFF, (network >> 8) & 0xFF, network & 0xFF,
+            IedDiscoveryCidr_prefixLength(netmask), interfaceId, IedDiscoveryCidr_hostCount(netmask));
+    fflush(stdout);
 
     LinkedList candidates = IedDiscoveryCidr_buildCandidateList(address, netmask, address, handle->config.maxHosts);
     if (!candidates) {

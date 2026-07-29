@@ -992,3 +992,57 @@ call site.
 Proven end-to-end (a real wrong-password `mms_report_client` connect attempt observed via the
 connState callback, and the same at the full control-channel/websocket level) in
 `integration_tests/mms_report_client/` and `integration_tests/orchestration/`.
+
+## `IedDiscovery_scanSubnet` swept the recovery address's subnet instead of the box's real one
+
+**Symptom**: `START_SCAN` stopped finding any device on a box where it had previously worked.
+Everything else was healthy — `START_REPORTING` against a known IP connected fine, the API and
+frontend were fine, and the scan itself reported no error, just an empty result set every sweep.
+Indistinguishable, from the outside, from "there are no IEDs on this network".
+
+**Root cause**: `IedDiscoveryNetif_getInterfaceIpv4` took the **first** `AF_INET` address
+`getifaddrs()` reported for the named interface and `break`ed, with no scope or link-local filter.
+That is only correct while an interface has exactly one IPv4 address. The deploy tooling
+(`deploy/setup.sh` in the parent repo) permanently adds a fixed `169.254.1.1/24` recovery address
+to the box's LAN interface — a deliberate no-brick guarantee for the Settings page's remote
+static-IP reconfiguration feature — and the kernel lists that link-local address *first*:
+
+```
+2: enp34s0: <BROADCAST,MULTICAST,UP,LOWER_UP> ...
+    inet 169.254.1.1/24  scope link
+    inet 192.168.1.50/24 scope global
+```
+
+So every sweep enumerated `169.254.1.1`–`169.254.1.254` and confirmed nothing. A /24 is 254 hosts,
+well under the 1024 `maxHosts` ceiling, so `SUBNET_TOO_LARGE` never fired either — the wrong subnet
+was swept perfectly successfully.
+
+The bug had existed since `ied_discovery` was written; it only became reachable when the recovery
+address first landed on the *wired* interface (earlier deploys had configured the box's Wi-Fi
+profile instead). Note the consuming API's own status reader ran `ip -4 -o addr show scope global`
+and therefore reported the right address all along — the two layers disagreed, and this one was
+wrong.
+
+**Fix**: `IedDiscoveryNetif_getInterfaceIpv4` now iterates every matching address, prefers the
+first non-link-local one, and falls back to a link-local address only when it is the interface's
+only one (so a genuinely link-local-only segment still scans). The predicate is
+`IedDiscoveryCidr_isLinkLocal` in the domain layer — pure arithmetic, unit-tested in
+`tests/ied_discovery/test_ied_discovery_cidr.c` alongside the new `IedDiscoveryCidr_prefixLength`.
+
+**Loopback is deliberately still selectable.** `127.0.0.1` is not link-local, so it is chosen
+outright; skipping loopback would have broken both `test_getInterfaceIpv4_succeeds_forLoopback` and
+`integration_tests/scan_orchestration/`, which sweeps `lo` specifically to assert its `/8` is
+rejected as `SUBNET_TOO_LARGE` — which requires resolving an address in the first place.
+
+**Why this took a full debugging cycle to find**: nothing in `ied_discovery` or
+`scan_orchestration` logged anything, and `scan_orchestration_worker.c` deliberately tolerates a
+NULL sweep result, so a sweep of the wrong subnet produced exactly the same observable output as a
+sweep of the right one with nothing on it. `IedDiscovery_scanSubnet` now prints one
+`[scan] sweeping 192.168.1.0/24 on enp34s0 (253 hosts)` line per sweep, matching `main.c`'s
+existing `[scan] found ...` convention. The daemon's stdout is inherited by the supervising API
+process (`cmd.Stdout = os.Stdout`), so this reaches the journal under the API's systemd unit.
+
+The multi-address selection itself is not unit-testable — it needs a real interface carrying two
+IPv4 addresses, which no hermetic test can conjure. `tests/ied_discovery/test_ied_discovery_netif.c`
+keeps its `lo` cases as the guard that the rewritten loop still resolves an ordinary
+single-address interface, and names the gap in a comment.

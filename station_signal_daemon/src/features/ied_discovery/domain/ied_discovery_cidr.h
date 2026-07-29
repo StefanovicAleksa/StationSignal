@@ -2,6 +2,7 @@
 #define IED_DISCOVERY_CIDR_H_
 
 #include <stdint.h>
+#include "stdbool_compat.h"
 #include "linked_list.h"
 
 /*
@@ -20,6 +21,21 @@ IedDiscoveryCidr_broadcastAddress(uint32_t address, uint32_t netmask);
 /* Usable hosts strictly between network and broadcast; 0 for /31 and /32. */
 uint32_t
 IedDiscoveryCidr_hostCount(uint32_t netmask);
+
+/*
+ * True for the IPv4 link-local block 169.254.0.0/16 (RFC 3927). Used by the
+ * data layer to decide which of an interface's addresses to derive a sweep
+ * range from: every box in this deployment permanently carries a fixed
+ * 169.254.1.1/24 recovery address alongside its real static IP (see
+ * deploy/setup.sh), so "the interface's address" is genuinely ambiguous and
+ * sweeping the link-local one finds nothing.
+ */
+bool
+IedDiscoveryCidr_isLinkLocal(uint32_t address);
+
+/* Set bits in a contiguous netmask, i.e. 0xFFFFFF00 -> 24. Diagnostics only. */
+uint32_t
+IedDiscoveryCidr_prefixLength(uint32_t netmask);
 
 /*
  * Every address strictly between network and broadcast, excluding
