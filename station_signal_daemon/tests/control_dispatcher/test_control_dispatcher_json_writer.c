@@ -26,7 +26,7 @@ tearDown(void) {
 
 void
 test_writeStartSuccess_hasExpectedShape(void) {
-    fixtureJson = ControlDispatcherJsonWriter_writeStartSuccess("req-1", 3, 9001);
+    fixtureJson = ControlDispatcherJsonWriter_writeStartSuccess("req-1", 3, 9001, true, false);
     TEST_ASSERT_NOT_NULL(fixtureJson);
 
     fixtureParsed = cJSON_Parse(fixtureJson);
@@ -44,6 +44,8 @@ test_writeStartSuccess_hasExpectedShape(void) {
      * test_ipc_dispatcher_value_codec.c already uses. */
     TEST_ASSERT_TRUE(3 == cJSON_GetObjectItemCaseSensitive(result, "deviceId")->valuedouble);
     TEST_ASSERT_TRUE(9001 == cJSON_GetObjectItemCaseSensitive(result, "wsPort")->valuedouble);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result, "mmsAvailable")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(result, "gooseAvailable")));
 }
 
 void

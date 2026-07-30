@@ -101,6 +101,15 @@ export interface DeviceSummary {
   mmsPort: number
   interfaceId: string
   wsPort: number
+  mmsAvailable: boolean
+  gooseAvailable: boolean
+}
+
+export interface StartDeviceResponse {
+  deviceId: number
+  wsPort: number
+  mmsAvailable: boolean
+  gooseAvailable: boolean
 }
 
 export interface Quality {

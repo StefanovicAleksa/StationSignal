@@ -72,11 +72,22 @@ after the API itself has just started.
 **Success (`201 Created`):**
 
 ```json
-{ "deviceId": 1, "wsPort": 9000 }
+{ "deviceId": 1, "wsPort": 9000, "mmsAvailable": true, "gooseAvailable": true }
 ```
 
 `deviceId` identifies this session for `DELETE`/streaming. `wsPort` is an internal daemon
 port — **ignore it**, you don't connect to it; use `/ws/devices/{deviceId}` instead (§4).
+
+`mmsAvailable`/`gooseAvailable` report which of MMS reporting / GOOSE subscription this
+device's SCL actually declares — **a device only needs one of the two**, not both. A device
+whose SCL has no `<ReportControl>` blocks starts with `mmsAvailable: false` (only GOOSE frames
+will ever arrive on its stream); one with no `<GSEControl>` blocks starts with
+`gooseAvailable: false` (only MMS reports will ever arrive). Neither case is an error — treat a
+`false` here as a warning ("this device doesn't report over MMS/GOOSE"), not a failure. Only a
+device with **neither** fails to start at all (see `ORCHESTRATION_FAILED` below, stage "no
+capabilities"). These same two fields are also included per-device in `GET /api/devices` (§2
+below), so a page reload/reconnect learns about a single-protocol device too, not just the
+original `POST` response.
 
 **Multiple sessions can watch the same physical device.** If another browser session already
 has `host`/`mmsPort` active, this call attaches your session to that same device instead of
@@ -92,10 +103,12 @@ every attached session has called it; until then it just detaches your own sessi
 
 ```json
 [
-  { "deviceId": 1, "host": "10.0.0.5", "mmsPort": 102, "interfaceId": "eth0", "wsPort": 9000 }
+  { "deviceId": 1, "host": "10.0.0.5", "mmsPort": 102, "interfaceId": "eth0", "wsPort": 9000,
+    "mmsAvailable": true, "gooseAvailable": true }
 ]
 ```
-Empty array (`[]`), not `null`, when nothing is active.
+Empty array (`[]`), not `null`, when nothing is active. `mmsAvailable`/`gooseAvailable` have the
+same meaning as on `POST /api/devices` above.
 
 ### Errors (all three endpoints)
 
@@ -252,7 +265,11 @@ Every REST error response has this shape:
 
 `stage`/`detail` are only ever non-null for `code: "ORCHESTRATION_FAILED"` — `stage` is the
 pipeline stage that failed, `detail` is further context if `stage == "SCL bootstrap"` (e.g. no
-reachable host, auth rejected, no SCL file found).
+reachable host, auth rejected, no SCL file found). One `stage` value worth calling out:
+`"no capabilities"` means the device's SCL declares neither `<ReportControl>` nor `<GSEControl>`
+blocks at all — nothing to monitor, a genuine error. Contrast this with `mmsAvailable`/
+`gooseAvailable` being `false` on a **successful** `POST /api/devices` (§2 above), which means
+the device has only one of the two, not neither — that case is not an error.
 
 | HTTP status | `error.code` | Meaning |
 |---|---|---|

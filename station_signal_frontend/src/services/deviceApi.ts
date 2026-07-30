@@ -1,8 +1,8 @@
 import { apiClient } from './apiClient'
-import type { DeviceSummary, StartDeviceRequest } from '@/types/api'
+import type { DeviceSummary, StartDeviceRequest, StartDeviceResponse } from '@/types/api'
 
-export function startReporting(request: StartDeviceRequest): Promise<{ deviceId: number; wsPort: number }> {
-  return apiClient.post<{ deviceId: number; wsPort: number }>('/devices', request)
+export function startReporting(request: StartDeviceRequest): Promise<StartDeviceResponse> {
+  return apiClient.post<StartDeviceResponse>('/devices', request)
 }
 
 export function stopReporting(deviceId: number): Promise<{ deviceId: number }> {

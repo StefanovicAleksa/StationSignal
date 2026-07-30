@@ -21,6 +21,16 @@ const emit = defineEmits<{
 
 const reports = computed(() => [...props.device.reports].reverse())
 
+const capabilityWarning = computed(() => {
+  if (!props.device.mmsAvailable) {
+    return 'This device has no MMS report control blocks in its SCL — only GOOSE will be shown here.'
+  }
+  if (!props.device.gooseAvailable) {
+    return 'This device has no GOOSE control blocks in its SCL — only MMS reports will be shown here.'
+  }
+  return null
+})
+
 const phaseLabel: Record<string, string> = {
   connecting: 'Connecting…',
   connected: 'Connected',
@@ -75,6 +85,13 @@ function displayValue(value: string | boolean | number | null): string {
       class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300"
     >
       {{ formatApiErrorDetail(device.error) }}
+    </p>
+
+    <p
+      v-if="capabilityWarning"
+      class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+    >
+      {{ capabilityWarning }}
     </p>
 
     <Table>

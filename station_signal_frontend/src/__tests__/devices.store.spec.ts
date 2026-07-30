@@ -26,7 +26,7 @@ describe('useDevicesStore', () => {
   })
 
   it('starts reporting on a new device and tracks it as connecting', async () => {
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
 
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
@@ -38,7 +38,9 @@ describe('useDevicesStore', () => {
   })
 
   it('adds an optimistic entry synchronously, before the REST call resolves', async () => {
-    let resolveStart: ((value: { deviceId: number; wsPort: number }) => void) | undefined
+    let resolveStart:
+      | ((value: { deviceId: number; wsPort: number; mmsAvailable: boolean; gooseAvailable: boolean }) => void)
+      | undefined
     vi.mocked(startReporting).mockReturnValue(
       new Promise((resolve) => {
         resolveStart = resolve
@@ -53,14 +55,14 @@ describe('useDevicesStore', () => {
     expect(store.devices[key!]?.phase).toBe('connecting')
     expect(store.devices[key!]?.deviceId).toBeNull()
 
-    resolveStart?.({ deviceId: 1, wsPort: 9000 })
+    resolveStart?.({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     await promise
 
     expect(store.devices[key!]?.deviceId).toBe(1)
   })
 
   it('returns the existing device key instead of re-starting a matching host+port', async () => {
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const firstKey = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -74,7 +76,9 @@ describe('useDevicesStore', () => {
     vi.mocked(startReporting).mockRejectedValue(
       new ApiError({ code: 'HOST_ALREADY_RUNNING', message: 'already running', stage: null, detail: null }, 409),
     )
-    vi.mocked(listDevices).mockResolvedValue([{ deviceId: 7, host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0', wsPort: 9000 }])
+    vi.mocked(listDevices).mockResolvedValue([
+      { deviceId: 7, host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0', wsPort: 9000, mmsAvailable: true, gooseAvailable: true },
+    ])
     const store = useDevicesStore()
 
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
@@ -89,7 +93,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -118,7 +122,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -145,7 +149,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -181,7 +185,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -207,7 +211,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -261,7 +265,7 @@ describe('useDevicesStore', () => {
       .mockRejectedValueOnce(
         new ApiError({ code: 'AUTH_REQUIRED', message: 'the device requires ACSE authentication', stage: null, detail: null }, 401),
       )
-      .mockResolvedValueOnce({ deviceId: 1, wsPort: 9000 })
+      .mockResolvedValueOnce({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
 
     await expect(store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })).rejects.toMatchObject({
@@ -289,7 +293,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
     expect(store.devices[key]?.phase).toBe('connecting')
@@ -301,7 +305,7 @@ describe('useDevicesStore', () => {
   })
 
   it('stopDevice tears down the socket and removes the device', async () => {
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     vi.mocked(stopReporting).mockResolvedValue({ deviceId: 1 })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
@@ -313,7 +317,9 @@ describe('useDevicesStore', () => {
   })
 
   it('stopDevice on a still-pending (no real deviceId) entry skips the REST call', async () => {
-    let resolveStart: ((value: { deviceId: number; wsPort: number }) => void) | undefined
+    let resolveStart:
+      | ((value: { deviceId: number; wsPort: number; mmsAvailable: boolean; gooseAvailable: boolean }) => void)
+      | undefined
     vi.mocked(startReporting).mockReturnValue(
       new Promise((resolve) => {
         resolveStart = resolve
@@ -328,7 +334,7 @@ describe('useDevicesStore', () => {
     expect(store.devices[key]).toBeUndefined()
     expect(stopReporting).not.toHaveBeenCalled()
 
-    resolveStart?.({ deviceId: 1, wsPort: 9000 })
+    resolveStart?.({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     await startPromise
     expect(stopReporting).toHaveBeenCalledWith(1)
   })
@@ -339,7 +345,7 @@ describe('useDevicesStore', () => {
       capturedOnMessage = handlers.onMessage
       return { connect: vi.fn(), disconnect: vi.fn() }
     })
-    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const store = useDevicesStore()
     const key = await store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
 
@@ -362,7 +368,9 @@ describe('useDevicesStore', () => {
   })
 
   it('reconcileOnLoad adds devices returned by the API that are not yet tracked', async () => {
-    vi.mocked(listDevices).mockResolvedValue([{ deviceId: 3, host: '10.0.0.9', mmsPort: 102, interfaceId: 'eth1', wsPort: 9001 }])
+    vi.mocked(listDevices).mockResolvedValue([
+      { deviceId: 3, host: '10.0.0.9', mmsPort: 102, interfaceId: 'eth1', wsPort: 9001, mmsAvailable: true, gooseAvailable: true },
+    ])
     const store = useDevicesStore()
 
     await store.reconcileOnLoad()

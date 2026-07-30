@@ -13,14 +13,14 @@ import { startReporting, stopReporting, listDevices } from '@/services/deviceApi
 
 describe('deviceApi', () => {
   it('startReporting posts to /devices with the request body', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(apiClient.post).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const result = await startReporting({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
     expect(apiClient.post).toHaveBeenCalledWith('/devices', { host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
-    expect(result).toEqual({ deviceId: 1, wsPort: 9000 })
+    expect(result).toEqual({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
   })
 
   it('startReporting forwards acseAuthPassword when retrying a password-protected device', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ deviceId: 1, wsPort: 9000 })
+    vi.mocked(apiClient.post).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     await startReporting({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0', acseAuthPassword: 'secret123' })
     expect(apiClient.post).toHaveBeenCalledWith('/devices', {
       host: '10.0.0.5',

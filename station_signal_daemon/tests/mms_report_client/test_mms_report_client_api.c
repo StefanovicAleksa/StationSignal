@@ -103,7 +103,7 @@ test_start_error_whenNoReportTargets(void) {
     TEST_ASSERT_NOT_NULL(client);
 
     MmsReportClientError startError = MmsReportClient_start(client);
-    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT, startError);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_ERR_NO_TARGETS, startError);
 
     MmsReportClient_destroy(client);
 }

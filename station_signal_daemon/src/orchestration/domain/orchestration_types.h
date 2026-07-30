@@ -37,9 +37,13 @@ typedef enum {
     ORCHESTRATION_ERR_MODEL_LOAD_FAILED,
     ORCHESTRATION_ERR_REPORT_CLIENT_FAILED,
     ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED,
-    ORCHESTRATION_ERR_ONLINE_DISCOVERY_FAILED /* Orchestration_runFromOnlineDiscovery only - the
+    ORCHESTRATION_ERR_ONLINE_DISCOVERY_FAILED, /* Orchestration_runFromOnlineDiscovery only - the
                                                   live device never gave up a usable model at all
                                                   (connect failure or zero logical devices) */
+    ORCHESTRATION_ERR_NO_CAPABILITIES /* SCL declared zero <ReportControl> AND zero <GSEControl>
+                                          blocks for this IED - nothing to monitor at all. A
+                                          device with only one of the two is NOT this error; see
+                                          runFromIedModelHandle's own comment. */
 } OrchestrationError;
 
 typedef enum {
@@ -55,7 +59,10 @@ typedef enum {
                                               BOOTSTRAP/STAGING/MODEL_LOAD for that entry point,
                                               since there's no SCL file to fetch/stage/parse at all */
     ORCHESTRATION_STAGE_REPORT_CLIENT_START,
-    ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START
+    ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START,
+    ORCHESTRATION_STAGE_NO_CAPABILITIES /* both REPORT_CLIENT_START and GOOSE_SUBSCRIBER_START
+                                            ended in their respective "no targets" case - nothing
+                                            left to monitor */
 } OrchestrationStage;
 
 /*

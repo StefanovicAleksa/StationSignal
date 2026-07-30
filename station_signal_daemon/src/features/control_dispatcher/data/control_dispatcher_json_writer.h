@@ -2,6 +2,7 @@
 #define CONTROL_DISPATCHER_JSON_WRITER_H_
 
 #include <stdint.h>
+#include "stdbool_compat.h"
 
 /*
  * Builds this feature's outbound JSON response envelope (stable contract -
@@ -14,8 +15,17 @@
  * cJSON allocation failure only (extremely unlikely).
  */
 
+/*
+ * mmsAvailable/gooseAvailable report which of MMS reporting / GOOSE
+ * subscription this device's SCL actually declared targets for - a device
+ * with only one of the two now still succeeds START_REPORTING (see
+ * orchestration's own ORCHESTRATION_ERR_NO_CAPABILITIES doc comment), so the
+ * caller (frontend, via the API) needs this to know which stream(s) to
+ * expect data on.
+ */
 char*
-ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t deviceId, uint16_t wsPort);
+ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t deviceId, uint16_t wsPort,
+        bool mmsAvailable, bool gooseAvailable);
 
 char*
 ControlDispatcherJsonWriter_writeStopSuccess(const char* requestId, uint64_t deviceId);

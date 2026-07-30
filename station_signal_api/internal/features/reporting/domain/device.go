@@ -39,12 +39,18 @@ func EffectiveMMSPort(mmsPort int) int {
 // shape controllers/rest serializes directly — StartParams is excluded since it's only
 // needed internally for crash re-arm.
 type Device struct {
-	ID          int         `json:"deviceId"`
-	Host        string      `json:"host"`
-	MMSPort     int         `json:"mmsPort"`
-	InterfaceID string      `json:"interfaceId"`
-	WSPort      int         `json:"wsPort"`
-	StartParams StartParams `json:"-"`
+	ID          int    `json:"deviceId"`
+	Host        string `json:"host"`
+	MMSPort     int    `json:"mmsPort"`
+	InterfaceID string `json:"interfaceId"`
+	WSPort      int    `json:"wsPort"`
+	// MMSAvailable/GooseAvailable report which of MMS reporting / GOOSE subscription this
+	// device's SCL actually declared targets for — a device declaring only one of the two
+	// still starts successfully (see the daemon's own ORCHESTRATION_ERR_NO_CAPABILITIES),
+	// so the frontend needs this to know which stream(s) to expect data on.
+	MMSAvailable   bool        `json:"mmsAvailable"`
+	GooseAvailable bool        `json:"gooseAvailable"`
+	StartParams    StartParams `json:"-"`
 	// SessionID is the browser session that started reporting on this device (see
 	// internal/core/session) — not daemon-facing, only used to scope this API's own
 	// List/Stream/Stop to their owner.

@@ -35,9 +35,10 @@ deviceManagerErrorToMessage(DeviceManagerError err) {
 
 static char*
 buildStartResponse(const char* requestId, DeviceManagerError err, uint64_t deviceId, uint16_t wsPort,
-        const DeviceManagerErrorDetail* detail) {
+        const DeviceManagerErrorDetail* detail, bool mmsAvailable, bool gooseAvailable) {
     if (err == DEVICE_MANAGER_OK) {
-        return ControlDispatcherJsonWriter_writeStartSuccess(requestId, deviceId, wsPort);
+        return ControlDispatcherJsonWriter_writeStartSuccess(requestId, deviceId, wsPort, mmsAvailable,
+                gooseAvailable);
     }
 
     const char* stage = NULL;
@@ -119,12 +120,15 @@ ControlDispatcherUseCases_processRequest(const ControlRequest* request, DeviceMa
         case CONTROL_REQ_START_REPORTING: {
             uint64_t deviceId = 0;
             uint16_t wsPort = 0;
+            bool mmsAvailable = false;
+            bool gooseAvailable = false;
             DeviceManagerErrorDetail detail;
             DeviceManagerError err = DeviceManager_startReporting(deviceManager, request->host, request->mmsPort,
                     request->iedName, request->interfaceId, request->sclFilePath, request->acseAuthPassword,
-                    request->accessMode, &deviceId, &wsPort, &detail);
+                    request->accessMode, &deviceId, &wsPort, &detail, &mmsAvailable, &gooseAvailable);
 
-            return buildStartResponse(request->requestId, err, deviceId, wsPort, &detail);
+            return buildStartResponse(request->requestId, err, deviceId, wsPort, &detail, mmsAvailable,
+                    gooseAvailable);
         }
 
         case CONTROL_REQ_STOP_REPORTING: {

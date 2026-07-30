@@ -59,7 +59,8 @@ DeviceManagerError
 DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, const char* sclFilePath,
         const char* acseAuthPassword, AccessMode accessMode,
-        uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail) {
+        uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail,
+        bool* outMmsAvailable, bool* outGooseAvailable) {
     clearDetail(outDetail);
 
     if (!handle || isEmpty(host) || isEmpty(interfaceId) || !outDeviceId || !outWsPort) {
@@ -115,7 +116,8 @@ DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int m
     OrchestrationErrorDetail detail;
     memset(&detail, 0, sizeof(detail));
     OrchestrationError runError = DeviceManagerBootstrapPolicy_run(orchestrationHandle, host, mmsPort,
-            effectiveIedName, interfaceId, effectiveSclFilePath, effectiveAcseAuthPassword, accessMode, &detail);
+            effectiveIedName, interfaceId, effectiveSclFilePath, effectiveAcseAuthPassword, accessMode, &detail,
+            outMmsAvailable, outGooseAvailable);
 
     if (runError != ORCHESTRATION_OK) {
         Orchestration_destroy(orchestrationHandle);

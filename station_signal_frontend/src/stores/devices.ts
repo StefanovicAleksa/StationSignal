@@ -41,6 +41,12 @@ export interface WatchedDevice {
   error: DeviceError | null
   reports: DeviceReport[]
   lastMessageAtMs: number | null
+  // Which of MMS reporting / GOOSE subscription this device's SCL actually declares - a
+  // device only needs one of the two, not both (see api.ts's own StartDeviceResponse doc).
+  // Default true/true until a start/list response sets them, so nothing flashes a spurious
+  // warning before the real value is known.
+  mmsAvailable: boolean
+  gooseAvailable: boolean
 }
 
 const MAX_REPORTS = 500
@@ -147,6 +153,8 @@ export const useDevicesStore = defineStore('devices', () => {
       error: null,
       reports: existing?.reports ?? [],
       lastMessageAtMs: existing?.lastMessageAtMs ?? null,
+      mmsAvailable: existing?.mmsAvailable ?? true,
+      gooseAvailable: existing?.gooseAvailable ?? true,
     }
 
     try {
@@ -159,6 +167,8 @@ export const useDevicesStore = defineStore('devices', () => {
         return key
       }
       current.deviceId = response.deviceId
+      current.mmsAvailable = response.mmsAvailable
+      current.gooseAvailable = response.gooseAvailable
       connectDeviceSocket(key, response.deviceId)
       return key
     } catch (err) {
@@ -168,6 +178,8 @@ export const useDevicesStore = defineStore('devices', () => {
         const current = devices.value[key]
         if (match && current) {
           current.deviceId = match.deviceId
+          current.mmsAvailable = match.mmsAvailable
+          current.gooseAvailable = match.gooseAvailable
           connectDeviceSocket(key, match.deviceId)
           return key
         }
@@ -241,6 +253,8 @@ export const useDevicesStore = defineStore('devices', () => {
           error: null,
           reports: [],
           lastMessageAtMs: null,
+          mmsAvailable: summary.mmsAvailable,
+          gooseAvailable: summary.gooseAvailable,
         }
         connectDeviceSocket(key, summary.deviceId)
       }

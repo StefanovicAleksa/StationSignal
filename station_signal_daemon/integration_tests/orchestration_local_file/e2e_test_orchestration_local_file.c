@@ -234,11 +234,15 @@ test_localFile_enablesRptEnabledMaxInstanceRcb_usingSuffixedReference(void) {
     Orchestration_setGooseStatusCallback(handle, onGooseStatus, NULL);
 
     OrchestrationErrorDetail detail;
+    bool mmsAvailable = false;
+    bool gooseAvailable = false;
     OrchestrationError runError = Orchestration_runFromLocalFile(handle, FIXTURE_PATH, "127.0.0.1", TEST_PORT,
-            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail);
+            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, &mmsAvailable, &gooseAvailable);
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
             "Orchestration_runFromLocalFile failed - if stage==GOOSE_SUBSCRIBER_START, this test needs "
             "CAP_NET_RAW (run with sudo)");
+    TEST_ASSERT_TRUE_MESSAGE(mmsAvailable, "fixture declares <ReportControl> - mmsAvailable should be true");
+    TEST_ASSERT_TRUE_MESSAGE(gooseAvailable, "fixture declares <GSEControl> - gooseAvailable should be true");
 
     int ws = connectAndUpgrade(TEST_WS_PORT);
     TEST_ASSERT_TRUE_MESSAGE(ws >= 0, "websocket handshake to orchestration's own ipc_dispatcher failed");

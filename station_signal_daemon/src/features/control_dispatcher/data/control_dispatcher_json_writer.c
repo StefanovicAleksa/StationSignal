@@ -27,7 +27,8 @@ finish(cJSON* root) {
 }
 
 char*
-ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t deviceId, uint16_t wsPort) {
+ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t deviceId, uint16_t wsPort,
+        bool mmsAvailable, bool gooseAvailable) {
     cJSON* root = newEnvelope(requestId, "START_REPORTING", true);
     if (!root) return NULL;
 
@@ -35,6 +36,8 @@ ControlDispatcherJsonWriter_writeStartSuccess(const char* requestId, uint64_t de
     if (result) {
         cJSON_AddNumberToObject(result, "deviceId", (double) deviceId);
         cJSON_AddNumberToObject(result, "wsPort", (double) wsPort);
+        cJSON_AddBoolToObject(result, "mmsAvailable", mmsAvailable);
+        cJSON_AddBoolToObject(result, "gooseAvailable", gooseAvailable);
     }
     cJSON_AddNullToObject(root, "error");
 

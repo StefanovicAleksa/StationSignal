@@ -56,12 +56,14 @@ func (g *daemonGateway) Start(ctx context.Context, params domain.StartParams) (d
 	}
 
 	device := domain.Device{
-		ID:          result.DeviceID,
-		Host:        params.Host,
-		MMSPort:     domain.EffectiveMMSPort(params.MMSPort),
-		InterfaceID: params.InterfaceID,
-		WSPort:      result.WSPort,
-		StartParams: params,
+		ID:             result.DeviceID,
+		Host:           params.Host,
+		MMSPort:        domain.EffectiveMMSPort(params.MMSPort),
+		InterfaceID:    params.InterfaceID,
+		WSPort:         result.WSPort,
+		MMSAvailable:   result.MMSAvailable,
+		GooseAvailable: result.GooseAvailable,
+		StartParams:    params,
 	}
 	hub := streamrelay.NewHub(g.hubCtx, fmt.Sprintf("ws://127.0.0.1:%d", result.WSPort), g.logger)
 	return device, hub, nil

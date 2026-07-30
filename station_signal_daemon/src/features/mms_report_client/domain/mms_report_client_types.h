@@ -21,7 +21,9 @@ typedef enum {
     MMS_REPORT_CLIENT_OK = 0,
     MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT,
     MMS_REPORT_CLIENT_ERR_OUT_OF_MEMORY,
-    MMS_REPORT_CLIENT_ERR_THREAD_CREATE_FAILED
+    MMS_REPORT_CLIENT_ERR_THREAD_CREATE_FAILED,
+    MMS_REPORT_CLIENT_ERR_NO_TARGETS /* SCL declared zero <ReportControl> blocks for this IED -
+                                         mirrors GOOSE_SUBSCRIBER_ERR_NO_TARGETS */
 } MmsReportClientError;
 
 typedef enum {

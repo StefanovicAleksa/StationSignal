@@ -399,7 +399,7 @@ MmsReportClient_start(MmsReportClientHandle client) {
             LinkedList_destroyDeep(client->targets, IedModel_destroyReportControlBlockTarget);
         }
         client->targets = NULL;
-        return MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT;
+        return MMS_REPORT_CLIENT_ERR_NO_TARGETS;
     }
 
     client->memberRefCache = buildMemberRefCache(client);

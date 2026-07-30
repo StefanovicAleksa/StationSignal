@@ -73,12 +73,21 @@ DeviceManager_create(const DeviceManagerConfig* config, DeviceManagerError* outE
  * given, since Orchestration_runFromLocalFile's own auto-detect would still
  * technically work, but this feature's own explicit contract makes it
  * mandatory instead.
+ *
+ * outMmsAvailable/outGooseAvailable are optional (NULL-safe) and, on
+ * DEVICE_MANAGER_OK, report which of MMS reporting / GOOSE subscription this
+ * device's SCL actually declared targets for - see
+ * Orchestration_run's own doc comment for the full contract. A device
+ * declaring only one of the two now still succeeds; only a device declaring
+ * neither fails (DEVICE_MANAGER_ERR_ORCHESTRATION_FAILED with
+ * outDetail->orchestrationError == ORCHESTRATION_ERR_NO_CAPABILITIES).
  */
 DeviceManagerError
 DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, const char* sclFilePath,
         const char* acseAuthPassword, AccessMode accessMode,
-        uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail);
+        uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail,
+        bool* outMmsAvailable, bool* outGooseAvailable);
 
 /*
  * Blocking. Looks up deviceId (short lock, atomic remove so a concurrent

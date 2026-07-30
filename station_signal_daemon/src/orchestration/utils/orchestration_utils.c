@@ -25,6 +25,7 @@ OrchestrationUtils_errorToString(OrchestrationError err) {
         case ORCHESTRATION_ERR_MODEL_LOAD_FAILED: return "IED model load failed";
         case ORCHESTRATION_ERR_REPORT_CLIENT_FAILED: return "MMS report client start failed";
         case ORCHESTRATION_ERR_GOOSE_SUBSCRIBER_FAILED: return "GOOSE subscriber start failed";
+        case ORCHESTRATION_ERR_NO_CAPABILITIES: return "device has neither MMS report control blocks nor GOOSE control blocks";
         default: return "unknown orchestration error";
     }
 }
@@ -41,6 +42,7 @@ OrchestrationUtils_stageToString(OrchestrationStage stage) {
         case ORCHESTRATION_STAGE_ONLINE_DISCOVERY: return "online discovery";
         case ORCHESTRATION_STAGE_REPORT_CLIENT_START: return "MMS report client start";
         case ORCHESTRATION_STAGE_GOOSE_SUBSCRIBER_START: return "GOOSE subscriber start";
+        case ORCHESTRATION_STAGE_NO_CAPABILITIES: return "no capabilities";
         default: return "unknown orchestration stage";
     }
 }

@@ -64,7 +64,7 @@ startTaskRun(void* param) {
     StartTask* task = (StartTask*) param;
     task->result = DeviceManager_startReporting(task->deviceManager, task->host, task->mmsPort, IED_NAME,
             TEST_INTERFACE, NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &task->deviceId, &task->wsPort,
-            &task->detail);
+            &task->detail, NULL, NULL);
     task->done = true;
     return NULL;
 }
@@ -355,7 +355,8 @@ test_twoConcurrentDevices_independentPortsAndReporting_thenStopAndPortReuse(void
     uint16_t wsPortC;
     DeviceManagerErrorDetail detailC;
     DeviceManagerError startErrC = DeviceManager_startReporting(fixtureDeviceManager, "127.0.0.1", TEST_PORT_A,
-            IED_NAME, TEST_INTERFACE, NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceIdC, &wsPortC, &detailC);
+            IED_NAME, TEST_INTERFACE, NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceIdC, &wsPortC, &detailC,
+            NULL, NULL);
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK, startErrC);
     TEST_ASSERT_TRUE_MESSAGE(wsPortC == taskA.wsPort || wsPortC == taskB.wsPort,
             "expected one of the two freed ports to be reused rather than growing the range");

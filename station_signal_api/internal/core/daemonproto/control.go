@@ -87,8 +87,10 @@ type StartReportingParams struct {
 
 // StartReportingResult is the result object on a successful START_REPORTING response.
 type StartReportingResult struct {
-	DeviceID int `json:"deviceId"`
-	WSPort   int `json:"wsPort"`
+	DeviceID       int  `json:"deviceId"`
+	WSPort         int  `json:"wsPort"`
+	MMSAvailable   bool `json:"mmsAvailable"`
+	GooseAvailable bool `json:"gooseAvailable"`
 }
 
 // StopReportingParams is the params object for a STOP_REPORTING request.

@@ -120,11 +120,21 @@ void Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
  * started first).
  *
  * outDetail is optional (NULL-safe), filled only on error.
+ *
+ * outMmsAvailable/outGooseAvailable are optional (NULL-safe) and, on
+ * ORCHESTRATION_OK, report which of the two protocols this device's SCL
+ * actually declared targets for. A device with SCL declaring zero
+ * <ReportControl> blocks (or zero <GSEControl> blocks) is no longer a fatal
+ * error on its own - that one protocol is simply skipped and the
+ * corresponding out-param is set false, while the other one still starts
+ * normally. Only a device with BOTH zero - nothing to monitor at all - fails,
+ * with ORCHESTRATION_ERR_NO_CAPABILITIES. Left unset (stale) on any other
+ * failure path.
  */
 OrchestrationError
 Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
         const char* iedName, const char* interfaceId, AccessMode accessMode,
-        OrchestrationErrorDetail* outDetail);
+        OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable);
 
 /*
  * Same end state as Orchestration_run, but skips scl_bootstrap/staging
@@ -147,11 +157,13 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
  * REPORT_CLIENT_START -> GOOSE_SUBSCRIBER_START) - BOOTSTRAP/STAGING stages
  * are simply never reached. Same fail-hard rollback contract, same
  * re-runnable-after-failure guarantee, same re-entrancy check.
+ *
+ * outMmsAvailable/outGooseAvailable: same contract as Orchestration_run's own.
  */
 OrchestrationError
 Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePath, const char* host,
         int mmsPort, const char* iedName, const char* interfaceId, AccessMode accessMode,
-        OrchestrationErrorDetail* outDetail);
+        OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable);
 
 /*
  * A THIRD way to obtain the model - for real, connectable IEC 61850 devices
@@ -196,11 +208,14 @@ Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePa
  * GOOSE_SUBSCRIBER_START. Same fail-hard rollback contract, same
  * re-runnable-after-failure guarantee, same re-entrancy check as the other
  * two entry points.
+ *
+ * outMmsAvailable/outGooseAvailable: same contract as Orchestration_run's own.
  */
 OrchestrationError
 Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, AccessMode accessMode,
-        const char* acseAuthPassword, OrchestrationErrorDetail* outDetail);
+        const char* acseAuthPassword, OrchestrationErrorDetail* outDetail,
+        bool* outMmsAvailable, bool* outGooseAvailable);
 
 /*
  * Stops goose_subscriber, then mms_report_client, then ipc_dispatcher (in

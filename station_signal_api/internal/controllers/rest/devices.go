@@ -52,7 +52,12 @@ func (a *API) handleStartReporting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{"deviceId": device.ID, "wsPort": device.WSPort})
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"deviceId":       device.ID,
+		"wsPort":         device.WSPort,
+		"mmsAvailable":   device.MMSAvailable,
+		"gooseAvailable": device.GooseAvailable,
+	})
 }
 
 func (a *API) handleStopReporting(w http.ResponseWriter, r *http.Request) {

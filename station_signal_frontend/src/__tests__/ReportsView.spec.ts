@@ -15,6 +15,8 @@ function device(overrides: Partial<WatchedDevice> & Pick<WatchedDevice, 'key' | 
     error: null,
     reports: [],
     lastMessageAtMs: null,
+    mmsAvailable: true,
+    gooseAvailable: true,
     ...overrides,
   }
 }
