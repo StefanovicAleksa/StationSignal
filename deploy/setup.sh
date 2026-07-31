@@ -199,6 +199,8 @@ echo "per-laptop setup (Windows 10/11, macOS, and Linux all resolve it natively)
 echo "Android browsers don't resolve .local names reliably — those can still reach the app via"
 echo "http://$BOX_IP directly (nginx's default_server)."
 echo ""
+echo "API + daemon logs (both interleaved): /var/log/station_signal/station-signal-api.log"
+echo ""
 echo "Verify:"
 echo "  On this box:   curl http://127.0.0.1:8080/api/health"
 echo "                 curl -H \"Host: $HOSTNAME_NAME\" http://127.0.0.1/"
