@@ -85,9 +85,21 @@ export const useDevicesStore = defineStore('devices', () => {
         if (!device) return
 
         if (message.type === 'CONNECTION_STATUS') {
-          // Diagnostic-only, can arrive after this device already looked "connected" - the
-          // report connection's own ACSE auth was rejected async (see ConnectionStatusMessage's
-          // own doc comment in types/api.ts for the honest ambiguity here).
+          if (message.status === 'CONNECTED') {
+            // Fires as soon as the MMS association itself succeeds - earlier and more honest
+            // than waiting for report data, which may never arrive (e.g. a device whose RCBs
+            // fail to enable reporting is still genuinely "connected").
+            if (device.phase === 'interrupted' || device.phase === 'connecting') {
+              device.phase = 'connected'
+              device.error = null
+            }
+            return
+          }
+
+          // CONNECTION_REJECTED - diagnostic-only, can arrive after this device already looked
+          // "connected" - the report connection's own ACSE auth was rejected async (see
+          // ConnectionStatusMessage's own doc comment in types/api.ts for the honest ambiguity
+          // here).
           device.phase = 'error'
           device.error = {
             code: 'AUTH_REQUIRED',

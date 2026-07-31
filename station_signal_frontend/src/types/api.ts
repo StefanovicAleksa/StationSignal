@@ -161,7 +161,7 @@ export interface GooseMessage extends DeviceStreamMessageBase {
 export interface ConnectionStatusMessage {
   schemaVersion: number
   type: 'CONNECTION_STATUS'
-  status: 'CONNECTION_REJECTED'
+  status: 'CONNECTION_REJECTED' | 'CONNECTED'
 }
 
 export type DeviceStreamMessage = MmsReportMessage | GooseMessage | ConnectionStatusMessage
