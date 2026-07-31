@@ -1,5 +1,7 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include "hal_thread.h"
+#include "hal_time.h"
 #include "features/control_dispatcher/data/control_dispatcher_worker.h"
 #include "features/control_dispatcher/domain/control_dispatcher_usecases.h"
 
@@ -31,8 +33,11 @@ workerLoop(void* parameter) {
         /* THE SLOW PART - the only place in this feature that may block for
          * seconds (SCL bootstrap over the network, MMS connect, or a scan's
          * own synchronous first-sweep dispatch). */
+        uint64_t requestStartMs = Hal_getTimeInMs();
         char* json = ControlDispatcherUseCases_processRequest(request, worker->deviceManager,
                 worker->scanOrchestration);
+        fprintf(stderr, "[control_dispatcher] request %s type=%d done (%llums)\n", request->requestId,
+                (int) request->type, (unsigned long long) (Hal_getTimeInMs() - requestStartMs));
         ControlDispatcherRequest_destroy(request);
 
         if (json) {

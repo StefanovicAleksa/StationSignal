@@ -1,9 +1,11 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include "features/scl_bootstrap/service/scl_bootstrap_api.h"
 #include "features/scl_bootstrap/data/scl_bootstrap_tcp_probe.h"
 #include "features/scl_bootstrap/data/scl_bootstrap_mms_session.h"
 #include "features/scl_bootstrap/domain/scl_bootstrap_usecases.h"
 #include "features/scl_bootstrap/utils/scl_bootstrap_utils.h"
+#include "hal_time.h"
 
 void
 SclBootstrapConfig_defaults(SclBootstrapConfig* config) {
@@ -56,12 +58,20 @@ SclBootstrap_scanAndFetch(SclBootstrapHandle handle, LinkedList hostList, int mm
         return NULL;
     }
 
+    uint64_t probeStartMs = Hal_getTimeInMs();
     bool* reachable = SclBootstrapTcpProbe_scan(hostList, mmsPort,
             handle->config.tcpProbeTimeoutMs, handle->config.maxConcurrentTcpProbes);
     if (!reachable) {
         if (outError) *outError = SCL_BOOTSTRAP_ERR_OUT_OF_MEMORY;
         return NULL;
     }
+
+    int reachableCount = 0;
+    for (int i = 0; i < LinkedList_size(hostList); i++) {
+        if (reachable[i]) reachableCount++;
+    }
+    fprintf(stderr, "[scl_bootstrap] tcp probe: %d/%d host(s) reachable (%llums)\n", reachableCount,
+            LinkedList_size(hostList), (unsigned long long) (Hal_getTimeInMs() - probeStartMs));
 
     LinkedList results = LinkedList_create();
     if (!results) {
@@ -84,7 +94,11 @@ SclBootstrap_scanAndFetch(SclBootstrapHandle handle, LinkedList hostList, int mm
             if (!reachable[index]) {
                 result->status = SCL_BOOTSTRAP_CANDIDATE_NO_MMS_SERVER;
             } else {
+                uint64_t candidateStartMs = Hal_getTimeInMs();
                 SclBootstrapMmsSession_run(result, &handle->config, handle->ownedAuthPassword);
+                fprintf(stderr, "[scl_bootstrap] candidate %s:%d done, status=%d (%llums)\n", result->host,
+                        result->port, (int) result->status,
+                        (unsigned long long) (Hal_getTimeInMs() - candidateStartMs));
             }
 
             LinkedList_add(results, result);

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include "features/scl_bootstrap/data/scl_bootstrap_mms_session.h"
 #include "features/scl_bootstrap/data/scl_bootstrap_auth.h"
@@ -5,6 +6,7 @@
 #include "features/scl_bootstrap/domain/scl_bootstrap_usecases.h"
 #include "features/scl_bootstrap/utils/scl_bootstrap_utils.h"
 #include "iec61850_client.h"
+#include "hal_time.h"
 
 /*
  * Recursively browses directoryName (NULL for root), returning a LinkedList
@@ -76,7 +78,10 @@ runSequenceOnce(SclBootstrapResult* result, const SclBootstrapConfig* config, co
     if (config->mmsRequestTimeoutMs > 0) IedConnection_setRequestTimeout(conn, config->mmsRequestTimeoutMs);
 
     IedClientError err = IED_ERROR_OK;
+    uint64_t connectStartMs = Hal_getTimeInMs();
     IedConnection_connect(conn, &err, result->host, result->port);
+    fprintf(stderr, "[scl_bootstrap] mms connect %s:%d -> %s (%llums)\n", result->host, result->port,
+            err == IED_ERROR_OK ? "ok" : "failed", (unsigned long long) (Hal_getTimeInMs() - connectStartMs));
 
     if (err != IED_ERROR_OK) {
         result->lastMmsError = err;
@@ -94,7 +99,11 @@ runSequenceOnce(SclBootstrapResult* result, const SclBootstrapConfig* config, co
     }
 
     IedClientError browseErr = IED_ERROR_OK;
+    uint64_t browseStartMs = Hal_getTimeInMs();
     LinkedList matches = browseDirectoryRecursive(conn, NULL, config->maxBrowseDepth, &browseErr);
+    fprintf(stderr, "[scl_bootstrap] %s:%d directory browse -> %s, %d match(es) (%llums)\n", result->host,
+            result->port, browseErr == IED_ERROR_OK ? "ok" : "failed", LinkedList_size(matches),
+            (unsigned long long) (Hal_getTimeInMs() - browseStartMs));
 
     if (browseErr != IED_ERROR_OK) {
         result->lastMmsError = browseErr;
@@ -122,7 +131,11 @@ runSequenceOnce(SclBootstrapResult* result, const SclBootstrapConfig* config, co
     SclBootstrapFileDownloadBuffer_init(&buffer);
 
     IedClientError downloadErr = IED_ERROR_OK;
+    uint64_t downloadStartMs = Hal_getTimeInMs();
     IedConnection_getFile(conn, &downloadErr, chosenCopy, SclBootstrapFileDownload_handler, &buffer);
+    fprintf(stderr, "[scl_bootstrap] %s:%d getFile '%s' -> %s, %lu byte(s) (%llums)\n", result->host,
+            result->port, chosenCopy, downloadErr == IED_ERROR_OK ? "ok" : "failed",
+            (unsigned long) buffer.size, (unsigned long long) (Hal_getTimeInMs() - downloadStartMs));
 
     if (downloadErr != IED_ERROR_OK) {
         result->lastMmsError = downloadErr;
