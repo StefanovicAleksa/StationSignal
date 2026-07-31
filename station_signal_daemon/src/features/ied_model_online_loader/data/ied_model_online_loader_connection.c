@@ -8,6 +8,7 @@
 #include "iec61850_common.h"
 #include "mms_type_spec.h"
 #include "mms_value.h"
+#include "hal_time.h"
 
 /* ---- small string helpers ---- */
 
@@ -473,7 +474,11 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
     }
 
     IedClientError err = IED_ERROR_OK;
+    uint64_t ldListStartMs = Hal_getTimeInMs();
     LinkedList ldNames = IedConnection_getLogicalDeviceList(conn, &err);
+    fprintf(stderr, "[ied_model_online_loader] LD list -> %s, %d LD(s) (%llums)\n",
+            ldNames ? "ok" : "failed", ldNames ? LinkedList_size(ldNames) : 0,
+            (unsigned long long) (Hal_getTimeInMs() - ldListStartMs));
     if (!ldNames || LinkedList_size(ldNames) == 0) {
         if (ldNames) LinkedList_destroyDeep(ldNames, free);
         if (outError) *outError = IED_MODEL_ONLINE_LOADER_ERR_NO_LOGICAL_DEVICES;
@@ -513,7 +518,11 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
         LogicalDevice* ld = LogicalDevice_create(ldName, model);
 
         IedClientError lnErr = IED_ERROR_OK;
+        uint64_t lnDirStartMs = Hal_getTimeInMs();
         LinkedList lnNames = IedConnection_getLogicalDeviceDirectory(conn, &lnErr, ldName);
+        fprintf(stderr, "[ied_model_online_loader] LD '%s' LN directory -> %s, %d LN(s) (%llums)\n",
+                ldName, lnNames ? "ok" : "failed", lnNames ? LinkedList_size(lnNames) : 0,
+                (unsigned long long) (Hal_getTimeInMs() - lnDirStartMs));
         if (lnNames) {
             LinkedList lnElement = LinkedList_getNext(lnNames);
             while (lnElement) {
@@ -522,10 +531,13 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
                 char* lnRef = buildLnRef(ldName, lnName);
 
                 if (lnRef) {
+                    uint64_t lnStartMs = Hal_getTimeInMs();
                     buildLogicalNodeDataModel(conn, lnRef, ln);
                     buildReportControlBlocks(conn, lnRef, ln, ACSI_CLASS_BRCB, true, builtDatasets);
                     buildReportControlBlocks(conn, lnRef, ln, ACSI_CLASS_URCB, false, builtDatasets);
                     buildGooseControlBlocks(conn, lnRef, ln, builtDatasets);
+                    fprintf(stderr, "[ied_model_online_loader] LN '%s' built (%llums)\n", lnRef,
+                            (unsigned long long) (Hal_getTimeInMs() - lnStartMs));
                     free(lnRef);
                 }
 
@@ -569,14 +581,21 @@ IedModelOnlineLoaderConnection_connectAndBuild(const char* host, int port, const
     IedModelOnlineLoaderAuth_configurePasswordAuth(conn, acseAuthPassword);
 
     IedClientError connectErr = IED_ERROR_OK;
+    uint64_t connectStartMs = Hal_getTimeInMs();
     IedConnection_connect(conn, &connectErr, host, port);
+    fprintf(stderr, "[ied_model_online_loader] mms connect %s:%d -> %s (%llums)\n", host, port,
+            connectErr == IED_ERROR_OK ? "ok" : "failed",
+            (unsigned long long) (Hal_getTimeInMs() - connectStartMs));
     if (connectErr != IED_ERROR_OK) {
         IedConnection_destroy(conn);
         if (outError) *outError = IED_MODEL_ONLINE_LOADER_ERR_CONNECT_FAILED;
         return NULL;
     }
 
+    uint64_t buildStartMs = Hal_getTimeInMs();
     IedModel* model = IedModelOnlineLoaderConnection_build(conn, iedName, config, outError);
+    fprintf(stderr, "[ied_model_online_loader] %s:%d discovery build done, model=%s (%llums)\n", host,
+            port, model ? "ok" : "failed", (unsigned long long) (Hal_getTimeInMs() - buildStartMs));
 
     /* One-shot: nothing to keep this association open for once discovery is
      * done (or has failed) - unlike mms_report_client's long-lived
