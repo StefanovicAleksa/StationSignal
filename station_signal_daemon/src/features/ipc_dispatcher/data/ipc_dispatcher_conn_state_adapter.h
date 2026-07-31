@@ -8,11 +8,12 @@
  * Real logic behind IpcDispatcher_onConnStateChange (service/ipc_dispatcher_api.c
  * is a thin wrapper delegating here, matching ipc_dispatcher_mms_adapter.c/
  * ipc_dispatcher_goose_adapter.c's own delegation pattern). Builds the
- * CONNECTION_STATUS JSON (IpcDispatcherJsonWriter_writeConnectionStatus) and
- * enqueues it onto the ring buffer if non-NULL - no-op for every state other
- * than MMS_REPORT_CLIENT_CONNECTION_REJECTED (see that writer function's own
- * doc comment). Fast, non-blocking, safe to call from mms_report_client's
- * reconnect-supervisor thread, same contract as the report/GOOSE adapters.
+ * CONNECTION_STATUS JSON (IpcDispatcherJsonWriter_writeConnectionStatus),
+ * updates the ws server's retained copy, and enqueues it onto the ring
+ * buffer - no-op for every state that writer doesn't build JSON for (see
+ * that function's own doc comment). Fast, non-blocking, safe to call from
+ * mms_report_client's reconnect-supervisor thread, same contract as the
+ * report/GOOSE adapters.
  */
 void
 IpcDispatcherConnStateAdapter_handleConnStateChange(IpcDispatcherHandle handle, MmsReportClientConnState state);

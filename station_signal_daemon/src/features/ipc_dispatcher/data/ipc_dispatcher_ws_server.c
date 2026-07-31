@@ -13,6 +13,8 @@
  * turn and let lws handle the rest. */
 typedef struct {
     uint64_t cursor;
+    bool retainedStatusSent; /* has this connection already been sent the retained connection
+                                 status (if any existed) since it was established? */
 } IpcDispatcherSession;
 
 struct sIpcDispatcherWsServer {
@@ -24,6 +26,11 @@ struct sIpcDispatcherWsServer {
                                             explicitly assigned */
     int maxConnections;
     int currentConnections;
+
+    char* retainedConnStatusJson; /* owned, NULL until the first real connection-status event;
+                                      see IpcDispatcherWsServer_setRetainedConnStatus's own doc
+                                      comment */
+    Semaphore retainedLock;
 
     volatile bool stopRequested;
     volatile bool serviceExited;
@@ -44,8 +51,14 @@ ipcDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* u
             if (server->currentConnections >= server->maxConnections) return -1; /* reject: over the cap */
             server->currentConnections++;
             /* Start-from-now: a newly connected client gets no backlog
-             * replay in v1 - only messages pushed after this point. */
-            if (session) session->cursor = IpcDispatcherRingBuffer_headSeq(server->ringBuffer);
+             * replay in v1 - only messages pushed after this point. The one
+             * exception is connection status (retainedStatusSent below) -
+             * see IpcDispatcherWsServer_setRetainedConnStatus's own doc
+             * comment on why that needs different semantics. */
+            if (session) {
+                session->cursor = IpcDispatcherRingBuffer_headSeq(server->ringBuffer);
+                session->retainedStatusSent = false;
+            }
             break;
 
         case LWS_CALLBACK_CLOSED:
@@ -63,6 +76,29 @@ ipcDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* u
 
         case LWS_CALLBACK_SERVER_WRITEABLE: {
             if (!session) break;
+
+            if (!session->retainedStatusSent) {
+                session->retainedStatusSent = true;
+
+                Semaphore_wait(server->retainedLock);
+                char* retained = server->retainedConnStatusJson ? strdup(server->retainedConnStatusJson) : NULL;
+                Semaphore_post(server->retainedLock);
+
+                if (retained) {
+                    size_t payloadLen = strlen(retained);
+                    unsigned char* buf = malloc(LWS_PRE + payloadLen);
+                    if (buf) {
+                        memcpy(buf + LWS_PRE, retained, payloadLen);
+                        lws_write(wsi, buf + LWS_PRE, payloadLen, LWS_WRITE_TEXT);
+                        free(buf);
+                    }
+                    free(retained);
+                    /* Still need to drain the ring buffer too - one lws_write per
+                     * WRITEABLE turn (this file's own convention), so ask for another. */
+                    lws_callback_on_writable(wsi);
+                    break;
+                }
+            }
 
             uint64_t dropped = 0;
             char* json = IpcDispatcherRingBuffer_readNext(server->ringBuffer, &session->cursor, &dropped);
@@ -130,6 +166,13 @@ IpcDispatcherWsServer_create(uint16_t port, int maxConnections,
     server->ringBuffer = ringBuffer;
     server->maxConnections = maxConnections;
 
+    server->retainedLock = Semaphore_create(1);
+    if (!server->retainedLock) {
+        free(server);
+        if (outError) *outError = IPC_DISPATCHER_ERR_OUT_OF_MEMORY;
+        return NULL;
+    }
+
     server->protocols[0].name = "ipc-dispatcher-v1";
     server->protocols[0].callback = ipcDispatcherCallback;
     server->protocols[0].per_session_data_size = sizeof(IpcDispatcherSession);
@@ -146,6 +189,7 @@ IpcDispatcherWsServer_create(uint16_t port, int maxConnections,
 
     struct lws_context* context = lws_create_context(&info);
     if (!context) {
+        Semaphore_destroy(server->retainedLock);
         free(server);
         if (outError) *outError = IPC_DISPATCHER_ERR_SOCKET_BIND_FAILED;
         return NULL;
@@ -178,6 +222,18 @@ IpcDispatcherWsServer_wake(IpcDispatcherWsServer server) {
 }
 
 void
+IpcDispatcherWsServer_setRetainedConnStatus(IpcDispatcherWsServer server, const char* json) {
+    if (!server) return;
+
+    char* copy = json ? strdup(json) : NULL;
+
+    Semaphore_wait(server->retainedLock);
+    free(server->retainedConnStatusJson);
+    server->retainedConnStatusJson = copy;
+    Semaphore_post(server->retainedLock);
+}
+
+void
 IpcDispatcherWsServer_stop(IpcDispatcherWsServer server) {
     if (!server || server->stopRequested) return;
 
@@ -203,5 +259,7 @@ IpcDispatcherWsServer_destroy(IpcDispatcherWsServer server) {
         lws_context_destroy(server->context);
         server->context = NULL;
     }
+    if (server->retainedLock) Semaphore_destroy(server->retainedLock);
+    free(server->retainedConnStatusJson);
     free(server);
 }

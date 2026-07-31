@@ -48,6 +48,22 @@ void
 IpcDispatcherWsServer_wake(IpcDispatcherWsServer server);
 
 /*
+ * Sets (replacing any previous value) the retained "last known connection
+ * status" JSON - copied internally (caller retains ownership of json).
+ * Unlike report/GOOSE data (a pure stream of changes, deliberately no
+ * backlog replay - see IpcDispatcherSession's own "start-from-now" comment
+ * in the .c file), connection status is a STATE: a client that connects
+ * after the status last changed still needs to know the current value, not
+ * just future ones. Every newly-established connection is sent this value
+ * (if any) as its first message, before draining the ring buffer as usual.
+ * json == NULL clears the retained value (nothing will be replayed to new
+ * connections until the next real status). Producer-thread-safe, same call
+ * context as IpcDispatcherWsServer_wake - internally mutex-guarded.
+ */
+void
+IpcDispatcherWsServer_setRetainedConnStatus(IpcDispatcherWsServer server, const char* json);
+
+/*
  * Signals the service-loop thread to exit, wakes it via lws_cancel_service
  * to guarantee prompt exit even if idle, blocks until it has (bounded - same
  * convention as goose_subscriber's liveness-thread stop). MUST be called

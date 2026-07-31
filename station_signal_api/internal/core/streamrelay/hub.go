@@ -6,6 +6,7 @@ package streamrelay
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,13 +23,16 @@ const (
 // Hub dials one daemon-side stream URL and rebroadcasts every frame it reads, verbatim, to
 // each current subscriber. A subscriber that can't keep up has its backlog dropped rather
 // than queued — the same "no replay" semantics the daemon itself applies to its own stream
-// consumers.
+// consumers. One exception: a CONNECTION_STATUS frame (a per-device stream's connection
+// state, not report/GOOSE change data) is retained and replayed to every new subscriber —
+// see Subscribe's own comment for why a live-only relay loses this frame almost every time.
 type Hub struct {
 	url    string
 	logger *slog.Logger
 
-	mu   sync.Mutex
-	subs map[chan []byte]struct{}
+	mu       sync.Mutex
+	subs     map[chan []byte]struct{}
+	retained []byte // last CONNECTION_STATUS frame seen, if any; nil for the scan-result Hub
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -59,7 +63,21 @@ func (h *Hub) Subscribe() (<-chan []byte, func()) {
 	ch := make(chan []byte, subscriberBufferSize)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
+	retained := h.retained
 	h.mu.Unlock()
+
+	if retained != nil {
+		// A device's MMS association can (and, timed against a real IED's discovery, usually
+		// does) succeed well before this subscriber — the frontend's browser WS — has even
+		// been opened; without this, "connected" would be lost forever the moment it happens
+		// too early, leaving the UI stuck on "Connecting..." despite the device genuinely
+		// being up. Fresh channel, buffer size subscriberBufferSize, so this practically never
+		// hits the default case, but stays non-blocking regardless.
+		select {
+		case ch <- retained:
+		default:
+		}
+	}
 
 	var once sync.Once
 	cancel := func() {
@@ -126,6 +144,11 @@ func (h *Hub) run(ctx context.Context) {
 func (h *Hub) broadcast(data []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if isConnectionStatus(data) {
+		h.retained = data
+	}
+
 	for ch := range h.subs {
 		select {
 		case ch <- data:
@@ -133,6 +156,19 @@ func (h *Hub) broadcast(data []byte) {
 			// Slow subscriber: drop this message for them rather than block the whole hub.
 		}
 	}
+}
+
+// isConnectionStatus checks a frame's own "type" field rather than assuming anything about
+// message shape beyond that one field — Hub stays a relay for every other purpose (scan
+// results included, which never carry this type and so never populate retained).
+func isConnectionStatus(data []byte) bool {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.Type == "CONNECTION_STATUS"
 }
 
 func dialWithRetry(ctx context.Context, url string) (*websocket.Conn, error) {

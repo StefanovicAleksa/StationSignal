@@ -208,28 +208,38 @@ itself produces, relayed verbatim — see §6 for the full data-point shape. Thr
 ```
 
 ```json
+{ "schemaVersion": 1, "type": "CONNECTION_STATUS", "status": "CONNECTED" }
 { "schemaVersion": 1, "type": "CONNECTION_STATUS", "status": "CONNECTION_REJECTED" }
 ```
 
-This one is different in kind from the two above: it's a diagnostic signal, not report/GOOSE
-data, and can arrive **after** `POST /api/devices` already returned `201` — MMS report connections
-retry forever in the background, so a device can look "started" and then have its actual
-report connection rejected moments later (e.g. it needs `acseAuthPassword` and none was given,
-or the wrong one was). Treat this as "no reports may ever arrive on this device — a password
-may be required," and consider re-prompting the user the same way as an `AUTH_REQUIRED` REST
-response (§5). **Important caveat, stated honestly rather than glossed over**: this reuses the
-underlying protocol library's one "connection didn't succeed" code, which also covers plain
-transient network failures, not exclusively wrong passwords — word your UI accordingly (e.g.
-"connection rejected — check credentials" rather than asserting it's definitely a password
-problem). It fires at most once per rejection streak, not on every retry.
+This one is different in kind from the two above: it's a diagnostic/state signal, not report/GOOSE
+data, and can arrive **after** `POST /api/devices` already returned `201` — the actual MMS report
+association happens asynchronously in the background, so a device can look "started" well before
+(or after) its report connection actually succeeds or gets rejected.
+
+`status: "CONNECTED"` is the earliest honest signal that the device's MMS association actually
+succeeded — use it to move the UI from "connecting" to "connected" instead of waiting for the
+first report, which may never arrive (e.g. a device whose RCBs fail to enable reporting is still
+genuinely connected). `status: "CONNECTION_REJECTED"` means the report connection was rejected
+(e.g. it needs `acseAuthPassword` and none was given, or the wrong one was) — treat this as "no
+reports may ever arrive on this device — a password may be required," and consider re-prompting
+the user the same way as an `AUTH_REQUIRED` REST response (§5). **Important caveat, stated
+honestly rather than glossed over**: `CONNECTION_REJECTED` reuses the underlying protocol
+library's one "connection didn't succeed" code, which also covers plain transient network
+failures, not exclusively wrong passwords — word your UI accordingly (e.g. "connection rejected —
+check credentials" rather than asserting it's definitely a password problem). It fires at most
+once per rejection streak, not on every retry.
 
 - `404` (plain HTTP, connection never upgrades) if `{deviceId}` isn't currently active.
 - The connection **closes** if the device is stopped (`DELETE /api/devices/{id}`) or the daemon
   crashes and hasn't been re-armed yet — reconnect and re-check `GET /api/devices` if you need to
   know whether it's still valid.
-- **No replay.** Only genuine changes are sent, and only from the moment you connect forward
-  — the first-ever observation of any point is bootstrap-suppressed. Silence means nothing
-  changed, not that something's wrong.
+- **No replay for report/GOOSE data.** Only genuine changes are sent, and only from the moment
+  you connect forward — the first-ever observation of any point is bootstrap-suppressed. Silence
+  means nothing changed, not that something's wrong. **`CONNECTION_STATUS` is the one exception**:
+  the most recent one is retained and replayed immediately to every new connection, specifically
+  because it's a state (not a change event) and would otherwise almost always be missed — a real
+  device's MMS association routinely succeeds before your websocket connection even opens.
 
 ### `ws://<host>:<port>/ws/scans`
 

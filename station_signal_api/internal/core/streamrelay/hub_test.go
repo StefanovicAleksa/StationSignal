@@ -199,6 +199,84 @@ func TestHub_CancelIsIdempotent(t *testing.T) {
 	})
 }
 
+func TestHub_ReplaysLastConnectionStatusToNewSubscriber(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	// Witness proves the send was fully processed (and forgotten - no other subscriber left)
+	// before the real subscriber under test connects, so that subscriber's receipt can only be
+	// explained by the retained-replay path, not a lucky race against ordinary live fan-out —
+	// the exact race a real device's fast MMS connect wins against a browser that hasn't
+	// opened its websocket yet.
+	witness, cancelWitness := hub.Subscribe()
+	fu.send(t, []byte(`{"schemaVersion":1,"type":"CONNECTION_STATUS","status":"CONNECTED"}`))
+	assert.Equal(t, `{"schemaVersion":1,"type":"CONNECTION_STATUS","status":"CONNECTED"}`,
+		string(recvOrTimeout(t, witness)))
+	cancelWitness()
+
+	ch, cancelSub := hub.Subscribe()
+	defer cancelSub()
+
+	assert.Equal(t, `{"schemaVersion":1,"type":"CONNECTION_STATUS","status":"CONNECTED"}`,
+		string(recvOrTimeout(t, ch)))
+}
+
+func TestHub_ReplaysOnlyTheMostRecentConnectionStatus(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	// A witness subscriber, held open across both sends, makes each send's processing
+	// (including updating Hub.retained) provably complete before we proceed — fu.send only
+	// waits for the upstream connection to accept the write, not for the Hub's read loop to
+	// have broadcast it yet.
+	witness, cancelWitness := hub.Subscribe()
+
+	fu.send(t, []byte(`{"type":"CONNECTION_STATUS","status":"CONNECTED"}`))
+	assert.Equal(t, `{"type":"CONNECTION_STATUS","status":"CONNECTED"}`, string(recvOrTimeout(t, witness)))
+
+	fu.send(t, []byte(`{"type":"CONNECTION_STATUS","status":"CONNECTION_REJECTED"}`))
+	assert.Equal(t, `{"type":"CONNECTION_STATUS","status":"CONNECTION_REJECTED"}`, string(recvOrTimeout(t, witness)))
+	cancelWitness()
+
+	ch, cancelSub := hub.Subscribe()
+	defer cancelSub()
+
+	assert.Equal(t, `{"type":"CONNECTION_STATUS","status":"CONNECTION_REJECTED"}`,
+		string(recvOrTimeout(t, ch)))
+}
+
+func TestHub_DoesNotReplayReportOrScanMessages(t *testing.T) {
+	fu := newFakeUpstream(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub := NewHub(ctx, fu.url(), nil)
+	defer hub.Close()
+
+	// Witness confirms the send was actually processed (and, since it's the only subscriber
+	// at that point, delivered and forgotten) before a later subscriber checks for replay —
+	// without this, a subscribe() racing ahead of the Hub's own read-loop processing would
+	// legitimately receive the message via normal live fan-out, not replay, and flake the test.
+	witness, cancelWitness := hub.Subscribe()
+	fu.send(t, []byte(`{"type":"SCAN_RESULT"}`))
+	assert.Equal(t, `{"type":"SCAN_RESULT"}`, string(recvOrTimeout(t, witness)))
+	cancelWitness()
+
+	ch, cancelSub := hub.Subscribe()
+	defer cancelSub()
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("expected no replay for a non-CONNECTION_STATUS message, got %q", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestHub_DialFailureLogsAndExitsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

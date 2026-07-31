@@ -69,14 +69,23 @@ device) plus a broadcast-under-lock to however many frontend WS subscribers are 
   `ORCHESTRATION_FAILED`/`"SCL bootstrap"`/access-denied signature into a distinct code purely
   for the frontend's convenience (see `FRONTEND_API_GUIDE.md` §5) — it does not change what
   this feature or the daemon actually do.
-- **The daemon's per-device push stream can also carry a `CONNECTION_STATUS` message**
-  (`{"type":"CONNECTION_STATUS","status":"CONNECTION_REJECTED"}`) after a successful
-  `POST /api/devices`, if the device's actual MMS report connection (as opposed to the SCL
-  bootstrap fetch) is later rejected — most commonly a device that requires
-  `acseAuthPassword` on the report association specifically. This API relays it verbatim
-  (`core/streamrelay.Hub` is a byte-for-byte opaque relay, no special-casing needed here).
-  Honest caveat: the underlying signal is "the connection didn't succeed," not
-  specifically "wrong password" — see `FRONTEND_API_GUIDE.md` §4's own caveat.
+- **The daemon's per-device push stream can also carry a `CONNECTION_STATUS` message**:
+  `{"type":"CONNECTION_STATUS","status":"CONNECTED"}` once the device's actual MMS report
+  association succeeds, or `{"...,"status":"CONNECTION_REJECTED"}` if it's later rejected
+  instead — most commonly a device that requires `acseAuthPassword` on the report association
+  specifically. This API relays it verbatim, with one deliberate exception to
+  `core/streamrelay.Hub`'s otherwise byte-for-byte-opaque relay contract: `Hub` retains the
+  last `CONNECTION_STATUS` frame and replays it to every new subscriber (`Hub.Subscribe`),
+  since this frame is a *state*, not a report/GOOSE-style change event — a browser client
+  typically doesn't open its `/ws/devices/{id}` connection until well after `POST
+  /api/devices` returns, by which point a fast real-device connect has usually already fired
+  and would otherwise be lost forever (no other message ever arrives to indicate "connected"
+  once report enablement itself fails on every RCB, which is a real, encountered case — see
+  the daemon's own identical retained/replay fix in
+  `ipc_dispatcher_ws_server.c`/`IpcDispatcherWsServer_setRetainedConnStatus` for the daemon
+  side of the same problem). Honest caveat on the `CONNECTION_REJECTED` case specifically: the
+  underlying signal is "the connection didn't succeed," not specifically "wrong password" —
+  see `FRONTEND_API_GUIDE.md` §4's own caveat.
 - This classification only covers the normal discovery-connect flow (no `sclFilePath`
   given). If the caller supplies `sclFilePath` directly, a rejected password on that path
   has no equivalent mitigating context (no prior bootstrap step already proved the host
