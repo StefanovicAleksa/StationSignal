@@ -54,7 +54,15 @@ file only describes current-state facts.
     `SCL_BOOTSTRAP_CANDIDATE_NO_SCL_FILE_FOUND` (a connectable device with no SCL file service —
     see `ied_model_online_loader/`'s bullet and the "No over-the-wire tree discovery" Hard Rule).
     `sclFilePath` given: skips `scl_bootstrap`, loads that local file (`Orchestration_runFromLocalFile`).
-  - `STOP_REPORTING {deviceId}` → `{deviceId}`: tears down that device, freeing its port.
+  - `STOP_REPORTING {deviceId}` → `{deviceId}`: tears down that device, freeing its port. Accepts
+    `{host, mmsPort}` instead of `deviceId` as an alternate form — recovery path for a caller that
+    never obtained or has lost track of a device's id (see `device_manager`'s own bullet,
+    `DeviceManager_stopReportingByAddress`); resolves to whichever deviceId currently occupies
+    that address, then behaves identically to the `deviceId` form (including
+    `DEVICE_MANAGER_ERR_START_IN_PROGRESS` if it's still mid-start), and echoes the *resolved*
+    deviceId back in the response either way. `DEVICE_MANAGER_ERR_DEVICE_NOT_FOUND` if nothing is
+    registered at that address — a legitimate "already clean" outcome for this use case, not
+    necessarily a real failure.
   - `START_SCAN {interfaceId, mmsPort, sweepIntervalMs?}` → `{scanId}`: starts a continuous
     background subnet scan (`scan_orchestration`), streaming discovered devices over the shared
     `scan_dispatcher` websocket (default port 8766, one shared instance per concurrent scan).
@@ -442,6 +450,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   registry entry, since a control-plane message's source buffer is freed once the request
   finishes (unlike `main.c`'s own argv). A duplicate `StartReporting` for a running/mid-start
   `(host, mmsPort)` is rejected.
+  `DeviceManager_stopReportingByAddress(handle, host, mmsPort, outDeviceId, outDetail)` is a
+  second stop entry point, address-keyed instead of deviceId-keyed — for a caller that never
+  obtained or has lost track of a deviceId (its own `StartReporting` call raced/timed out, or its
+  own bookkeeping was lost, e.g. a process restart). Resolves the address to a deviceId via
+  `DeviceManagerRegistry_findDeviceIdByHost` (same match scope, running or mid-start, as the
+  dedupe check `reserve()` already does), then delegates to `DeviceManager_stopReporting`
+  unchanged — every existing behavior (mid-start's `DEVICE_MANAGER_ERR_START_IN_PROGRESS`, atomic
+  remove against a concurrent duplicate stop) applies identically; this is purely an alternate
+  key, not a different stop path. `DEVICE_MANAGER_ERR_DEVICE_NOT_FOUND` if nothing is registered
+  at that address.
   Proven end-to-end (two real `ied_simulator` instances, two concurrent starts, distinct
   deviceIds/ports each streaming real GOOSE JSON) in `integration_tests/device_manager/` — needs
   `sudo`. **Does NOT watch connection health or auto-stop a device on connection loss** — only an

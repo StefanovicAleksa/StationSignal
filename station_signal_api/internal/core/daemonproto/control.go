@@ -40,6 +40,14 @@ const (
 	// OrchestrationUtils_candidateStatusToString). Surfaced when a device rejects an
 	// unauthenticated (or wrongly authenticated) connection attempt during SCL bootstrap.
 	ErrAuthRequired = "AUTH_REQUIRED"
+
+	// ErrDeviceTracked is synthesized by reporting.Service.StopByAddress (not part of the
+	// daemon's own contract) when this API's own store already has a record for the given
+	// (host, mmsPort) — the address-based stop is a recovery path for a device this API has
+	// lost track of, not a way to force-stop something already properly tracked (which may be
+	// shared with another session); the caller should use the normal deviceId-based Stop
+	// instead.
+	ErrDeviceTracked = "DEVICE_TRACKED"
 )
 
 // Request is the inbound control-channel envelope.
@@ -93,9 +101,16 @@ type StartReportingResult struct {
 	GooseAvailable bool `json:"gooseAvailable"`
 }
 
-// StopReportingParams is the params object for a STOP_REPORTING request.
+// StopReportingParams is the params object for a STOP_REPORTING request. Two mutually exclusive
+// forms, matching the daemon's own parser (AGENT_API_GUIDE.md's STOP_REPORTING section):
+// DeviceID (the normal case), or Host+MMSPort for a caller that never obtained or has lost track
+// of a deviceId. omitempty on all three so only the fields actually set are sent — the daemon
+// discriminates on whether the "deviceId" key is present at all, so a stray zero-value deviceId
+// must never be serialized alongside the address form.
 type StopReportingParams struct {
-	DeviceID int `json:"deviceId"`
+	DeviceID int    `json:"deviceId,omitempty"`
+	Host     string `json:"host,omitempty"`
+	MMSPort  int    `json:"mmsPort,omitempty"`
 }
 
 // StopReportingResult is the result object on a successful STOP_REPORTING response.

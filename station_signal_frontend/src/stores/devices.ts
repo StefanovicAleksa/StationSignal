@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { startReporting, stopReporting, listDevices } from '@/services/deviceApi'
+import { startReporting, stopReporting, stopReportingByAddress, listDevices } from '@/services/deviceApi'
 import { createDeviceSocket, type DeviceSocket } from '@/services/deviceSocket'
 import type { DataPoint, DeviceStreamMessage, GooseSource, Quality, ReportSource, StartDeviceRequest } from '@/types/api'
 import { ApiError } from '@/types/api'
@@ -213,9 +213,27 @@ export const useDevicesStore = defineStore('devices', () => {
     if (!device) return
 
     if (device.deviceId === null) {
-      // never got a real device id — still starting, or errored out (e.g. AUTH_REQUIRED) before
-      // one was assigned. Nothing exists server-side to tear down; this also serves as the way
-      // to dismiss a lingering errored row.
+      // Never got a real device id - either still starting, errored out before one was assigned
+      // (e.g. AUTH_REQUIRED), or a HOST_ALREADY_RUNNING reconciliation attempt failed to find a
+      // match (the daemon has this host/port registered - running or mid-start - but this API's
+      // own bookkeeping doesn't). Try the address-based recovery stop so the daemon's
+      // registration actually gets freed too, instead of just silently dropping the local row -
+      // previously this left the daemon-side registration stuck forever, blocking every future
+      // reconnect attempt to the same host/port until a full daemon restart.
+      device.phase = 'stopping'
+      try {
+        await stopReportingByAddress(device.host, device.mmsPort)
+      } catch (err) {
+        // No DEVICE_NOT_FOUND carve-out needed here - the address-based endpoint already treats
+        // "nothing registered there" as success. Any error reaching here (network failure,
+        // DEVICE_TRACKED, START_IN_PROGRESS) means cleanup genuinely didn't happen, so surface
+        // it instead of silently disappearing - the concrete fix for the "Stop Reporting looks
+        // like it worked but didn't" bug.
+        device.phase = 'error'
+        device.error = toDeviceError(err)
+        return
+      }
+
       sockets.get(key)?.disconnect()
       sockets.delete(key)
       delete devices.value[key]

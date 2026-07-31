@@ -4,6 +4,7 @@ import { setActivePinia, createPinia } from 'pinia'
 vi.mock('@/services/deviceApi', () => ({
   startReporting: vi.fn(),
   stopReporting: vi.fn(),
+  stopReportingByAddress: vi.fn(),
   listDevices: vi.fn(),
 }))
 
@@ -14,7 +15,7 @@ vi.mock('@/services/deviceSocket', () => ({
   })),
 }))
 
-import { startReporting, stopReporting, listDevices } from '@/services/deviceApi'
+import { startReporting, stopReporting, stopReportingByAddress, listDevices } from '@/services/deviceApi'
 import { createDeviceSocket } from '@/services/deviceSocket'
 import { useDevicesStore } from '@/stores/devices'
 import { ApiError, type DeviceStreamMessage } from '@/types/api'
@@ -316,27 +317,46 @@ describe('useDevicesStore', () => {
     expect(stopReporting).toHaveBeenCalledWith(1)
   })
 
-  it('stopDevice on a still-pending (no real deviceId) entry skips the REST call', async () => {
-    let resolveStart:
-      | ((value: { deviceId: number; wsPort: number; mmsAvailable: boolean; gooseAvailable: boolean }) => void)
-      | undefined
-    vi.mocked(startReporting).mockReturnValue(
-      new Promise((resolve) => {
-        resolveStart = resolve
-      }),
+  it('stopDevice on an entry with no real deviceId falls back to the address-based stop, and removes it on success', async () => {
+    // Simulates a HOST_ALREADY_RUNNING reconciliation that failed to find a match (see the
+    // 'adopts the existing device' test above for the success case) - the row is left with
+    // deviceId: null. Stop Reporting must still actually reach the backend instead of just
+    // silently dropping the local row (the bug this fixes: the daemon's own registration for
+    // this host/port was left stuck forever otherwise).
+    vi.mocked(startReporting).mockRejectedValue(
+      new ApiError({ code: 'HOST_ALREADY_RUNNING', message: 'already running', stage: null, detail: null }, 409),
+    )
+    vi.mocked(listDevices).mockResolvedValue([]) // no match found - deviceId stays null
+    vi.mocked(stopReportingByAddress).mockResolvedValue({ host: '10.0.0.5', mmsPort: 102 })
+    const store = useDevicesStore()
+    await expect(store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })).rejects.toThrow()
+    const key = Object.keys(store.devices)[0]!
+    expect(store.devices[key]?.deviceId).toBeNull()
+
+    await store.stopDevice(key)
+
+    expect(stopReportingByAddress).toHaveBeenCalledWith('10.0.0.5', 102)
+    expect(stopReporting).not.toHaveBeenCalled()
+    expect(store.devices[key]).toBeUndefined()
+  })
+
+  it('stopDevice on an entry with no real deviceId surfaces an error and keeps the row when the address-based stop fails', async () => {
+    vi.mocked(startReporting).mockRejectedValue(
+      new ApiError({ code: 'HOST_ALREADY_RUNNING', message: 'already running', stage: null, detail: null }, 409),
+    )
+    vi.mocked(listDevices).mockResolvedValue([])
+    vi.mocked(stopReportingByAddress).mockRejectedValue(
+      new ApiError({ code: 'DEVICE_TRACKED', message: 'already tracked', stage: null, detail: null }, 409),
     )
     const store = useDevicesStore()
-    const startPromise = store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })
+    await expect(store.startDevice({ host: '10.0.0.5', mmsPort: 102, interfaceId: 'eth0' })).rejects.toThrow()
     const key = Object.keys(store.devices)[0]!
 
     await store.stopDevice(key)
 
-    expect(store.devices[key]).toBeUndefined()
-    expect(stopReporting).not.toHaveBeenCalled()
-
-    resolveStart?.({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
-    await startPromise
-    expect(stopReporting).toHaveBeenCalledWith(1)
+    expect(store.devices[key]).toBeDefined()
+    expect(store.devices[key]?.phase).toBe('error')
+    expect(store.devices[key]?.error?.code).toBe('DEVICE_TRACKED')
   })
 
   it('clearReports empties a device report log without stopping the watch', async () => {

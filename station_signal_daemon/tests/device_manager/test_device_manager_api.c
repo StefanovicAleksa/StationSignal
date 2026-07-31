@@ -152,6 +152,42 @@ test_stopReporting_returnsDeviceNotFound_forUnknownId(void) {
             DeviceManager_stopReporting(fixtureHandle, 999, NULL));
 }
 
+/* ---- DeviceManager_stopReportingByAddress ---- */
+
+void
+test_stopReportingByAddress_rejectsNullHandle(void) {
+    uint64_t outDeviceId;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
+            DeviceManager_stopReportingByAddress(NULL, "10.0.0.1", 102, &outDeviceId, NULL));
+}
+
+void
+test_stopReportingByAddress_rejectsEmptyHost(void) {
+    fixtureHandle = DeviceManager_create(NULL, NULL);
+
+    uint64_t outDeviceId;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
+            DeviceManager_stopReportingByAddress(fixtureHandle, "", 102, &outDeviceId, NULL));
+}
+
+void
+test_stopReportingByAddress_rejectsNullOutDeviceId(void) {
+    fixtureHandle = DeviceManager_create(NULL, NULL);
+
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
+            DeviceManager_stopReportingByAddress(fixtureHandle, "10.0.0.1", 102, NULL, NULL));
+}
+
+void
+test_stopReportingByAddress_returnsDeviceNotFound_whenNothingRegisteredThere(void) {
+    fixtureHandle = DeviceManager_create(NULL, NULL);
+
+    uint64_t outDeviceId = 0;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_DEVICE_NOT_FOUND,
+            DeviceManager_stopReportingByAddress(fixtureHandle, "10.0.0.1", 102, &outDeviceId, NULL));
+    TEST_ASSERT_EQUAL_UINT64(0, outDeviceId); /* untouched on failure */
+}
+
 /* ---- NULL-safety ---- */
 
 void
@@ -184,6 +220,11 @@ main(void) {
 
     RUN_TEST(test_stopReporting_rejectsNullHandle);
     RUN_TEST(test_stopReporting_returnsDeviceNotFound_forUnknownId);
+
+    RUN_TEST(test_stopReportingByAddress_rejectsNullHandle);
+    RUN_TEST(test_stopReportingByAddress_rejectsEmptyHost);
+    RUN_TEST(test_stopReportingByAddress_rejectsNullOutDeviceId);
+    RUN_TEST(test_stopReportingByAddress_returnsDeviceNotFound_whenNothingRegisteredThere);
 
     RUN_TEST(test_destroy_doesNotCrash_onNullHandle);
     RUN_TEST(test_destroy_onFreshHandle_withNoDevices_doesNotCrash);

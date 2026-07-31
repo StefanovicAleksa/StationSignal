@@ -169,6 +169,81 @@ func TestHandleStopReporting_DeviceNotFound(t *testing.T) {
 	assertErrorCode(t, rec, daemonproto.ErrDeviceNotFound)
 }
 
+func TestHandleStopReportingByAddress_Success(t *testing.T) {
+	reporting := &mockReportingService{}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices?host=10.0.0.9&mmsPort=10301", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "10.0.0.9", reporting.gotStopAddrHost)
+	assert.Equal(t, 10301, reporting.gotStopAddrPort)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "10.0.0.9", body["host"])
+	assert.Equal(t, float64(10301), body["mmsPort"])
+}
+
+func TestHandleStopReportingByAddress_DefaultsMmsPortWhenOmitted(t *testing.T) {
+	reporting := &mockReportingService{}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices?host=10.0.0.9", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, reportingdomain.DefaultMMSPort, reporting.gotStopAddrPort)
+}
+
+func TestHandleStopReportingByAddress_MissingHost(t *testing.T) {
+	mux := Router(newTestAPI(nil, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, daemonproto.ErrInvalidArgument)
+}
+
+func TestHandleStopReportingByAddress_InvalidMmsPort(t *testing.T) {
+	mux := Router(newTestAPI(nil, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices?host=10.0.0.9&mmsPort=not-a-number", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, daemonproto.ErrInvalidArgument)
+}
+
+func TestHandleStopReportingByAddress_AlreadyTracked_ReturnsConflict(t *testing.T) {
+	reporting := &mockReportingService{stopByAddrErr: &daemonproto.Error{Code: daemonproto.ErrDeviceTracked}}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices?host=10.0.0.9", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assertErrorCode(t, rec, daemonproto.ErrDeviceTracked)
+}
+
+func TestHandleStopReportingByAddress_StartInProgress_ReturnsConflict(t *testing.T) {
+	reporting := &mockReportingService{stopByAddrErr: &daemonproto.Error{Code: daemonproto.ErrStartInProgress}}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/devices?host=10.0.0.9", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assertErrorCode(t, rec, daemonproto.ErrStartInProgress)
+}
+
 func TestHandleListDevices(t *testing.T) {
 	reporting := &mockReportingService{list: []reportingdomain.Device{
 		{ID: 1, Host: "10.0.0.5", MMSPort: 102, InterfaceID: "eth0", WSPort: 9000},

@@ -116,6 +116,33 @@ test_stopReporting_unknownDeviceId_mapsToErrorEnvelope(void) {
 }
 
 void
+test_stopReportingByAddress_nothingRegistered_mapsToErrorEnvelope(void) {
+    /* host != NULL is the discriminator control_dispatcher_usecases.c relies
+     * on to take the address-based branch - see ControlRequest's own doc
+     * comment (control_dispatcher_types.h). */
+    ControlRequest* request = calloc(1, sizeof(ControlRequest));
+    request->requestId = strdup("req-5");
+    request->type = CONTROL_REQ_STOP_REPORTING;
+    request->host = strdup("10.0.0.1");
+    request->mmsPort = 102;
+
+    fixtureJson = ControlDispatcherUseCases_processRequest(request, fixtureDeviceManager, fixtureScanOrchestration);
+    freeRequest(request);
+
+    TEST_ASSERT_NOT_NULL(fixtureJson);
+    fixtureParsed = cJSON_Parse(fixtureJson);
+    TEST_ASSERT_NOT_NULL(fixtureParsed);
+
+    TEST_ASSERT_EQUAL_STRING("req-5", cJSON_GetObjectItemCaseSensitive(fixtureParsed, "requestId")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("STOP_REPORTING", cJSON_GetObjectItemCaseSensitive(fixtureParsed, "action")->valuestring);
+    TEST_ASSERT_FALSE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(fixtureParsed, "success")));
+
+    cJSON* error = cJSON_GetObjectItemCaseSensitive(fixtureParsed, "error");
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_EQUAL_STRING("DEVICE_NOT_FOUND", cJSON_GetObjectItemCaseSensitive(error, "code")->valuestring);
+}
+
+void
 test_startScan_invalidArgument_mapsToErrorEnvelope(void) {
     /* interfaceId NULL - ScanOrchestrationWorker_create's own validation
      * rejects this before anything touches a real network interface. */
@@ -170,6 +197,7 @@ main(void) {
     RUN_TEST(test_processRequest_returnsNull_onNullRequest);
     RUN_TEST(test_startReporting_invalidArgument_mapsToErrorEnvelope);
     RUN_TEST(test_stopReporting_unknownDeviceId_mapsToErrorEnvelope);
+    RUN_TEST(test_stopReportingByAddress_nothingRegistered_mapsToErrorEnvelope);
     RUN_TEST(test_startScan_invalidArgument_mapsToErrorEnvelope);
     RUN_TEST(test_stopScan_unknownScanId_mapsToErrorEnvelope);
 

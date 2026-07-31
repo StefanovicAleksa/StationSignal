@@ -169,6 +169,23 @@ DeviceManager_stopReporting(DeviceManagerHandle handle, uint64_t deviceId, Devic
     return DEVICE_MANAGER_OK;
 }
 
+DeviceManagerError
+DeviceManager_stopReportingByAddress(DeviceManagerHandle handle, const char* host, int mmsPort,
+        uint64_t* outDeviceId, DeviceManagerErrorDetail* outDetail) {
+    clearDetail(outDetail);
+
+    if (!handle || isEmpty(host) || !outDeviceId) return DEVICE_MANAGER_ERR_INVALID_ARGUMENT;
+
+    uint64_t deviceId;
+    if (!DeviceManagerRegistry_findDeviceIdByHost(handle->registry, host, mmsPort, &deviceId)) {
+        return DEVICE_MANAGER_ERR_DEVICE_NOT_FOUND;
+    }
+
+    DeviceManagerError err = DeviceManager_stopReporting(handle, deviceId, outDetail);
+    if (err == DEVICE_MANAGER_OK) *outDeviceId = deviceId;
+    return err;
+}
+
 void
 DeviceManager_destroy(DeviceManagerHandle handle) {
     if (!handle) return;

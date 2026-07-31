@@ -5,6 +5,10 @@ export type ErrorCode =
   | 'SCAN_NOT_FOUND'
   | 'HOST_ALREADY_RUNNING'
   | 'START_IN_PROGRESS'
+  // DELETE /api/devices?host=&mmsPort= only - this API already has a store record for that
+  // address, so the address-based recovery stop refuses rather than reaching around session
+  // isolation; use DELETE /api/devices/{id} instead. See FRONTEND_API_GUIDE.md §2/§5.
+  | 'DEVICE_TRACKED'
   | 'ORCHESTRATION_FAILED'
   | 'OUT_OF_MEMORY'
   | 'PORT_EXHAUSTED'

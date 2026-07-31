@@ -20,6 +20,10 @@ type Gateway interface {
 	Start(ctx context.Context, params domain.StartParams) (domain.Device, *streamrelay.Hub, error)
 	// Stop issues STOP_REPORTING for deviceID.
 	Stop(ctx context.Context, deviceID int) error
+	// StopByAddress issues STOP_REPORTING's alternate (host, mmsPort) form, for a device this
+	// API has no store record of (and thus no deviceID to call Stop with). Returns the deviceID
+	// the daemon actually resolved and stopped.
+	StopByAddress(ctx context.Context, host string, mmsPort int) (int, error)
 }
 
 type daemonGateway struct {
@@ -72,4 +76,18 @@ func (g *daemonGateway) Start(ctx context.Context, params domain.StartParams) (d
 func (g *daemonGateway) Stop(ctx context.Context, deviceID int) error {
 	_, err := g.client.Call(ctx, daemonproto.ActionStopReporting, daemonproto.StopReportingParams{DeviceID: deviceID})
 	return err
+}
+
+func (g *daemonGateway) StopByAddress(ctx context.Context, host string, mmsPort int) (int, error) {
+	raw, err := g.client.Call(ctx, daemonproto.ActionStopReporting,
+		daemonproto.StopReportingParams{Host: host, MMSPort: mmsPort})
+	if err != nil {
+		return 0, err
+	}
+
+	var result daemonproto.StopReportingResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, fmt.Errorf("decode STOP_REPORTING result: %w", err)
+	}
+	return result.DeviceID, nil
 }

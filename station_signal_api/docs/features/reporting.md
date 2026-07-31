@@ -37,11 +37,17 @@ Mutex-guarded `map[int]*record{device, hub}` — the in-memory record of active 
 no daemon-calling logic; `Add`/`Remove`/`Get`/`Hub`/`List`/`Snapshot`/`Clear` only.
 
 ### `data/gateway.go`
-`Gateway` interface (`Start`/`Stop`) + `daemonGateway`, the concrete implementation wrapping a
-`daemonclient.Caller`. Maps `domain.StartParams` ↔ `daemonproto.StartReportingParams`, issues
-`START_REPORTING`/`STOP_REPORTING`, and — on a successful start — dials the device's stream
-hub via `core/streamrelay.NewHub(hubCtx, "ws://127.0.0.1:<wsPort>", ...)`. The `Gateway`
-interface exists purely so `service`'s unit tests can substitute a mock.
+`Gateway` interface (`Start`/`Stop`/`StopByAddress`) + `daemonGateway`, the concrete
+implementation wrapping a `daemonclient.Caller`. Maps `domain.StartParams` ↔
+`daemonproto.StartReportingParams`, issues `START_REPORTING`/`STOP_REPORTING`, and — on a
+successful start — dials the device's stream hub via
+`core/streamrelay.NewHub(hubCtx, "ws://127.0.0.1:<wsPort>", ...)`. `StopByAddress` issues
+`STOP_REPORTING`'s alternate `{host, mmsPort}` form (instead of `deviceId`) — the recovery path
+for a device this API's own store has no record of, surfaced as `DELETE /api/devices?host=&mmsPort=`
+(see `FRONTEND_API_GUIDE.md` §2); `service.Service.StopByAddress` guards it with a
+`store.FindByHostPort` check first (refuses with `DEVICE_TRACKED` if the API already has a
+record — this is a recovery path for an orphaned registration, not a general force-stop). The
+`Gateway` interface exists purely so `service`'s unit tests can substitute a mock.
 
 ### `service/service.go`
 `Service` — wires `data.Store` + `data.Gateway` together. `Start` calls the gateway, and only

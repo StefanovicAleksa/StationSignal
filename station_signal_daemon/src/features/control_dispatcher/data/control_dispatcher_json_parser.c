@@ -89,10 +89,28 @@ parseStartReportingParams(const cJSON* params, ControlRequest* request) {
 static ControlParseError
 parseStopReportingParams(const cJSON* params, ControlRequest* request) {
     const cJSON* deviceIdItem = cJSON_GetObjectItemCaseSensitive(params, "deviceId");
-    if (!deviceIdItem || !cJSON_IsNumber(deviceIdItem) || deviceIdItem->valuedouble < 0) {
-        return CONTROL_PARSE_ERR_INVALID_PARAMS;
+    if (deviceIdItem) {
+        if (!cJSON_IsNumber(deviceIdItem) || deviceIdItem->valuedouble < 0) {
+            return CONTROL_PARSE_ERR_INVALID_PARAMS;
+        }
+        request->deviceId = (uint64_t) deviceIdItem->valuedouble;
+        return CONTROL_PARSE_OK;
     }
-    request->deviceId = (uint64_t) deviceIdItem->valuedouble;
+
+    /* No deviceId - fall back to the (host, mmsPort) form, for a caller that
+     * never obtained or has lost track of a deviceId (see
+     * DeviceManager_stopReportingByAddress's own doc comment for why this
+     * exists). control_dispatcher_usecases.c discriminates on request->host
+     * being non-NULL - the two forms are mutually exclusive by construction,
+     * this branch never also sets deviceId. */
+    const cJSON* hostItem = cJSON_GetObjectItemCaseSensitive(params, "host");
+    if (!isNonEmptyString(hostItem)) return CONTROL_PARSE_ERR_INVALID_PARAMS;
+    request->host = OrchestrationUtils_safeStringDup(hostItem->valuestring);
+
+    request->mmsPort = 102;
+    tryGetInt(params, "mmsPort", &request->mmsPort);
+
+    if (!request->host) return CONTROL_PARSE_ERR_INVALID_PARAMS; /* OOM */
 
     return CONTROL_PARSE_OK;
 }

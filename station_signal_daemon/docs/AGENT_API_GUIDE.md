@@ -153,11 +153,29 @@ data (§3 below). Ports are auto-assigned from a `9000-9999` range.
 
 `deviceId` — required non-negative integer, from a prior `START_REPORTING` response.
 
+**Alternate form**, for a caller that never obtained or has lost track of a `deviceId` (e.g. its
+own `START_REPORTING` call raced/timed out client-side before a response arrived, or its own
+bookkeeping was lost — a process restart, say):
+
+```json
+{ "host": "192.168.1.51", "mmsPort": 102 }
+```
+
+`host` — required non-empty string. `mmsPort` — optional, defaults to `102`. Resolves to whichever
+`deviceId` currently occupies that `(host, mmsPort)` — running *or* still mid-start — then behaves
+exactly like the `deviceId` form, including the same error codes below. The success `result`
+always echoes back the *resolved* `deviceId`, since the caller had no way to know it in advance.
+Only one form may be given per request — `deviceId` takes precedence if both are present.
+
 **Success `result`:** `{ "deviceId": 1 }`. The device's per-device websocket (§3) closes; its
 port is freed for reuse by a future `START_REPORTING`.
 
-**Errors:** `INVALID_ARGUMENT` (bad/missing `deviceId`), `DEVICE_NOT_FOUND` (unknown or
-already-stopped `deviceId`).
+**Errors:** `INVALID_ARGUMENT` (bad/missing `deviceId`, or bad/missing `host` when using the
+address form), `DEVICE_NOT_FOUND` (unknown/already-stopped `deviceId`, or nothing currently
+registered at the given address — for the address form this is a legitimate, idempotent "already
+clean" outcome, not necessarily a real failure), `START_IN_PROGRESS` (the target device exists but
+is still mid-start on another in-flight `START_REPORTING` request — no cancellation hook exists;
+retry shortly).
 
 There is **no unsolicited "device stopped" push** on any channel — if a device dies on its own
 (connection loss, crash, etc.) nothing notifies you; the daemon does not watch connection health.

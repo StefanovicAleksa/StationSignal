@@ -99,6 +99,25 @@ every attached session has called it; until then it just detaches your own sessi
 
 **Success (`200 OK`):** `{ "deviceId": 1 }`. The device's stream (§4) closes.
 
+### `DELETE /api/devices?host=&mmsPort=` — stop reporting by address (recovery path)
+
+For the one case `DELETE /api/devices/{id}` can't help with: you never got, or have lost, a
+`deviceId` for a device — most commonly, `POST /api/devices` returned `HOST_ALREADY_RUNNING` and a
+follow-up `GET /api/devices` doesn't show a matching `host`+`mmsPort` either (the device is
+genuinely running/starting on the daemon, this API just has no record of it — e.g. a prior request
+that raced or timed out client-side). Query params: `host` (required), `mmsPort` (optional,
+defaults to `102`).
+
+**Success (`200 OK`):** `{ "host": "10.0.0.5", "mmsPort": 102 }`. Also succeeds (same `200`) if
+nothing was actually registered at that address — an idempotent "already clean" outcome, not an
+error, since this call exists specifically to clean up an unknown prior state.
+
+**Errors specific to this endpoint:** `DEVICE_TRACKED` (`409`) if this API's own records already
+know about a device at this address (yours or another session's) — use `DELETE /api/devices/{id}`
+instead, this endpoint is only for genuinely untracked devices. `START_IN_PROGRESS` (`409`) if the
+device exists on the daemon but is still mid-start from another in-flight request — no
+cancellation exists; retry shortly.
+
 ### `GET /api/devices` — list every currently active device
 
 ```json
@@ -110,10 +129,11 @@ every attached session has called it; until then it just detaches your own sessi
 Empty array (`[]`), not `null`, when nothing is active. `mmsAvailable`/`gooseAvailable` have the
 same meaning as on `POST /api/devices` above.
 
-### Errors (all three endpoints)
+### Errors (all endpoints above)
 
 See §5 for the full error-code → HTTP-status table. Malformed JSON or a missing/invalid
-`{id}` path parameter both produce `400` with `code: "INVALID_ARGUMENT"`.
+`{id}` path parameter both produce `400` with `code: "INVALID_ARGUMENT"` — likewise a missing
+`host` query parameter on the address-based stop endpoint.
 
 ### `POST /api/structure-files` — upload an SCL/ICD/CID structure file
 
@@ -286,8 +306,9 @@ the device has only one of the two, not neither — that case is not an error.
 | 400 | `INVALID_ARGUMENT` | bad/missing request field, malformed JSON body, or invalid `{id}` path param |
 | 401 | `AUTH_REQUIRED` | `POST /api/devices` was rejected because the device needs `acseAuthPassword` (missing or wrong) — see below |
 | 404 | `DEVICE_NOT_FOUND` / `SCAN_NOT_FOUND` | unknown or already-stopped id |
-| 409 | `HOST_ALREADY_RUNNING` | rare: another session already watching this `(host, mmsPort)` is the normal case and does **not** produce this error (see the sharing note in §2) — this only surfaces if this API process itself restarted while the daemon kept the device running, so its own bookkeeping no longer knows about it; retry shortly |
+| 409 | `HOST_ALREADY_RUNNING` | rare: another session already watching this `(host, mmsPort)` is the normal case and does **not** produce this error (see the sharing note in §2) — this surfaces when the daemon has this address registered but this API's own bookkeeping doesn't know about it (a process restart, or a prior request that raced/timed out client-side); recover with `DELETE /api/devices?host=&mmsPort=` (see above), then retry the connect |
 | 409 | `START_IN_PROGRESS` | a start for this same target is already in flight — retry shortly |
+| 409 | `DEVICE_TRACKED` | `DELETE /api/devices?host=&mmsPort=` only, when this API already has a record for that address — use `DELETE /api/devices/{id}` instead |
 | 502 | `ORCHESTRATION_FAILED` | the device pipeline itself failed (see `stage`/`detail`) |
 | 503 | `OUT_OF_MEMORY`, `PORT_EXHAUSTED`, `DISPATCHER_START_FAILED`, `THREAD_CREATE_FAILED`, `DISCOVERY_CREATE_FAILED` | daemon-side resource/infra failure |
 | 503 | `DAEMON_UNREACHABLE` | this API couldn't reach the daemon at all (down, restarting, or the call timed out) — check `GET /api/health` |

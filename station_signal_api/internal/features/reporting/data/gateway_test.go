@@ -101,3 +101,35 @@ func TestGateway_Stop_PropagatesCallError(t *testing.T) {
 
 	assert.Equal(t, wantErr, err)
 }
+
+func TestGateway_StopByAddress_IssuesStopReportingWithHostAndPort_ReturnsResolvedDeviceID(t *testing.T) {
+	caller := &mockCaller{result: json.RawMessage(`{"deviceId":11}`)}
+	gw := NewGateway(caller, context.Background(), nil)
+
+	deviceID, err := gw.StopByAddress(context.Background(), "10.0.0.9", 10301)
+
+	require.NoError(t, err)
+	assert.Equal(t, daemonproto.ActionStopReporting, caller.gotAction)
+	assert.Equal(t, daemonproto.StopReportingParams{Host: "10.0.0.9", MMSPort: 10301}, caller.gotParams)
+	assert.Equal(t, 11, deviceID)
+}
+
+func TestGateway_StopByAddress_PropagatesCallError(t *testing.T) {
+	wantErr := &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound, Message: "nothing registered here"}
+	caller := &mockCaller{err: wantErr}
+	gw := NewGateway(caller, context.Background(), nil)
+
+	deviceID, err := gw.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	assert.Equal(t, wantErr, err)
+	assert.Zero(t, deviceID)
+}
+
+func TestGateway_StopByAddress_PropagatesMalformedResultError(t *testing.T) {
+	caller := &mockCaller{result: json.RawMessage(`not json`)}
+	gw := NewGateway(caller, context.Background(), nil)
+
+	_, err := gw.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	require.Error(t, err)
+}

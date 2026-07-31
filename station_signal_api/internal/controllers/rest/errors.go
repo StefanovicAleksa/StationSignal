@@ -20,7 +20,7 @@ func errorStatus(code string) int {
 	switch code {
 	case daemonproto.ErrInvalidArgument:
 		return http.StatusBadRequest
-	case daemonproto.ErrHostAlreadyRunning, daemonproto.ErrStartInProgress:
+	case daemonproto.ErrHostAlreadyRunning, daemonproto.ErrStartInProgress, daemonproto.ErrDeviceTracked:
 		return http.StatusConflict
 	case daemonproto.ErrDeviceNotFound, daemonproto.ErrScanNotFound:
 		return http.StatusNotFound

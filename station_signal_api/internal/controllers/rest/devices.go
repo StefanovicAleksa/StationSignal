@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"station_signal_api/internal/core/daemonproto"
@@ -77,4 +78,32 @@ func (a *API) handleStopReporting(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.reporting.ListForSession(session.FromContext(r.Context())))
+}
+
+// handleStopReportingByAddress is the recovery path for a device this API never obtained (or has
+// lost track of) a deviceId for — see Service.StopByAddress's own doc comment. Collection-level
+// (query params, not a path {id}) since there is no id to put in the path by construction.
+func (a *API) handleStopReportingByAddress(w http.ResponseWriter, r *http.Request) {
+	host := r.URL.Query().Get("host")
+	if host == "" {
+		a.writeError(w, invalidArgument("host query parameter is required"))
+		return
+	}
+
+	mmsPort := reportingdomain.DefaultMMSPort
+	if raw := r.URL.Query().Get("mmsPort"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			a.writeError(w, invalidArgument("invalid mmsPort query parameter"))
+			return
+		}
+		mmsPort = parsed
+	}
+
+	if err := a.reporting.StopByAddress(r.Context(), host, mmsPort); err != nil {
+		a.writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"host": host, "mmsPort": mmsPort})
 }

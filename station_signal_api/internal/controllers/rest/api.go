@@ -26,6 +26,7 @@ import (
 type reportingService interface {
 	Start(ctx context.Context, sessionID string, params reportingdomain.StartParams) (reportingdomain.Device, error)
 	Stop(ctx context.Context, sessionID string, deviceID int) error
+	StopByAddress(ctx context.Context, host string, mmsPort int) error
 	ListForSession(sessionID string) []reportingdomain.Device
 }
 
@@ -118,6 +119,7 @@ func Router(api *API) *chi.Mux {
 		r.Get("/devices", api.handleListDevices)
 		r.Post("/devices", api.handleStartReporting)
 		r.Delete("/devices/{id}", api.handleStopReporting)
+		r.Delete("/devices", api.handleStopReportingByAddress)
 
 		r.Get("/scans", api.handleListScans)
 		r.Post("/scans", api.handleStartScan)

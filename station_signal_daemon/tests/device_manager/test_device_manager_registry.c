@@ -215,6 +215,63 @@ test_freePort_thenReserve_reusesIt(void) {
     TEST_ASSERT_EQUAL_UINT16(removedPort, port2);
 }
 
+/* ---- findDeviceIdByHost ---- */
+
+void
+test_findDeviceIdByHost_findsRunningEntry(void) {
+    uint64_t id;
+    uint16_t port;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK,
+            DeviceManagerRegistry_reserve(fixtureRegistry, "10.0.0.1", 102, NULL, &id, &port, NULL));
+    DeviceManagerRegistry_finalize(fixtureRegistry, id, FAKE_HANDLE_1);
+
+    uint64_t found = 0;
+    TEST_ASSERT_TRUE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.1", 102, &found));
+    TEST_ASSERT_EQUAL_UINT64(id, found);
+}
+
+void
+test_findDeviceIdByHost_findsMidStartEntry(void) {
+    /* Same match scope as hostAlreadyActive's own dedupe check - a reserved-
+     * but-not-yet-finalized entry counts too, since resolving one is exactly
+     * how DeviceManager_stopReportingByAddress recovers a deviceId for a
+     * caller that never obtained one. */
+    uint64_t id;
+    uint16_t port;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK,
+            DeviceManagerRegistry_reserve(fixtureRegistry, "10.0.0.1", 102, NULL, &id, &port, NULL));
+
+    uint64_t found = 0;
+    TEST_ASSERT_TRUE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.1", 102, &found));
+    TEST_ASSERT_EQUAL_UINT64(id, found);
+}
+
+void
+test_findDeviceIdByHost_noMatch_returnsFalse(void) {
+    uint64_t id, found = 0;
+    uint16_t port;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK,
+            DeviceManagerRegistry_reserve(fixtureRegistry, "10.0.0.1", 102, NULL, &id, &port, NULL));
+
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.1", 103, &found));
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.2", 102, &found));
+    TEST_ASSERT_EQUAL_UINT64(0, found); /* untouched on no-match */
+}
+
+void
+test_findDeviceIdByHost_afterRemoval_returnsFalse(void) {
+    uint64_t id;
+    uint16_t port;
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK,
+            DeviceManagerRegistry_reserve(fixtureRegistry, "10.0.0.1", 102, NULL, &id, &port, NULL));
+    DeviceManagerRegistry_finalize(fixtureRegistry, id, FAKE_HANDLE_1);
+    TEST_ASSERT_EQUAL(DEVICE_MANAGER_OK,
+            DeviceManagerRegistry_removeIfRunning(fixtureRegistry, id, NULL, NULL, NULL, NULL));
+
+    uint64_t found = 0;
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.1", 102, &found));
+}
+
 /* ---- NULL-safety ---- */
 
 void
@@ -227,6 +284,10 @@ test_nullSafety_doesNotCrash(void) {
             DeviceManagerRegistry_removeIfRunning(NULL, 1, NULL, NULL, NULL, NULL));
     DeviceManagerRegistry_freePort(NULL, 9000);
     TEST_ASSERT_EQUAL_UINT64(0, DeviceManagerRegistry_anyRunningDeviceId(NULL));
+    uint64_t found = 0;
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(NULL, "10.0.0.1", 102, &found));
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, NULL, 102, &found));
+    TEST_ASSERT_FALSE(DeviceManagerRegistry_findDeviceIdByHost(fixtureRegistry, "10.0.0.1", 102, NULL));
     DeviceManagerRegistry_destroy(NULL);
 }
 
@@ -250,6 +311,11 @@ main(void) {
     RUN_TEST(test_anyRunningDeviceId_isZero_whenNothingFinalized);
     RUN_TEST(test_anyRunningDeviceId_returnsFinalizedDevice);
     RUN_TEST(test_freePort_thenReserve_reusesIt);
+
+    RUN_TEST(test_findDeviceIdByHost_findsRunningEntry);
+    RUN_TEST(test_findDeviceIdByHost_findsMidStartEntry);
+    RUN_TEST(test_findDeviceIdByHost_noMatch_returnsFalse);
+    RUN_TEST(test_findDeviceIdByHost_afterRemoval_returnsFalse);
 
     RUN_TEST(test_nullSafety_doesNotCrash);
 

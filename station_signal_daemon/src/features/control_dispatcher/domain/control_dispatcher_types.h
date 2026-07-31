@@ -67,7 +67,9 @@ typedef struct {
     /* CONTROL_REQ_START_REPORTING fields - unused/zero for other types.
      * interfaceId/mmsPort are ALSO reused by CONTROL_REQ_START_SCAN (see
      * below) - the two request types are mutually exclusive per message, so
-     * sharing these two fields avoids a redundant near-duplicate pair. */
+     * sharing these two fields avoids a redundant near-duplicate pair. host/
+     * mmsPort are ALSO reused by CONTROL_REQ_STOP_REPORTING's address-based
+     * form (see deviceId's own comment below) - same reasoning. */
     char* host;                  /* owned */
     int mmsPort;
     char* iedName;                /* owned, may be NULL (auto-detect) */
@@ -76,7 +78,15 @@ typedef struct {
     char* acseAuthPassword;        /* owned, may be NULL */
     AccessMode accessMode;
 
-    /* CONTROL_REQ_STOP_REPORTING fields - unused/zero for other types */
+    /* CONTROL_REQ_STOP_REPORTING fields - unused/zero for other types.
+     * Two mutually exclusive forms, discriminated by the parser: deviceId
+     * (the normal case) XOR host/mmsPort above (a caller that never obtained
+     * or has lost track of a deviceId - see
+     * DeviceManager_stopReportingByAddress's own doc comment). host is NULL
+     * for the deviceId form; deviceId is left 0 (never a real id, see
+     * device_manager's own "0 is never a valid deviceId" convention) for the
+     * address form. control_dispatcher_usecases.c discriminates on host !=
+     * NULL. */
     uint64_t deviceId;
 
     /* CONTROL_REQ_START_SCAN fields - unused/zero for other types (plus

@@ -104,6 +104,39 @@ func (s *Service) Stop(ctx context.Context, sessionID string, deviceID int) erro
 	return err
 }
 
+// StopByAddress issues STOP_REPORTING's alternate (host, mmsPort) form, for a caller that never
+// obtained or has lost track of a deviceId to call Stop with — e.g. its own prior Start call
+// raced/timed out client-side (see client.go's own callTimeout), or an API restart wiped the
+// store's in-memory bookkeeping while the daemon kept the device registered. This is a recovery
+// path for an orphaned/untracked registration only, not a general force-stop: if the store
+// already has a record for this address (owned by the caller's own session or any other — the
+// same session-agnostic FindByHostPort lookup Start already uses to attach to a shared device),
+// this refuses with ErrDeviceTracked rather than reaching around session isolation — the caller
+// should use the normal deviceId-based Stop instead, which already understands cross-session
+// sharing. A DEVICE_NOT_FOUND from the daemon (nothing registered at this address either) is
+// treated as success — an idempotent "already clean" outcome, exactly what a recovery call
+// wants, not a real failure.
+func (s *Service) StopByAddress(ctx context.Context, host string, mmsPort int) error {
+	unlock := s.locks.Lock(lockKey(host, mmsPort))
+	defer unlock()
+
+	if _, ok := s.store.FindByHostPort(host, mmsPort); ok {
+		return &daemonproto.Error{
+			Code:    daemonproto.ErrDeviceTracked,
+			Message: "this device is already tracked by this API — use the normal connect/stop flow instead",
+		}
+	}
+
+	if _, err := s.gateway.StopByAddress(ctx, host, mmsPort); err != nil {
+		var derr *daemonproto.Error
+		if errors.As(err, &derr) && derr.Code == daemonproto.ErrDeviceNotFound {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // ListForSession returns every currently active device attached to sessionID.
 func (s *Service) ListForSession(sessionID string) []domain.Device {
 	return s.store.ListForSession(sessionID)

@@ -227,6 +227,26 @@ DeviceManagerRegistry_freePort(DeviceManagerRegistry registry, uint16_t port) {
     Semaphore_post(registry->lock);
 }
 
+bool
+DeviceManagerRegistry_findDeviceIdByHost(DeviceManagerRegistry registry, const char* host, int mmsPort,
+        uint64_t* outDeviceId) {
+    if (!registry || !host || !outDeviceId) return false;
+
+    Semaphore_wait(registry->lock);
+    bool found = false;
+    for (int i = 0; i < registry->count; i++) {
+        if (registry->entries[i].mmsPort == mmsPort && registry->entries[i].host
+                && strcmp(registry->entries[i].host, host) == 0) {
+            *outDeviceId = registry->entries[i].deviceId;
+            found = true;
+            break;
+        }
+    }
+    Semaphore_post(registry->lock);
+
+    return found;
+}
+
 uint64_t
 DeviceManagerRegistry_anyRunningDeviceId(DeviceManagerRegistry registry) {
     if (!registry) return 0;

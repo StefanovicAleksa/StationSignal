@@ -172,6 +172,56 @@ test_stopReporting_valid(void) {
     TEST_ASSERT_NOT_NULL(fixtureRequest);
     TEST_ASSERT_EQUAL(CONTROL_REQ_STOP_REPORTING, fixtureRequest->type);
     TEST_ASSERT_EQUAL_UINT64(3, fixtureRequest->deviceId);
+    TEST_ASSERT_NULL(fixtureRequest->host); /* deviceId form leaves host unset - the discriminator
+                                                control_dispatcher_usecases.c relies on */
+}
+
+void
+test_stopReporting_byAddress_missingHost_returnsInvalidParams(void) {
+    /* No deviceId AND no host - neither form satisfied. */
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"STOP_REPORTING\",\"params\":{\"mmsPort\":102}}"));
+}
+
+void
+test_stopReporting_byAddress_emptyHost_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"STOP_REPORTING\",\"params\":{\"host\":\"\"}}"));
+}
+
+void
+test_stopReporting_byAddress_valid_appliesDefaultMmsPort(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"STOP_REPORTING\","
+            "\"params\":{\"host\":\"10.0.0.1\"}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_NOT_NULL(fixtureRequest);
+    TEST_ASSERT_EQUAL(CONTROL_REQ_STOP_REPORTING, fixtureRequest->type);
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", fixtureRequest->host);
+    TEST_ASSERT_EQUAL(102, fixtureRequest->mmsPort);
+    TEST_ASSERT_EQUAL_UINT64(0, fixtureRequest->deviceId); /* unset - see 0-is-never-valid convention */
+}
+
+void
+test_stopReporting_byAddress_valid_explicitMmsPort(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"STOP_REPORTING\","
+            "\"params\":{\"host\":\"10.0.0.1\",\"mmsPort\":10301}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_EQUAL_STRING("10.0.0.1", fixtureRequest->host);
+    TEST_ASSERT_EQUAL(10301, fixtureRequest->mmsPort);
+}
+
+void
+test_stopReporting_deviceIdTakesPrecedenceOverHost_whenBothGiven(void) {
+    /* deviceId present (even if also given a host) always wins - the parser
+     * checks for the deviceId key first. */
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"STOP_REPORTING\","
+            "\"params\":{\"deviceId\":3,\"host\":\"10.0.0.1\"}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_EQUAL_UINT64(3, fixtureRequest->deviceId);
+    TEST_ASSERT_NULL(fixtureRequest->host);
 }
 
 /* ---- START_SCAN params ---- */
@@ -260,6 +310,11 @@ main(void) {
     RUN_TEST(test_stopReporting_missingDeviceId_returnsInvalidParams);
     RUN_TEST(test_stopReporting_negativeDeviceId_returnsInvalidParams);
     RUN_TEST(test_stopReporting_valid);
+    RUN_TEST(test_stopReporting_byAddress_missingHost_returnsInvalidParams);
+    RUN_TEST(test_stopReporting_byAddress_emptyHost_returnsInvalidParams);
+    RUN_TEST(test_stopReporting_byAddress_valid_appliesDefaultMmsPort);
+    RUN_TEST(test_stopReporting_byAddress_valid_explicitMmsPort);
+    RUN_TEST(test_stopReporting_deviceIdTakesPrecedenceOverHost_whenBothGiven);
 
     RUN_TEST(test_startScan_missingInterfaceId_returnsInvalidParams);
     RUN_TEST(test_startScan_emptyInterfaceId_returnsInvalidParams);

@@ -113,6 +113,22 @@ DeviceManagerRegistry_removeIfRunning(DeviceManagerRegistry registry, uint64_t d
 void
 DeviceManagerRegistry_freePort(DeviceManagerRegistry registry, uint16_t port);
 
+/*
+ * Resolves (host, mmsPort) to the deviceId of whatever entry currently
+ * occupies it - running OR still mid-start, same match scope as the
+ * hostAlreadyActive dedupe check reserve() uses internally. Returns true and
+ * sets *outDeviceId if found, false (outDeviceId untouched) otherwise. Used
+ * by DeviceManager_stopReportingByAddress to recover a deviceId a caller
+ * never obtained/kept (e.g. its own StartReporting call raced or timed out
+ * client-side, or a prior process instance's bookkeeping was lost) - once
+ * resolved, the normal deviceId-keyed stop path (removeIfRunning) applies
+ * unchanged, including its own START_IN_PROGRESS protection for a mid-start
+ * entry.
+ */
+bool
+DeviceManagerRegistry_findDeviceIdByHost(DeviceManagerRegistry registry, const char* host, int mmsPort,
+        uint64_t* outDeviceId);
+
 /* Any one currently RUNNING (not mid-start) deviceId - used only by
  * DeviceManager_destroy to drain the registry one device at a time via the
  * public stopReporting path. 0 if none (0 is never a valid deviceId). A

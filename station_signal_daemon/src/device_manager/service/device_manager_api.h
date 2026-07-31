@@ -108,6 +108,27 @@ DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int m
 DeviceManagerError
 DeviceManager_stopReporting(DeviceManagerHandle handle, uint64_t deviceId, DeviceManagerErrorDetail* outDetail);
 
+/*
+ * Blocking. Recovery path for a caller that never obtained or has lost track
+ * of a deviceId (e.g. its own prior StartReporting call raced/timed out
+ * client-side, or an owning process instance restarted and its own
+ * bookkeeping was lost) - resolves (host, mmsPort) to whatever deviceId
+ * currently occupies it (DeviceManagerRegistry_findDeviceIdByHost), then
+ * delegates to DeviceManager_stopReporting unchanged, so every existing
+ * behavior/error code (DEVICE_MANAGER_ERR_START_IN_PROGRESS for a mid-start
+ * entry, atomic remove against a concurrent duplicate stop, teardown
+ * ordering) applies identically - this is purely an alternate key, not a
+ * different stop path. DEVICE_MANAGER_ERR_DEVICE_NOT_FOUND if nothing is
+ * registered at this address (a legitimate, idempotent "already clean"
+ * outcome for a caller recovering from an unknown prior state, not
+ * necessarily a real failure). On DEVICE_MANAGER_OK, *outDeviceId is set to
+ * whichever device was actually stopped, since the caller had no way to know
+ * it in advance.
+ */
+DeviceManagerError
+DeviceManager_stopReportingByAddress(DeviceManagerHandle handle, const char* host, int mmsPort,
+        uint64_t* outDeviceId, DeviceManagerErrorDetail* outDetail);
+
 /* Stops+destroys every still-running device (drains via the public
  * stopReporting path, one at a time - see DeviceManagerRegistry_anyRunningDeviceId's
  * own doc comment for the narrow mid-start-at-shutdown limitation), then

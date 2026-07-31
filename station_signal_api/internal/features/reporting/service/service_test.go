@@ -20,9 +20,16 @@ type mockGateway struct {
 
 	stopErr error
 
+	stopByAddressDeviceID int
+	stopByAddressErr      error
+
 	startCalls int
 	gotStopID  int
 	stopCalls  int
+
+	stopByAddressCalls   int
+	gotStopByAddressHost string
+	gotStopByAddressPort int
 }
 
 func (m *mockGateway) Start(ctx context.Context, params domain.StartParams) (domain.Device, *streamrelay.Hub, error) {
@@ -34,6 +41,13 @@ func (m *mockGateway) Stop(ctx context.Context, deviceID int) error {
 	m.stopCalls++
 	m.gotStopID = deviceID
 	return m.stopErr
+}
+
+func (m *mockGateway) StopByAddress(ctx context.Context, host string, mmsPort int) (int, error) {
+	m.stopByAddressCalls++
+	m.gotStopByAddressHost = host
+	m.gotStopByAddressPort = mmsPort
+	return m.stopByAddressDeviceID, m.stopByAddressErr
 }
 
 func newTestHub(t *testing.T) *streamrelay.Hub {
@@ -144,6 +158,51 @@ func TestService_Stop_OtherSessionsDeviceIsRejectedAsNotFound(t *testing.T) {
 	assert.Equal(t, daemonproto.ErrDeviceNotFound, derr.Code)
 	assert.Zero(t, gw.gotStopID, "the daemon should never be asked to stop a device this session doesn't own")
 	assert.Len(t, svc.ListForSession(testSessionID), 1, "the original session's device must be untouched")
+}
+
+func TestService_StopByAddress_NothingTracked_CallsGatewayAndSucceeds(t *testing.T) {
+	gw := &mockGateway{stopByAddressDeviceID: 7}
+	svc := newServiceWithMock(gw)
+
+	err := svc.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, gw.stopByAddressCalls)
+	assert.Equal(t, "10.0.0.9", gw.gotStopByAddressHost)
+	assert.Equal(t, 102, gw.gotStopByAddressPort)
+}
+
+func TestService_StopByAddress_DeviceNotFoundFromDaemon_TreatedAsSuccess(t *testing.T) {
+	gw := &mockGateway{stopByAddressErr: &daemonproto.Error{Code: daemonproto.ErrDeviceNotFound}}
+	svc := newServiceWithMock(gw)
+
+	err := svc.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	assert.NoError(t, err, "nothing registered at this address is an idempotent success for this recovery-focused call")
+}
+
+func TestService_StopByAddress_OtherErrorFromDaemon_Propagates(t *testing.T) {
+	wantErr := &daemonproto.Error{Code: daemonproto.ErrStartInProgress}
+	gw := &mockGateway{stopByAddressErr: wantErr}
+	svc := newServiceWithMock(gw)
+
+	err := svc.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	assert.Equal(t, wantErr, err)
+}
+
+func TestService_StopByAddress_AlreadyTracked_RefusesWithoutCallingDaemon(t *testing.T) {
+	gw := &mockGateway{startDevice: domain.Device{ID: 1, Host: "10.0.0.9", MMSPort: 102}, startHub: newTestHub(t)}
+	svc := newServiceWithMock(gw)
+	_, err := svc.Start(context.Background(), testSessionID, domain.StartParams{Host: "10.0.0.9", MMSPort: 102})
+	require.NoError(t, err)
+
+	err = svc.StopByAddress(context.Background(), "10.0.0.9", 102)
+
+	var derr *daemonproto.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, daemonproto.ErrDeviceTracked, derr.Code)
+	assert.Zero(t, gw.stopByAddressCalls, "should never reach the daemon when the API already has a record for this address")
 }
 
 func TestService_ListForSession_ReflectsOwnActiveDevices(t *testing.T) {

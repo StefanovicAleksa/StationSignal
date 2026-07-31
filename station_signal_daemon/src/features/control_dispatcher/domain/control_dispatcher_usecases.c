@@ -132,6 +132,15 @@ ControlDispatcherUseCases_processRequest(const ControlRequest* request, DeviceMa
         }
 
         case CONTROL_REQ_STOP_REPORTING: {
+            /* Two mutually exclusive forms - see ControlRequest's own doc comment
+             * (control_dispatcher_types.h) on the host != NULL discriminator. */
+            if (request->host) {
+                uint64_t resolvedDeviceId = 0;
+                DeviceManagerError err = DeviceManager_stopReportingByAddress(deviceManager, request->host,
+                        request->mmsPort, &resolvedDeviceId, NULL);
+                return buildStopResponse(request->requestId, err, resolvedDeviceId);
+            }
+
             DeviceManagerError err = DeviceManager_stopReporting(deviceManager, request->deviceId, NULL);
             return buildStopResponse(request->requestId, err, request->deviceId);
         }

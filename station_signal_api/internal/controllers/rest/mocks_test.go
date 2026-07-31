@@ -10,12 +10,15 @@ import (
 )
 
 type mockReportingService struct {
-	startDevice reportingdomain.Device
-	startErr    error
-	stopErr     error
-	list        []reportingdomain.Device
+	startDevice   reportingdomain.Device
+	startErr      error
+	stopErr       error
+	stopByAddrErr error
+	list          []reportingdomain.Device
 
-	gotStopID int
+	gotStopID       int
+	gotStopAddrHost string
+	gotStopAddrPort int
 }
 
 func (m *mockReportingService) Start(ctx context.Context, sessionID string, params reportingdomain.StartParams) (reportingdomain.Device, error) {
@@ -25,6 +28,12 @@ func (m *mockReportingService) Start(ctx context.Context, sessionID string, para
 func (m *mockReportingService) Stop(ctx context.Context, sessionID string, deviceID int) error {
 	m.gotStopID = deviceID
 	return m.stopErr
+}
+
+func (m *mockReportingService) StopByAddress(ctx context.Context, host string, mmsPort int) error {
+	m.gotStopAddrHost = host
+	m.gotStopAddrPort = mmsPort
+	return m.stopByAddrErr
 }
 
 func (m *mockReportingService) ListForSession(sessionID string) []reportingdomain.Device {
