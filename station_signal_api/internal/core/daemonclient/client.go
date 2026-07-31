@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	callTimeout    = 10 * time.Second
+	callTimeout    = 120 * time.Second
 	dialRetries    = 5
 	dialRetryDelay = 200 * time.Millisecond
 )
