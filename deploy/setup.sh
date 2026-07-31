@@ -98,6 +98,10 @@ echo "==> Ensuring service user '$SERVICE_USER' exists"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || sudo useradd --system --no-create-home "$SERVICE_USER"
 sudo chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_ROOT/structure_files"
 
+echo "==> Creating log directory /var/log/station_signal"
+sudo mkdir -p /var/log/station_signal
+sudo chown "$SERVICE_USER:$SERVICE_USER" /var/log/station_signal
+
 echo "==> Adding the fixed recovery address ($RECOVERY_CIDR) to $CONNECTION_NAME"
 # Permanent and independent of whatever primary IP the Settings page manages later — this is
 # the guaranteed-reachable fallback if a remote IP change ever goes wrong. `+ipv4.addresses`

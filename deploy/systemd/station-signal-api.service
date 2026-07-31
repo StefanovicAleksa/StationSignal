@@ -38,12 +38,14 @@ Restart=on-failure
 RestartSec=2s
 # Plain append-mode log file, not just the journal — this box is often on-site talking to an IED
 # over its one Ethernet port with no route back for `journalctl -u ... -f` to be watched live, so
-# a technician needs to be able to walk up after the fact and read a file directly. LogsDirectory=
-# has systemd create/own /var/log/station_signal (0755, User/Group above) before each start; both
-# streams append here since the daemon's own stderr is inherited straight through by this process
-# (see station_signal_api/internal/features/supervision/data/process.go) — daemon and API log
-# lines interleave in one file, same as they already do in the journal today.
-LogsDirectory=station_signal
+# a technician needs to be able to walk up after the fact and read a file directly. The directory
+# is created/chowned explicitly by deploy/setup.sh, NOT via LogsDirectory= — that directive failed
+# to materialize the directory before this unit's own StandardOutput/StandardError open() on at
+# least one real deployment (systemd version/config not yet root-caused), taking the whole service
+# down in a restart loop; a plain mkdir in setup.sh has no such failure mode. Both streams append
+# here since the daemon's own stderr is inherited straight through by this process (see
+# station_signal_api/internal/features/supervision/data/process.go) — daemon and API log lines
+# interleave in one file, same as they already do in the journal today.
 StandardOutput=append:/var/log/station_signal/station-signal-api.log
 StandardError=append:/var/log/station_signal/station-signal-api.log
 
