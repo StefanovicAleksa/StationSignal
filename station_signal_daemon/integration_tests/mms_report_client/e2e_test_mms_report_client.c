@@ -60,6 +60,7 @@
 #define TEST_PORT_CROSS_RCB_DEDUP 10211
 #define TEST_PORT_ENTRY_ID_RESUME 10212
 #define TEST_PORT_AUTH_REJECTED_CALLBACK 10213
+#define TEST_PORT_PULLED_DATASET 10214
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -506,6 +507,138 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
             "the GI snapshot's value must surface as this entry's previousValue");
     TEST_ASSERT_FALSE_MESSAGE(lastEntry0PreviousValue,
             "previousValue must be the GI-seeded live default (false), not the flipped-to value");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves tier 2 of the three-tier static -> pull live -> self-create dataset
+ * resolution order (mms_report_client_connection.c's enableOneTarget/
+ * pullLiveDataset): a dataset already assigned to urcbDyn's DatSet attribute
+ * by a DIFFERENT, already-disconnected client - standing in for a real
+ * commissioning/engineering tool (e.g. Siemens DIGSI) that assigns a dataset
+ * out-of-band during substation engineering, independent of whatever client
+ * connects later - is reused as-is, instead of the daemon synthesizing its
+ * own association-scoped one via getOrCreateDynamicDataset.
+ *
+ * A second, short-lived IedConnection opens directly against the same
+ * simulator, creates a PERSISTENT (domain-scoped, NOT "@"-prefixed - so it
+ * deliberately outlives that connection, unlike getOrCreateDynamicDataset's
+ * own association-scoped datasets) dataset covering GGIO1.SPCSO1.stVal and
+ * GGIO1.SPCSO1.q - a small, deliberately different subset than
+ * getOrCreateDynamicDataset's own LN-wide fallback, which would cover all 6
+ * FC=ST leaves under GGIO1 across both Ind1 AND SPCSO1 (see
+ * test_dynamicDataset_createdOnEnable_andReportsRealChange's own comment).
+ * Assigns it to urcbDyn's DatSet, then closes - proving persistence isn't
+ * tied to the creator staying connected. Only THEN does the daemon's own
+ * MmsReportClientHandle connect.
+ *
+ * Deliberately uses SPCSO1 (flipped via SimServer_setSpcso1Indication), NOT
+ * Ind1 (SimServer_setIndication): brcbMain/brcbDup (always enabled alongside
+ * urcbDyn in this fixture) already report Ind1.stVal+Ind1.q via their own
+ * "ds1" dataset, and MmsReportClientUseCases_shouldForwardAcrossRcb's
+ * cross-RCB duplicate-content suppression (proven in
+ * test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback)
+ * would otherwise legitimately treat urcbDyn's own Ind1 report as an
+ * exact-content duplicate of what brcbMain/brcbDup just forwarded a moment
+ * earlier - not a bug in the tier-2 pull logic this test targets, but a
+ * confound worth avoiding by construction. SPCSO1 is not a member of any
+ * other RCB's dataset in this fixture, so its content can never collide.
+ *
+ * The load-bearing assertion is the survivor count on the post-GI flip: 2
+ * (stVal + its quality sibling q, dragged along by group-extension - the
+ * same mechanism proven in test_dynamicDataset_createdOnEnable_andReportsRealChange),
+ * not urcbDyn's usual self-created-dataset survivor count of 3 (stVal+q+t) -
+ * proving the daemon decoded against the PULLED dataset's real (smaller,
+ * t-less) shape, not the LN-wide fallback shape it would have used had it
+ * created its own.
+ */
+void
+test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_PULLED_DATASET);
+
+    /* ---- Pre-assign a persistent dataset to urcbDyn via a second,
+     * short-lived client - standing in for an out-of-band commissioning tool
+     * (e.g. DIGSI) - closed BEFORE the daemon's own client ever connects. */
+    IedConnection setupConn = IedConnection_create();
+    IedClientError setupErr = IED_ERROR_OK;
+    IedConnection_connect(setupConn, &setupErr, "127.0.0.1", TEST_PORT_PULLED_DATASET);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected the setup connection to associate");
+
+    LinkedList members = LinkedList_create();
+    LinkedList_add(members, (void*) "Reporter1LD1/GGIO1.SPCSO1.stVal[ST]");
+    LinkedList_add(members, (void*) "Reporter1LD1/GGIO1.SPCSO1.q[ST]");
+    /* Domain-scoped (permanent) form per IedConnection_createDataSet's own
+     * doc comment: "LDName/LNodeName.dataSetName" - deliberately NOT the
+     * "@"-prefixed association-scoped form getOrCreateDynamicDataset uses. */
+    IedConnection_createDataSet(setupConn, &setupErr, "Reporter1LD1/GGIO1.preassigned1", members);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected the pre-assigned dataset to be created");
+    LinkedList_destroyStatic(members); /* elements are string literals, not owned copies */
+
+    ClientReportControlBlock setupRcb = IedConnection_getRCBValues(setupConn, &setupErr,
+            "Reporter1LD1/GGIO1.RP.urcbDyn", NULL);
+    TEST_ASSERT_NOT_NULL(setupRcb);
+    /* RCB DatSet attribute form per ClientReportControlBlock_setDataSetReference's
+     * own doc comment: "LDName/LNName$DataSetName" - this codebase's own
+     * standard "$"-joined convention, NOT the dot-joined form createDataSet
+     * itself just took above. */
+    ClientReportControlBlock_setDataSetReference(setupRcb, "Reporter1LD1/GGIO1$preassigned1");
+    IedConnection_setRCBValues(setupConn, &setupErr, setupRcb, RCB_ELEMENT_DATSET, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected assigning urcbDyn's DatSet to succeed");
+    ClientReportControlBlock_destroy(setupRcb);
+
+    IedConnection_close(setupConn);
+    IedConnection_destroy(setupConn);
+
+    /* ---- Now the daemon's own client connects and must find + reuse the
+     * dataset the setup connection left behind. ---- */
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_PULLED_DATASET,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    strncpy(interestedRcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn", sizeof(interestedRcbReference) - 1);
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
+            "expected urcbDyn to enable successfully against the pre-assigned pulled dataset");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn must not fail when a live dataset is already assigned");
+
+    /* GI-triggered snapshot (2 members - the pulled dataset's own shape, not
+     * the LN-wide fallback's 6) seeds the cache and must never itself reach
+     * the callback. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "urcbDyn's GI snapshot must never reach the callback - it silently seeds the cache instead");
+
+    SimServer_setSpcso1Indication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
+            "expected a report from the pulled dataset after flipping SPCSO1.stVal");
+
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.RP.urcbDyn", lastRcbReference);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, lastEntryCount,
+            "the pulled dataset only has stVal+q (no t) - a count of 3 here would mean the daemon "
+            "self-created its own LN-wide dataset instead of reusing the pulled one");
+    TEST_ASSERT_TRUE(lastEntryValue);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$stVal", lastEntry0Reference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$q", lastEntry1Reference);
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1039,6 +1172,7 @@ main(void) {
     RUN_TEST(test_authRequired_wrongPassword_neverConnects);
     RUN_TEST(test_authRequired_wrongPassword_firesConnectionRejectedCallback);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
+    RUN_TEST(test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
     RUN_TEST(test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog);

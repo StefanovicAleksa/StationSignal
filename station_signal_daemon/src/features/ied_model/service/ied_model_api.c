@@ -147,6 +147,26 @@ IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, c
     return IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, lnReference);
 }
 
+LinkedList
+IedModel_getLeafReferencesForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getLeafReferencesForMemberReference(handle, memberReference);
+}
+
+LinkedList
+IedModel_getLeafWireTypesForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getLeafWireTypesForMemberReference(handle, memberReference);
+}
+
+LinkedList
+IedModel_getLeafSemanticsForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getLeafSemanticsForMemberReference(handle, memberReference);
+}
+
+IedModelDaSemantic
+IedModel_getSemanticForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getSemanticForMemberReference(handle, memberReference);
+}
+
 void
 IedModel_destroyReportControlBlockTarget(void* target) {
     IedModelUseCases_destroyReportControlBlockTarget(target);

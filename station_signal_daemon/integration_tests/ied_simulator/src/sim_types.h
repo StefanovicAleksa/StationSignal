@@ -45,6 +45,8 @@ struct sSimServer {
     IedServer server;
     DataAttribute* indicationStVal; /* GGIO1.Ind1.stVal */
     bool indicationValue;
+    DataAttribute* spcso1StVal; /* GGIO1.SPCSO1.stVal - see SimServer_setSpcso1Indication's own doc comment */
+    bool spcso1Value;
     const char* expectedPassword; /* borrowed, NULL = no authentication required */
 };
 
@@ -71,6 +73,22 @@ SimServer_start(SimServer self, int tcpPort);
  */
 void
 SimServer_setIndication(SimServer self, bool value);
+
+/*
+ * Flips GGIO1.SPCSO1.stVal to the given value - the sibling counterpart of
+ * SimServer_setIndication, over a DIFFERENT DO (SPCSO1, not Ind1). Added so
+ * an E2E test can flip an attribute that is NOT already a member of
+ * brcbMain's/brcbDup's own "ds1" dataset (both of which observe
+ * GGIO1.Ind1.stVal/q), avoiding a spurious collision with
+ * mms_report_client's cross-RCB duplicate-content suppression
+ * (MmsReportClientUseCases_shouldForwardAcrossRcb) when a test wants to
+ * observe a report from a DIFFERENT RCB/dataset covering the same underlying
+ * kind of attribute without its content being suppressed as an apparent
+ * duplicate of what brcbMain/brcbDup already forwarded. Same thread-safety
+ * guarantee as SimServer_setIndication.
+ */
+void
+SimServer_setSpcso1Indication(SimServer self, bool value);
 
 /*
  * Points the server's MMS file services (GetFileDirectory/GetFile) at a real

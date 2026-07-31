@@ -3,6 +3,7 @@
 #include "unity.h"
 #include "stdbool_compat.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
+#include "iec61850_dynamic_model.h"
 
 void
 setUp(void) {}
@@ -1725,6 +1726,177 @@ test_buildWireMemberReferences_empty_whenArrayIsNull(void) {
     LinkedList_destroyDeep(wireRefs, free);
 }
 
+/* ---- convertAcsiRefToMemberReference (tier-2 pulled-dataset ACSI -> this
+ * feature's own "$"-joined member-reference conversion - the mirror image of
+ * buildWireMemberReferences above, and NOT the same as
+ * ied_model_online_loader's own IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef,
+ * which strips the LD prefix for a different consumer's convention) ---- */
+
+void
+test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0.Mod[ST]");
+
+    /* The one behavioral difference from IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef -
+     * this feature's own memberReferences[] convention is LD-prefixed. */
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod", out);
+    free(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0.Mod.stVal[ST]");
+
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod$stVal", out);
+    free(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_nestedSdo_joinsEverySegmentWithDollar(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0.PhV.cVal.mag[MX]");
+
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$MX$PhV$cVal$mag", out);
+    free(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_stripsArrayIndexAnnotation(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0.Arr(1)item[ST]");
+
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Arritem", out);
+    free(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_null_onMissingTrailingFc(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0.Mod.stVal");
+    TEST_ASSERT_NULL(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_null_onMissingDotAfterLdLnPrefix(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1/LLN0[ST]");
+    TEST_ASSERT_NULL(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_null_onMissingSlashInLdLnPrefix(void) {
+    char* out = MmsReportClientUseCases_convertAcsiRefToMemberReference("IED1LD1LLN0.Mod.stVal[ST]");
+    TEST_ASSERT_NULL(out);
+}
+
+void
+test_convertAcsiRefToMemberReference_null_onNullInput(void) {
+    TEST_ASSERT_NULL(MmsReportClientUseCases_convertAcsiRefToMemberReference(NULL));
+}
+
+/* ---- buildMemberRefCacheEntry (tier 1/2/3-shared cache-entry construction -
+ * the load-bearing proof that Gap-4 decomposition/semantics now work purely
+ * off a member-reference string, with NO backing DataSet registered in the
+ * model at all - exactly the shape a tier-2 pulled live dataset has, since
+ * SCL never declared one) ---- */
+
+static IedModel* memberRefCacheEntryFixtureModel;
+static struct sIedModelHandle memberRefCacheEntryFixtureHandle;
+static IedModelHandle memberRefCacheEntryFixtureHandleRef;
+
+/*
+ * TestIED/LD1/LLN0
+ *   Ind1 (DO)
+ *     stVal (BOOLEAN, FC=ST)
+ *     q     (QUALITY, FC=ST)
+ * Deliberately NO DataSet registered anywhere in this model - proves
+ * decomposition/semantics resolve purely from the member-reference string,
+ * the same shape a tier-2 pulled dataset (no SCL datSet, so no local DataSet
+ * object either) presents to buildMemberRefCacheEntry.
+ */
+static void
+setUpMemberRefCacheEntryFixture(void) {
+    memberRefCacheEntryFixtureModel = IedModel_create("TestIED");
+    LogicalDevice* ld = LogicalDevice_create("LD1", memberRefCacheEntryFixtureModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* ind1 = DataObject_create("Ind1", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) ind1, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) ind1, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    memberRefCacheEntryFixtureHandle.model = memberRefCacheEntryFixtureModel;
+    memberRefCacheEntryFixtureHandle.accessMode = IED_MODEL_ACCESS_REPORT_ONLY;
+    memberRefCacheEntryFixtureHandle.iedName = "TestIED";
+    memberRefCacheEntryFixtureHandle.daSemantics = NULL;
+    memberRefCacheEntryFixtureHandle.daSemanticCount = 0;
+    memberRefCacheEntryFixtureHandleRef = &memberRefCacheEntryFixtureHandle;
+}
+
+static void
+tearDownMemberRefCacheEntryFixture(void) {
+    IedModel_destroy(memberRefCacheEntryFixtureModel);
+}
+
+void
+test_buildMemberRefCacheEntry_leafOnlyMembers_noDecomposition_tagsResolvedDatasetReference(void) {
+    setUpMemberRefCacheEntryFixture();
+
+    char** array = malloc(2 * sizeof(char*));
+    array[0] = strdup("TestIEDLD1/LLN0$ST$Ind1$stVal");
+    array[1] = strdup("TestIEDLD1/LLN0$ST$Ind1$q");
+
+    MmsReportClientMemberRefCacheEntry* entry = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            memberRefCacheEntryFixtureHandleRef, "TestIEDLD1/LLN0.RP.rp01", array, 2, "TestIEDLD1/LLN0$ds1");
+
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0.RP.rp01", entry->rcbReference);
+    TEST_ASSERT_EQUAL_INT(2, entry->memberCount);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$ds1", entry->resolvedDatasetReference);
+    /* Neither member has a trailing "$DA"-less DO-level shape - both are
+     * already leaf-level, so nothing decomposes. */
+    TEST_ASSERT_NULL(entry->memberLeafReferences[0]);
+    TEST_ASSERT_NULL(entry->memberLeafReferences[1]);
+    TEST_ASSERT_EQUAL_INT(0, entry->memberLeafCounts[0]);
+    TEST_ASSERT_EQUAL_INT(0, entry->memberLeafCounts[1]);
+    TEST_ASSERT_EQUAL_INT(2, entry->totalLeafSlots);
+    TEST_ASSERT_EQUAL_INT(0, entry->leafSlotOffsets[0]);
+    TEST_ASSERT_EQUAL_INT(1, entry->leafSlotOffsets[1]);
+    TEST_ASSERT_FALSE(entry->everPopulated);
+    TEST_ASSERT_NULL(entry->lastEntryId);
+
+    MmsReportClientUseCases_destroyMemberRefCacheEntry(entry);
+    tearDownMemberRefCacheEntryFixture();
+}
+
+void
+test_buildMemberRefCacheEntry_doLevelMember_decomposes_withNoRegisteredDataSet(void) {
+    setUpMemberRefCacheEntryFixture();
+
+    char** array = malloc(1 * sizeof(char*));
+    array[0] = strdup("TestIEDLD1/LLN0$ST$Ind1");
+
+    /* "@livepull123" stands in for a tier-2 pulled live dataset's own name -
+     * this model has no DataSet object registered anywhere (unlike a tier-1
+     * static/tier-3 self-created target, which always has one either from
+     * SCL or from getOrCreateDynamicDataset's own creation) - proving
+     * decomposition works purely off the member-reference string. */
+    MmsReportClientMemberRefCacheEntry* entry = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            memberRefCacheEntryFixtureHandleRef, "TestIEDLD1/LLN0.RP.rp01", array, 1, "@livepull123");
+
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_STRING("@livepull123", entry->resolvedDatasetReference);
+    TEST_ASSERT_EQUAL_INT(1, entry->memberCount);
+    TEST_ASSERT_NOT_NULL(entry->memberLeafReferences[0]);
+    TEST_ASSERT_EQUAL_INT(2, entry->memberLeafCounts[0]);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$ST$Ind1$stVal", entry->memberLeafReferences[0][0]);
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$ST$Ind1$q", entry->memberLeafReferences[0][1]);
+    TEST_ASSERT_EQUAL_INT(2, entry->totalLeafSlots);
+    TEST_ASSERT_EQUAL_INT(0, entry->leafSlotOffsets[0]);
+
+    MmsReportClientUseCases_destroyMemberRefCacheEntry(entry);
+    tearDownMemberRefCacheEntryFixture();
+}
+
+void
+test_buildMemberRefCacheEntry_null_onNullArray(void) {
+    TEST_ASSERT_NULL(MmsReportClientUseCases_buildMemberRefCacheEntry(NULL, "rcb", NULL, 0, NULL));
+}
+
 /* ---- computeNextBackoffDelay ---- */
 
 void
@@ -1831,6 +2003,19 @@ main(void) {
     RUN_TEST(test_buildWireMemberReferences_skipsNullEntry);
     RUN_TEST(test_buildWireMemberReferences_empty_whenCountIsZeroOrNegative);
     RUN_TEST(test_buildWireMemberReferences_empty_whenArrayIsNull);
+
+    RUN_TEST(test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix);
+    RUN_TEST(test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar);
+    RUN_TEST(test_convertAcsiRefToMemberReference_nestedSdo_joinsEverySegmentWithDollar);
+    RUN_TEST(test_convertAcsiRefToMemberReference_stripsArrayIndexAnnotation);
+    RUN_TEST(test_convertAcsiRefToMemberReference_null_onMissingTrailingFc);
+    RUN_TEST(test_convertAcsiRefToMemberReference_null_onMissingDotAfterLdLnPrefix);
+    RUN_TEST(test_convertAcsiRefToMemberReference_null_onMissingSlashInLdLnPrefix);
+    RUN_TEST(test_convertAcsiRefToMemberReference_null_onNullInput);
+
+    RUN_TEST(test_buildMemberRefCacheEntry_leafOnlyMembers_noDecomposition_tagsResolvedDatasetReference);
+    RUN_TEST(test_buildMemberRefCacheEntry_doLevelMember_decomposes_withNoRegisteredDataSet);
+    RUN_TEST(test_buildMemberRefCacheEntry_null_onNullArray);
 
     RUN_TEST(test_computeNextBackoffDelay_returnsInitial_whenCurrentIsZero);
     RUN_TEST(test_computeNextBackoffDelay_doublesUntilCap);

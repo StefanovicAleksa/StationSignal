@@ -240,6 +240,41 @@ typedef struct {
      * Explicitly initialized NULL in buildMemberRefCache, freed by
      * MmsReportClientUseCases_destroyMemberRefCacheEntry. */
     MmsValue* lastEntryId;
+
+    /* Owned copy of whichever dataset reference this entry's shape (every
+     * field above) currently reflects, or NULL if not yet resolved from a
+     * live connection. For a target with an SCL datasetReference
+     * (ReportControlBlockTarget.datasetReference non-NULL), this is set once
+     * in buildMemberRefCache from that same immutable value and never
+     * rechecked - enableOneTarget never even reaches the tier-2/3 branch for
+     * such a target, so this field is pure bookkeeping there, never compared
+     * against anything.
+     *
+     * For a "Dyn" target (no SCL datasetReference), this is the single source
+     * of truth for whether this entry's current shape is still valid on a
+     * (re)connect: enableOneTarget (mms_report_client_connection.c) compares
+     * the dataset name it actually ends up using this enable - whatever
+     * pullLiveDataset returned (tier 2), or getOrCreateDynamicDataset's
+     * deterministic "@dyn_<lnReference>" (tier 3) - against this field.
+     * Equal means this entry's shape already matches (the common case on
+     * every reconnect: the same live-assigned dataset stays put, or the same
+     * deterministic self-created name is regenerated) - no rebuild needed.
+     * Different means the previously-cached shape can no longer be trusted
+     * for this RCB (a live-assigned dataset's identity genuinely changed
+     * underneath the daemon, or a transition between tier 2 and tier 3) -
+     * MmsReportClientConnection_refreshPulledMemberRefCache/
+     * _ensureLnFallbackMemberRefCache (mms_report_client_connection.c) rebuild
+     * every field above from scratch in that case, INCLUDING resetting
+     * lastForwardedValues/leafSlotOffsets/everPopulated/lastEntryId back to a
+     * fresh bootstrap state - a narrow, explicit exception to "the value-diff
+     * cache is never reset" (see this struct's own top comment), justified
+     * because a shape change invalidates slot INDICES themselves: slot 3
+     * under the old shape and slot 3 under the new shape are not the same
+     * wire position, so preserving old slot contents across a shape change
+     * would silently misattribute a stale value to an unrelated new
+     * position. Freed alongside rcbReference by
+     * MmsReportClientUseCases_destroyMemberRefCacheEntry. */
+    char* resolvedDatasetReference;
 } MmsReportClientMemberRefCacheEntry;
 
 /*

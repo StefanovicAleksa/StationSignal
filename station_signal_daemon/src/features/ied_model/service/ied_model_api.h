@@ -174,6 +174,26 @@ bool IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsTyp
  * Caller owns the list and its elements: LinkedList_destroyDeep(list, free). */
 LinkedList IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference);
 
+/*
+ * Member-reference-keyed counterparts of IedModel_getDataSetMemberLeafReferences/
+ * _getDataSetMemberLeafWireTypes/_getDataSetMemberLeafSemantics, plus a
+ * single-member counterpart of _getDataSetMemberSemantics - resolved directly
+ * from a "LD/LN$FC$DO[$DA]" member-reference string (the exact shape
+ * IedModel_getDataSetMemberReferences/_getReportableAttributeReferencesForLogicalNode
+ * already produce) instead of a (datasetReference, memberIndex) pair into a
+ * locally-registered DataSet. Use these when the dataset in question was
+ * resolved live over the wire (e.g. via IedConnection_getDataSetDirectory)
+ * and has no corresponding DataSet object in this IedModel at all - purely
+ * local tree lookups otherwise, same as every other accessor here. Same
+ * "empty list / IED_MODEL_DA_SEMANTIC_NONE on any resolution failure, never
+ * an error" contract as their DataSet-indexed counterparts. Caller owns each
+ * returned list and its elements: LinkedList_destroyDeep(list, free).
+ */
+LinkedList IedModel_getLeafReferencesForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModel_getLeafWireTypesForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModel_getLeafSemanticsForMemberReference(IedModelHandle handle, const char* memberReference);
+IedModelDaSemantic IedModel_getSemanticForMemberReference(IedModelHandle handle, const char* memberReference);
+
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModel_destroyReportControlBlockTarget(void* target);
 

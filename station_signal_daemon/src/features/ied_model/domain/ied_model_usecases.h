@@ -92,6 +92,26 @@ LinkedList IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedMo
         const char* lnReference);
 
 /*
+ * Member-reference-keyed counterparts of getDataSetMemberLeafReferences/
+ * _getDataSetMemberLeafWireTypes/_getDataSetMemberSemantics(one entry)/
+ * _getDataSetMemberLeafSemantics - resolved directly from a "LD/LN$FC$DO[$DA]"
+ * member-reference string (this codebase's own convention - the exact shape
+ * getDataSetMemberReferences/getReportableAttributeReferencesForLogicalNode
+ * already produce) instead of a (datasetReference, memberIndex) pair into a
+ * DataSet registered in this model. Needed because a dataset resolved live
+ * over the wire (e.g. mms_report_client's tier-2 "pulled" live-assigned
+ * dataset, see that feature's own doc comments) has no DataSet/DataSetEntry
+ * object registered in this IedModel at all - the DataSet-indexed accessors
+ * above are now thin wrappers around these. Same contracts as their
+ * DataSet-indexed counterparts: empty list / IED_MODEL_DA_SEMANTIC_NONE on
+ * any resolution failure, never an error.
+ */
+LinkedList IedModelUseCases_getLeafReferencesForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModelUseCases_getLeafWireTypesForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModelUseCases_getLeafSemanticsForMemberReference(IedModelHandle handle, const char* memberReference);
+IedModelDaSemantic IedModelUseCases_getSemanticForMemberReference(IedModelHandle handle, const char* memberReference);
+
+/*
  * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType against
  * its ACTUAL wire-decoded MmsType - see the .c file's own doc comment on this
  * function for the full real-hardware finding this guards against. Only

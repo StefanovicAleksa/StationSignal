@@ -430,6 +430,148 @@ test_getDataSetMemberLeafReferences_empty_whenIndexNegative(void) {
     LinkedList_destroyDeep(leaves, free);
 }
 
+/* ---- getLeafReferencesForMemberReference / getLeafWireTypesForMemberReference /
+ * getLeafSemanticsForMemberReference / getSemanticForMemberReference (the
+ * member-reference-string-keyed counterparts, added so mms_report_client can
+ * resolve Gap-4 decomposition/semantics for a dataset pulled live over the
+ * wire - one with no DataSet object registered in this IedModel at all,
+ * since SCL never declared it. The four pre-existing DataSet-indexed
+ * accessors above are now thin wrappers delegating to these.) ---- */
+
+void
+test_getLeafReferencesForMemberReference_decomposesFlatDo_withNoDataSetRegisteredAtAll(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* ind = DataObject_create("Ind", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) ind, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) ind, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    /* Deliberately no DataSet_create/DataSetEntry_create anywhere in this
+     * model - proves resolution works purely from the member-reference
+     * string, unlike the DataSet-indexed accessor this mirrors
+     * (test_getDataSetMemberLeafReferences_decomposesFlatDo), which requires
+     * a real registered DataSet to look up. */
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList leaves = IedModelUseCases_getLeafReferencesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(leaves));
+    LinkedList element = LinkedList_getNext(leaves);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$stVal", (const char*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$q", (const char*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(leaves, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getLeafReferencesForMemberReference_matchesDataSetIndexedAccessor_forSameDo(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_INT32U, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) pos, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    DataSet* dataSet = DataSet_create("ds1", ln0);
+    DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    /* Regression proof: the DataSet-indexed accessor (now a thin wrapper)
+     * and the member-reference-keyed one it delegates to must agree exactly
+     * for the SAME underlying DO, since the shared resolver refactor must
+     * not have changed either's observable behavior. */
+    LinkedList viaDataSet = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
+    LinkedList viaMemberRef = IedModelUseCases_getLeafReferencesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Pos");
+
+    TEST_ASSERT_EQUAL_INT(LinkedList_size(viaDataSet), LinkedList_size(viaMemberRef));
+    LinkedList a = LinkedList_getNext(viaDataSet);
+    LinkedList b = LinkedList_getNext(viaMemberRef);
+    while (a && b) {
+        TEST_ASSERT_EQUAL_STRING((const char*) LinkedList_getData(a), (const char*) LinkedList_getData(b));
+        a = LinkedList_getNext(a);
+        b = LinkedList_getNext(b);
+    }
+
+    LinkedList_destroyDeep(viaDataSet, free);
+    LinkedList_destroyDeep(viaMemberRef, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getLeafReferencesForMemberReference_empty_whenAlreadyLeafLevel(void) {
+    LinkedList leaves = IedModelUseCases_getLeafReferencesForMemberReference(handle,
+            "TestIEDLD1/LLN0$ST$Mod$stVal");
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getLeafReferencesForMemberReference_empty_whenNull(void) {
+    LinkedList leaves = IedModelUseCases_getLeafReferencesForMemberReference(handle, NULL);
+
+    TEST_ASSERT_NOT_NULL(leaves);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(leaves));
+
+    LinkedList_destroyDeep(leaves, free);
+}
+
+void
+test_getLeafWireTypesForMemberReference_matchesLeafReferences_countAndOrder(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+
+    DataObject* ind = DataObject_create("Ind", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) ind, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) ind, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    LinkedList wireTypes = IedModelUseCases_getLeafWireTypesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(wireTypes));
+    LinkedList element = LinkedList_getNext(wireTypes);
+    TEST_ASSERT_EQUAL_INT(IEC61850_BOOLEAN, *(DataAttributeType*) LinkedList_getData(element));
+    element = LinkedList_getNext(element);
+    TEST_ASSERT_EQUAL_INT(IEC61850_QUALITY, *(DataAttributeType*) LinkedList_getData(element));
+
+    LinkedList_destroyDeep(wireTypes, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getSemanticForMemberReference_none_forOrdinaryLeaf(void) {
+    /* No daSemantics registered on `handle`'s fixture (empty/NULL array) -
+     * every leaf degrades to NONE, same as the DataSet-indexed accessor's
+     * own degrade-safely posture. */
+    IedModelDaSemantic semantic =
+            IedModelUseCases_getSemanticForMemberReference(handle, "TestIEDLD1/LLN0$ST$Mod$stVal");
+    TEST_ASSERT_EQUAL_INT(IED_MODEL_DA_SEMANTIC_NONE, semantic);
+}
+
+void
+test_getSemanticForMemberReference_none_whenDoLevel_notLeaf(void) {
+    IedModelDaSemantic semantic = IedModelUseCases_getSemanticForMemberReference(handle, "TestIEDLD1/LLN0$ST$Mod");
+    TEST_ASSERT_EQUAL_INT(IED_MODEL_DA_SEMANTIC_NONE, semantic);
+}
+
+void
+test_getSemanticForMemberReference_none_whenNull(void) {
+    TEST_ASSERT_EQUAL_INT(IED_MODEL_DA_SEMANTIC_NONE, IedModelUseCases_getSemanticForMemberReference(handle, NULL));
+}
+
 /* ---- getDataSetMemberLeafWireTypes / dataAttributeTypeMatchesMmsType ----
  * See mms_report_client_usecases.c's decomposedLeafTypesMatch (and its
  * goose_subscriber twin) for what these back: real production hardware
@@ -707,6 +849,15 @@ main(void) {
     RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenDatasetReferenceIsNull);
     RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexOutOfRange);
     RUN_TEST(test_getDataSetMemberLeafReferences_empty_whenIndexNegative);
+
+    RUN_TEST(test_getLeafReferencesForMemberReference_decomposesFlatDo_withNoDataSetRegisteredAtAll);
+    RUN_TEST(test_getLeafReferencesForMemberReference_matchesDataSetIndexedAccessor_forSameDo);
+    RUN_TEST(test_getLeafReferencesForMemberReference_empty_whenAlreadyLeafLevel);
+    RUN_TEST(test_getLeafReferencesForMemberReference_empty_whenNull);
+    RUN_TEST(test_getLeafWireTypesForMemberReference_matchesLeafReferences_countAndOrder);
+    RUN_TEST(test_getSemanticForMemberReference_none_forOrdinaryLeaf);
+    RUN_TEST(test_getSemanticForMemberReference_none_whenDoLevel_notLeaf);
+    RUN_TEST(test_getSemanticForMemberReference_none_whenNull);
 
     RUN_TEST(test_getDataSetMemberLeafWireTypes_decomposesFlatDo_matchesReferenceOrder);
     RUN_TEST(test_getDataSetMemberLeafWireTypes_empty_whenMemberIsAlreadyLeafLevel);

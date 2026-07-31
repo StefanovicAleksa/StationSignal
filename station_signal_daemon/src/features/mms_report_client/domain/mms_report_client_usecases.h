@@ -135,6 +135,31 @@ void
 MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry);
 
 /*
+ * Swaps every array-shaped field (memberReferences, memberLeafReferences,
+ * memberLeafCounts, leafSlotOffsets, totalLeafSlots, lastForwardedValues,
+ * memberLeafWireTypes, leafSemantics, everPopulated, lastEntryId,
+ * resolvedDatasetReference) from `fresh` into `entry`, IN PLACE - `entry`'s
+ * own pointer identity and rcbReference are left untouched (mms_report_client_connection.c's
+ * refreshPulledMemberRefCache/ensureLnFallbackMemberRefCache rely on the
+ * entry's pointer never moving: the report-adapter thread's own
+ * lookupMemberRefCache walks handle->memberRefCache WITHOUT holding
+ * memberRefCacheLock, only field mutations are lock-protected - see that
+ * function's own doc comment in mms_report_client_report_adapter.c). Frees
+ * entry's OLD field values before adopting fresh's, then frees fresh's own
+ * shell (and its now-redundant rcbReference) - fresh must not be used again
+ * after this call, NULL-safe on both arguments (no-op if either is NULL).
+ *
+ * Caller MUST hold handle->memberRefCacheLock for the duration of this call -
+ * not taken internally here, since callers need the lock held across the
+ * surrounding "is a rebuild even needed" check too (see
+ * refreshPulledMemberRefCache's own doc comment for why a shape rebuild
+ * deliberately resets the value-diff cache too, rather than preserving it).
+ */
+void
+MmsReportClientUseCases_swapMemberRefCacheEntryShape(MmsReportClientMemberRefCacheEntry* entry,
+        MmsReportClientMemberRefCacheEntry* fresh);
+
+/*
  * Cross-RCB duplicate-content suppression - see MmsReportClientCrossRcbDedupCache's
  * own doc comment for the full rationale (redundant RCB instances on the
  * same LN/dataset reporting the same event independently). Compares
@@ -175,6 +200,64 @@ MmsReportClientUseCases_destroyCrossRcbDedupCache(MmsReportClientCrossRcbDedupCa
  */
 LinkedList
 MmsReportClientUseCases_buildWireMemberReferences(const char* const* memberReferences, int count);
+
+/*
+ * Converts one ACSI dot/bracket-form dataset member reference
+ * ("LD/LN.DO[.SDO...].DA[FC]", the exact shape IedConnection_getDataSetDirectory
+ * returns) into this feature's own "$"-joined member-reference convention
+ * ("LD/LN$FC$DO[$SDO...][$DA]" - matches IedModel_getDataSetMemberReferences's
+ * own output). The mirror image of MmsReportClientUseCases_buildWireMemberReferences
+ * (which goes the OPPOSITE direction, "$"-joined -> dot/bracket form, for
+ * IedConnection_createDataSet's input) but NOT the same function as
+ * ied_model_online_loader's own IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef,
+ * which strips the LD prefix (that feature's DataSetEntry_create needs
+ * LD-free names - a different convention this feature's memberReferences[]
+ * does not share). Used by mms_report_client_connection.c to turn a pulled
+ * live dataset's own IedConnection_getDataSetDirectory member list into this
+ * feature's standard reference form.
+ *
+ * Returns NULL (malformed input - no trailing "[FC]", no "." after the
+ * "LD/LN" prefix, no "/" within that prefix, or allocation failure) rather
+ * than a best-effort partial string; caller must free a non-NULL result and
+ * should skip NULL ones. Any "(arrayIndex)" annotation on a path segment is
+ * stripped, not preserved (this codebase does not model array indices
+ * anywhere else).
+ */
+char*
+MmsReportClientUseCases_convertAcsiRefToMemberReference(const char* acsiRef);
+
+/*
+ * Builds one MmsReportClientMemberRefCacheEntry* from an already-resolved
+ * ordered member-reference array ("$"-joined, LD-prefixed "LD/LN$FC$DO[$DA]"
+ * wire form - this feature's own convention) plus the dataset identity that
+ * array came from (resolvedDatasetReference - see
+ * MmsReportClientMemberRefCacheEntry's own doc comment in
+ * mms_report_client_types.h for how this is later used to detect a
+ * reconnect-time shape change). Callable both at MmsReportClient_start
+ * (mms_report_client_api.c's buildMemberRefCache - tier 1's static SCL
+ * dataset, and tier 3's provisional LN-fallback list) and post-connect from
+ * mms_report_client_connection.c (tier 2's pulled live dataset, and tier 3's
+ * actually-realized "@dyn_<ln>" list).
+ *
+ * Every member's Gap-4 decomposition/wire-type/semantics is resolved via the
+ * ied_model *ForMemberReference accessors, keyed directly by each member's
+ * own reference string rather than a (datasetReference, index) pair into a
+ * registered DataSet - this works identically regardless of whether array's
+ * members came from a real registered SCL DataSet, a live dataset resolved
+ * over the wire with no local DataSet object at all, or a purely-local LN
+ * leaf walk.
+ *
+ * `array`/`count` is consumed: ownership of array and every element
+ * transfers in on success (the new entry's own memberReferences field), and
+ * every element plus the array itself is freed on any failure path -
+ * `array`/`count` must never be used again by the caller after this call
+ * either way. Returns NULL (array/its contents still freed) on a NULL/empty
+ * array or allocation failure. `resolvedDatasetReference` (nullable) is
+ * duplicated into the new entry's own field of the same name.
+ */
+MmsReportClientMemberRefCacheEntry*
+MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const char* rcbReference,
+        char** array, int count, const char* resolvedDatasetReference);
 
 /*
  * Pure doubling-with-cap backoff calculation. currentDelayMs == 0 means "no

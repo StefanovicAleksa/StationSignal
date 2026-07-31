@@ -817,10 +817,15 @@ MmsReportClientUseCases_computeNextBackoffDelay(uint32_t currentDelayMs, uint32_
     return (uint32_t) doubled;
 }
 
-void
-MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
-    if (!entry) return;
-    MmsReportClientMemberRefCacheEntry* e = (MmsReportClientMemberRefCacheEntry*) entry;
+/* Frees every array-shaped field on e (memberReferences, memberLeafReferences,
+ * memberLeafCounts, leafSlotOffsets, memberLeafWireTypes, lastForwardedValues,
+ * leafSemantics, lastEntryId, resolvedDatasetReference) - everything EXCEPT
+ * rcbReference and the entry struct itself, so this can be shared between
+ * MmsReportClientUseCases_destroyMemberRefCacheEntry (which also frees those
+ * two) and MmsReportClientUseCases_swapMemberRefCacheEntryShape (which
+ * replaces them instead of freeing the entry itself). */
+static void
+freeMemberRefCacheEntryFields(MmsReportClientMemberRefCacheEntry* e) {
     for (int i = 0; i < e->memberCount; i++) free(e->memberReferences[i]);
     free(e->memberReferences);
 
@@ -850,8 +855,43 @@ MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
 
     if (e->lastEntryId) MmsValue_delete(e->lastEntryId);
 
+    free(e->resolvedDatasetReference);
+}
+
+void
+MmsReportClientUseCases_destroyMemberRefCacheEntry(void* entry) {
+    if (!entry) return;
+    MmsReportClientMemberRefCacheEntry* e = (MmsReportClientMemberRefCacheEntry*) entry;
+    freeMemberRefCacheEntryFields(e);
     free(e->rcbReference);
     free(e);
+}
+
+void
+MmsReportClientUseCases_swapMemberRefCacheEntryShape(MmsReportClientMemberRefCacheEntry* entry,
+        MmsReportClientMemberRefCacheEntry* fresh) {
+    if (!entry || !fresh) return;
+
+    freeMemberRefCacheEntryFields(entry);
+
+    entry->memberReferences = fresh->memberReferences;
+    entry->memberCount = fresh->memberCount;
+    entry->memberLeafReferences = fresh->memberLeafReferences;
+    entry->memberLeafCounts = fresh->memberLeafCounts;
+    entry->leafSlotOffsets = fresh->leafSlotOffsets;
+    entry->totalLeafSlots = fresh->totalLeafSlots;
+    entry->lastForwardedValues = fresh->lastForwardedValues;
+    entry->memberLeafWireTypes = fresh->memberLeafWireTypes;
+    entry->leafSemantics = fresh->leafSemantics;
+    entry->everPopulated = false;
+    entry->lastEntryId = NULL;
+    entry->resolvedDatasetReference = fresh->resolvedDatasetReference;
+
+    /* entry->rcbReference is left untouched (identical value anyway) - only
+     * free fresh's own shell + its now-redundant rcbReference, never its
+     * adopted fields (ownership already transferred onto entry above). */
+    free(fresh->rcbReference);
+    free(fresh);
 }
 
 static void
@@ -993,4 +1033,362 @@ MmsReportClientUseCases_buildWireMemberReferences(const char* const* memberRefer
         if (wireRef) LinkedList_add(result, wireRef);
     }
     return result;
+}
+
+/* Removes any "(...)" array-index annotation from one dot-separated path
+ * segment (e.g. "item(1)component" -> "itemcomponent") - mirrors
+ * ied_model_online_loader's own stripArrayIndexAnnotation (a small helper
+ * duplicated here rather than shared cross-feature, per this feature's own
+ * established convention - see e.g. lookupMemberRefCacheByRcb's own doc
+ * comment in mms_report_client_connection.c). This codebase does not model
+ * array indices anywhere else (see ied_model's own documented, deliberately
+ * deferred DAI/@ix limitation), so preserving the annotation would create a
+ * reference shape nothing downstream can consume anyway. */
+static char*
+stripArrayIndexAnnotation(const char* token) {
+    char* result = malloc(strlen(token) + 1);
+    if (!result) return NULL;
+
+    char* out = result;
+    const char* p = token;
+    while (*p) {
+        if (*p == '(') {
+            while (*p && *p != ')') p++;
+            if (*p == ')') p++;
+            continue;
+        }
+        *out++ = *p++;
+    }
+    *out = '\0';
+    return result;
+}
+
+char*
+MmsReportClientUseCases_convertAcsiRefToMemberReference(const char* acsiRef) {
+    if (!acsiRef) return NULL;
+
+    char* copy = strdup(acsiRef);
+    if (!copy) return NULL;
+
+    /* Trailing "[FC]" must be the very last thing in the string. */
+    char* openBracket = strrchr(copy, '[');
+    char* closeBracket = strrchr(copy, ']');
+    if (!openBracket || !closeBracket || closeBracket < openBracket || closeBracket[1] != '\0') {
+        free(copy);
+        return NULL;
+    }
+    *closeBracket = '\0';
+    const char* fc = openBracket + 1;
+    *openBracket = '\0';
+
+    /* First "." after the "LD/LN" prefix marks the start of the DO/SDO/DA
+     * chain - LD and LN names never themselves contain a "." (only the FCDA
+     * path segments after them can, via nested SDOs). */
+    char* dot = strchr(copy, '.');
+    if (!dot) {
+        free(copy);
+        return NULL;
+    }
+    *dot = '\0';
+
+    /* Unlike IedModelOnlineLoaderUseCases_convertAcsiRefToWireRef (which
+     * strips the LD half for DataSetEntry_create's sake - a different
+     * consumer with a different convention), this feature's own
+     * memberReferences[] convention is LD-PRESERVED - matches
+     * IedModel_getDataSetMemberReferences's own "LD/LN$FC$DO$DA" output. */
+    const char* ldLn = copy;
+    if (!strchr(ldLn, '/')) {
+        /* Malformed - a real ACSI reference always has "LD/LN". */
+        free(copy);
+        return NULL;
+    }
+    char* chain = dot + 1;
+
+    char* joined = NULL;
+    char* tok = strtok(chain, ".");
+    while (tok) {
+        char* clean = stripArrayIndexAnnotation(tok);
+        if (!clean) {
+            free(joined);
+            free(copy);
+            return NULL;
+        }
+
+        size_t joinedLen = joined ? strlen(joined) : 0;
+        size_t newLen = joinedLen + (joined ? 1 : 0) + strlen(clean) + 1;
+        char* next = malloc(newLen);
+        if (!next) {
+            free(clean);
+            free(joined);
+            free(copy);
+            return NULL;
+        }
+        if (joined) snprintf(next, newLen, "%s$%s", joined, clean);
+        else snprintf(next, newLen, "%s", clean);
+
+        free(clean);
+        free(joined);
+        joined = next;
+        tok = strtok(NULL, ".");
+    }
+
+    if (!joined) {
+        /* Only an "LD/LN" prefix, nothing after - malformed for this purpose. */
+        free(copy);
+        return NULL;
+    }
+
+    size_t outLen = strlen(ldLn) + 1 + strlen(fc) + 1 + strlen(joined) + 1;
+    char* out = malloc(outLen);
+    if (out) snprintf(out, outLen, "%s$%s$%s", ldLn, fc, joined);
+
+    free(joined);
+    free(copy);
+    return out;
+}
+
+/*
+ * Walks a LinkedList of heap-allocated char* strings into a freshly allocated
+ * char** array, transferring ownership of each string into the array and
+ * discarding just the list shell. Duplicated from mms_report_client_api.c's
+ * own identical helper (this feature's established small-helper duplication
+ * convention) - needed here too now that MmsReportClientUseCases_buildMemberRefCacheEntry
+ * (below) does its own per-member leaf-array flattening in this file rather
+ * than the service layer. Returns NULL and leaves *outCount at 0 if the list
+ * is NULL/empty or allocation fails (the list, if any, is fully destroyed
+ * either way). NULL-safe on `list`.
+ */
+static char**
+linkedListToStringArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    char** array = calloc((size_t) count, sizeof(char*));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        array[i++] = (char*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyStatic(list);
+
+    *outCount = count;
+    return array;
+}
+
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * DataAttributeType* (see IedModel_getLeafWireTypesForMemberReference) -
+ * copies each boxed enum BY VALUE into the array and frees the boxed items.
+ * Returns NULL and leaves *outCount at 0 on empty/NULL input or allocation
+ * failure (list fully destroyed either way). */
+static DataAttributeType*
+linkedListToWireTypeArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    DataAttributeType* array = calloc((size_t) count, sizeof(DataAttributeType));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        DataAttributeType* boxed = (DataAttributeType*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
+
+    *outCount = count;
+    return array;
+}
+
+/* Same shape as linkedListToStringArray, for a LinkedList of heap-boxed
+ * IedModelDaSemantic* (see IedModel_getLeafSemanticsForMemberReference) -
+ * copies each boxed enum BY VALUE into the array and frees the boxed items.
+ * Returns NULL and leaves *outCount at 0 on empty/NULL input or allocation
+ * failure (list fully destroyed either way). */
+static IedModelDaSemantic*
+linkedListToSemanticArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    IedModelDaSemantic* array = calloc((size_t) count, sizeof(IedModelDaSemantic));
+    if (!array) {
+        LinkedList_destroyDeep(list, free);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        IedModelDaSemantic* boxed = (IedModelDaSemantic*) LinkedList_getData(element);
+        array[i++] = *boxed;
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(list, free);
+
+    *outCount = count;
+    return array;
+}
+
+MmsReportClientMemberRefCacheEntry*
+MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const char* rcbReference,
+        char** array, int count, const char* resolvedDatasetReference) {
+    if (!array || count <= 0) {
+        if (array) {
+            for (int i = 0; i < count; i++) free(array[i]);
+            free(array);
+        }
+        return NULL;
+    }
+
+    char*** leafRefsArray = calloc((size_t) count, sizeof(char**));
+    int* leafCounts = calloc((size_t) count, sizeof(int));
+    int* leafOffsets = calloc((size_t) count, sizeof(int));
+    DataAttributeType** leafWireTypesArray = calloc((size_t) count, sizeof(DataAttributeType*));
+    IedModelDaSemantic* rawSemantics = calloc((size_t) count, sizeof(IedModelDaSemantic));
+    IedModelDaSemantic** leafSemArray = calloc((size_t) count, sizeof(IedModelDaSemantic*));
+    int* leafSemCounts = calloc((size_t) count, sizeof(int));
+    int totalLeafSlots = 0;
+
+    /* Every member's decomposition/wire-type/semantics is resolved via the
+     * *ForMemberReference ied_model accessors, keyed directly by each
+     * member's own reference string (array[m]) rather than a
+     * (datasetReference, index) pair into a registered DataSet - this works
+     * identically whether array[m] came from a real registered SCL DataSet, a
+     * live dataset resolved over the wire with no local DataSet object at all
+     * (mms_report_client's tier-2 "pulled" dataset), or a purely-local LN
+     * leaf walk (tier 3's LN-fallback) - the SAME code path now serves all
+     * three, closing what was previously a documented "known, accepted v1
+     * gap" where an RCB with no SCL dataset got no Dbpos semantics at all
+     * (the old dataset-indexed IedModel_getDataSetMemberSemantics call needed
+     * a real registered DataSet, which that case never had). */
+    if (leafRefsArray && leafCounts && leafOffsets && rawSemantics && leafSemArray && leafSemCounts) {
+        for (int m = 0; m < count; m++) {
+            int leafCount = 0;
+            char** leafArray = linkedListToStringArray(
+                    IedModel_getLeafReferencesForMemberReference(iedModel, array[m]), &leafCount);
+
+            leafRefsArray[m] = leafArray; /* NULL if member m isn't decomposed */
+            leafCounts[m] = leafCount;    /* 0 if member m isn't decomposed */
+
+            if (leafWireTypesArray) {
+                int leafWireTypeCount = 0;
+                DataAttributeType* wireTypes = linkedListToWireTypeArray(
+                        IedModel_getLeafWireTypesForMemberReference(iedModel, array[m]), &leafWireTypeCount);
+                /* Only trust this member's wire-types array if its count
+                 * matches leafCount - see MmsReportClientMemberRefCacheEntry.
+                 * memberLeafWireTypes's own doc comment for why. */
+                leafWireTypesArray[m] = (wireTypes && leafWireTypeCount == leafCount) ? wireTypes : NULL;
+                if (wireTypes && leafWireTypeCount != leafCount) free(wireTypes);
+            }
+
+            rawSemantics[m] = IedModel_getSemanticForMemberReference(iedModel, array[m]);
+
+            int leafSemCount = 0;
+            leafSemArray[m] = linkedListToSemanticArray(
+                    IedModel_getLeafSemanticsForMemberReference(iedModel, array[m]), &leafSemCount);
+            leafSemCounts[m] = leafSemCount;
+
+            /* Value-diff cache slot(s) for member m: leafCount consecutive
+             * slots if decomposed, else exactly 1. */
+            leafOffsets[m] = totalLeafSlots;
+            totalLeafSlots += (leafCount > 0) ? leafCount : 1;
+        }
+    }
+
+    /* Zero-initialized so every slot starts NULL (never forwarded yet) - see
+     * MmsReportClientMemberRefCacheEntry's own doc comment. */
+    MmsValue** lastForwardedValues = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(MmsValue*)) : NULL;
+
+    /* Zero-initialized (IED_MODEL_DA_SEMANTIC_NONE == 0) so any member/leaf
+     * whose semantic couldn't be resolved degrades safely - flattened from
+     * rawSemantics/leafSemArray above. Deliberately NOT part of this
+     * cacheEntry's own success/failure gate (unlike lastForwardedValues,
+     * which the hybrid filter itself depends on). */
+    IedModelDaSemantic* leafSemantics = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(IedModelDaSemantic)) : NULL;
+    if (leafSemantics) {
+        for (int m = 0; m < count; m++) {
+            if (leafCounts[m] > 0) {
+                if (leafSemArray && leafSemArray[m] && leafSemCounts[m] == leafCounts[m]) {
+                    for (int k = 0; k < leafCounts[m]; k++) {
+                        leafSemantics[leafOffsets[m] + k] = leafSemArray[m][k];
+                    }
+                }
+            } else if (rawSemantics) {
+                leafSemantics[leafOffsets[m]] = rawSemantics[m];
+            }
+        }
+    }
+
+    /* Temporaries only used to build the flattened arrays above - always
+     * freed here, regardless of the cacheEntry outcome below. */
+    free(rawSemantics);
+    if (leafSemArray) {
+        for (int m = 0; m < count; m++) free(leafSemArray[m]);
+        free(leafSemArray);
+    }
+    free(leafSemCounts);
+
+    MmsReportClientMemberRefCacheEntry* cacheEntry = malloc(sizeof(MmsReportClientMemberRefCacheEntry));
+    if (cacheEntry && leafRefsArray && leafCounts && leafOffsets && lastForwardedValues) {
+        cacheEntry->rcbReference = MmsReportClientUtils_safeStringDup(rcbReference);
+        cacheEntry->memberReferences = array;
+        cacheEntry->memberCount = count;
+        cacheEntry->memberLeafReferences = leafRefsArray;
+        cacheEntry->memberLeafCounts = leafCounts;
+        cacheEntry->leafSlotOffsets = leafOffsets;
+        cacheEntry->totalLeafSlots = totalLeafSlots;
+        cacheEntry->lastForwardedValues = lastForwardedValues;
+        cacheEntry->memberLeafWireTypes = leafWireTypesArray;
+        cacheEntry->leafSemantics = leafSemantics;
+        cacheEntry->everPopulated = false;
+        cacheEntry->lastEntryId = NULL;
+        cacheEntry->resolvedDatasetReference =
+                resolvedDatasetReference ? MmsReportClientUtils_safeStringDup(resolvedDatasetReference) : NULL;
+        return cacheEntry;
+    }
+
+    free(cacheEntry);
+    for (int j = 0; j < count; j++) free(array[j]);
+    free(array);
+    if (leafRefsArray) {
+        for (int m = 0; m < count; m++) {
+            if (!leafRefsArray[m]) continue;
+            for (int k = 0; k < leafCounts[m]; k++) free(leafRefsArray[m][k]);
+            free(leafRefsArray[m]);
+        }
+        free(leafRefsArray);
+    }
+    free(leafCounts);
+    free(leafOffsets);
+    free(lastForwardedValues);
+    if (leafWireTypesArray) {
+        for (int m = 0; m < count; m++) free(leafWireTypesArray[m]);
+        free(leafWireTypesArray);
+    }
+    free(leafSemantics);
+    return NULL;
 }

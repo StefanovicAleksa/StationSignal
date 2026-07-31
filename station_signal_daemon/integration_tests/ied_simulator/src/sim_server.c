@@ -22,8 +22,9 @@ SimServer_create(void) {
      * simulated device a realistic read+write-capable shape; not exercised
      * by the report-focused E2E test. */
     DataObject* spcso1 = DataObject_create("SPCSO1", (ModelNode*) ggio1, 0);
-    DataAttribute_create("stVal", (ModelNode*) spcso1, IEC61850_BOOLEAN, IEC61850_FC_ST, TRG_OPT_DATA_CHANGED, 0, 0);
-    DataAttribute_create("q", (ModelNode*) spcso1, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute* spcso1StVal = DataAttribute_create("stVal", (ModelNode*) spcso1, IEC61850_BOOLEAN, IEC61850_FC_ST,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED, 0, 0);
+    DataAttribute_create("q", (ModelNode*) spcso1, IEC61850_QUALITY, IEC61850_FC_ST, TRG_OPT_QUALITY_CHANGED, 0, 0);
     DataAttribute_create("t", (ModelNode*) spcso1, IEC61850_TIMESTAMP, IEC61850_FC_ST, 0, 0, 0);
     DataAttribute* oper = DataAttribute_create("Oper", (ModelNode*) spcso1, IEC61850_CONSTRUCTED, IEC61850_FC_CO, 0, 0, 0);
     DataAttribute_create("ctlVal", (ModelNode*) oper, IEC61850_BOOLEAN, IEC61850_FC_CO, 0, 0, 0);
@@ -172,6 +173,8 @@ SimServer_create(void) {
     self->server = IedServer_create(model);
     self->indicationStVal = stVal;
     self->indicationValue = false;
+    self->spcso1StVal = spcso1StVal;
+    self->spcso1Value = false;
 
     return self;
 }
@@ -202,6 +205,12 @@ void
 SimServer_setIndication(SimServer self, bool value) {
     self->indicationValue = value;
     IedServer_updateBooleanAttributeValue(self->server, self->indicationStVal, value);
+}
+
+void
+SimServer_setSpcso1Indication(SimServer self, bool value) {
+    self->spcso1Value = value;
+    IedServer_updateBooleanAttributeValue(self->server, self->spcso1StVal, value);
 }
 
 void

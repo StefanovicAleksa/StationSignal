@@ -193,6 +193,258 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
     return cacheNode->datasetName;
 }
 
+/* Cheap, purely-local skip: true if datasetRef looks like a name
+ * buildDynamicDatasetName would itself generate for this LN - i.e. a
+ * DANGLING reference to a PRIOR connection's own association-scoped dataset,
+ * already destroyed server-side the moment that old connection closed (see
+ * buildDynamicDatasetName's own doc comment: "@"-prefixed = destroyed
+ * automatically on connection close). A real device is not obligated to
+ * clear an RCB's DatSet attribute just because the dataset object it named
+ * is gone, so getRCBValues can legitimately still echo it back after we
+ * reconnect. This is belt-and-suspenders only, not the sole safety net - the
+ * real one is pullLiveDataset's own IedConnection_getDataSetDirectory failure
+ * handling below, which falls through to getOrCreateDynamicDataset either
+ * way (a dangling reference would fail to resolve there too). */
+static bool
+looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const char* lnReference) {
+    if (!datasetRef || !lnReference) return false;
+
+    char* expected = buildDynamicDatasetName(lnReference);
+    if (!expected) return false;
+
+    bool match = (strcmp(datasetRef, expected) == 0);
+    free(expected);
+    return match;
+}
+
+/*
+ * Tier 2 of the static -> pull live -> self-create dataset resolution order
+ * (see enableOneTarget's own doc comment): for an RCB with no SCL datSet, a
+ * dataset may already be assigned to it on the live device right now -
+ * realistically, by a commissioning/engineering tool (e.g. Siemens DIGSI)
+ * during substation engineering, independent of whatever client connects
+ * later; whoever set it and whether they're still associated is irrelevant,
+ * the live RCB value is the only signal consulted.
+ * ClientReportControlBlock_getDataSetReference(rcb) is free here - `rcb` is
+ * already fetched by enableOneTarget's own IedConnection_getRCBValues call,
+ * no extra wire round-trip for the read itself.
+ *
+ * Unlike the static (SCL) case, this dataset's real member list is NOT known
+ * locally - IedModel never had a matching DataSet registered for this RCB
+ * (SCL declared no datSet at all). A single, bounded
+ * IedConnection_getDataSetDirectory call resolves the actual member list,
+ * live - narrower than the "no over-the-wire tree discovery" Hard Rule's
+ * existing ied_model_online_loader exception on every axis: one already-named
+ * dataset's member list (not a tree walk), fired only for RCBs with no SCL
+ * datSet (the same population getOrCreateDynamicDataset already makes a wire
+ * call for today via IedConnection_createDataSet - a peer call on the same
+ * RCB set, not a new category gaining wire access), and at most once per
+ * (RCB, live-dataset-identity) pair for the whole process lifetime thanks to
+ * MmsReportClientMemberRefCacheEntry.resolvedDatasetReference's own
+ * fingerprint check in refreshPulledMemberRefCache below.
+ *
+ * Returns true and fills *outMemberRefs (LinkedList of owned "$"-joined,
+ * LD-prefixed member-reference char*, this feature's own memberReferences[]
+ * convention) on success. Returns false (*outMemberRefs left untouched) if no
+ * DatSet is currently assigned, it looks like our own dangling name (see
+ * looksLikeOurOwnDynamicDatasetName), or the live fetch itself fails or
+ * yields zero wire-convertible members - the caller falls through to
+ * getOrCreateDynamicDataset unchanged in every one of these cases, exactly as
+ * if this tier didn't exist.
+ */
+static bool
+pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, ClientReportControlBlock rcb,
+        LinkedList* outMemberRefs) {
+    const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
+    if (!liveDataset || liveDataset[0] == '\0') return false;
+    if (looksLikeOurOwnDynamicDatasetName(liveDataset, target->lnReference)) return false;
+
+    IedClientError err = IED_ERROR_OK;
+    bool isDeletable = false;
+    LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, liveDataset, &isDeletable);
+    if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
+        fprintf(stderr, "[mms_report_client] live-assigned dataset '%s' for '%s' could not be resolved "
+                "(error %d) - will create our own instead\n", liveDataset, target->objectReference, err);
+        if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
+        return false;
+    }
+
+    LinkedList wireRefs = LinkedList_create();
+    if (!wireRefs) {
+        LinkedList_destroyDeep(acsiMembers, free);
+        return false;
+    }
+
+    LinkedList element = LinkedList_getNext(acsiMembers);
+    while (element) {
+        char* acsiRef = (char*) LinkedList_getData(element);
+        char* memberRef = MmsReportClientUseCases_convertAcsiRefToMemberReference(acsiRef);
+        if (memberRef) {
+            LinkedList_add(wireRefs, memberRef);
+        } else {
+            fprintf(stderr, "[mms_report_client] could not convert live dataset member '%s' "
+                    "(dataset '%s') to wire form - member skipped\n", acsiRef, liveDataset);
+        }
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(acsiMembers, free);
+
+    if (LinkedList_size(wireRefs) == 0) {
+        fprintf(stderr, "[mms_report_client] live-assigned dataset '%s' for '%s' had no wire-convertible "
+                "members - will create our own instead\n", liveDataset, target->objectReference);
+        LinkedList_destroyDeep(wireRefs, free);
+        return false;
+    }
+
+    *outMemberRefs = wireRefs;
+    return true;
+}
+
+/*
+ * Rebuilds (or confirms up to date) this RCB's memberRefCache entry to match
+ * `liveDataset`'s real shape - called from enableOneTarget on every
+ * (re)connect where pullLiveDataset (tier 2) succeeded. Compares liveDataset
+ * against the cache entry's own resolvedDatasetReference fingerprint
+ * (MmsReportClientMemberRefCacheEntry's own doc comment): identical string
+ * means this entry's shape (built on a PRIOR connect from this exact dataset)
+ * is still correct - a no-op, the expected common case on every reconnect
+ * once a stable commissioning-tool-assigned dataset has been pulled once.
+ * Different (including NULL - i.e. never resolved from a live connection
+ * before, this RCB's very first successful pull) means the previously-cached
+ * shape can no longer be trusted: rebuilds a fresh
+ * MmsReportClientMemberRefCacheEntry from memberRefs via
+ * MmsReportClientUseCases_buildMemberRefCacheEntry, then swaps every
+ * array-shaped field into the EXISTING entry in place, under
+ * memberRefCacheLock, via MmsReportClientUseCases_swapMemberRefCacheEntryShape
+ * - never reallocates or moves the entry's own pointer, or touches
+ * handle->memberRefCache's list structure itself, since the report-adapter
+ * thread's own lookupMemberRefCache walks that list WITHOUT holding the lock
+ * (only field mutations are lock-protected - see that function's own doc
+ * comment in mms_report_client_report_adapter.c).
+ *
+ * This is a DELIBERATE, NARROW exception to "the value-diff cache is never
+ * reset" (MmsReportClientMemberRefCacheEntry's own top doc comment): a shape
+ * rebuild resets lastForwardedValues/leafSlotOffsets/everPopulated/lastEntryId
+ * back to a fresh bootstrap state too (see
+ * MmsReportClientUseCases_swapMemberRefCacheEntryShape), because a shape
+ * change invalidates slot INDICES themselves - slot 3 under the old shape and
+ * slot 3 under the new shape are not the same wire position, so preserving
+ * old slot contents across a shape change would silently misattribute a
+ * stale value to an unrelated new position. In practice this fires at most
+ * once per RCB (first successful pull) unless the live-assigned dataset's
+ * identity genuinely changes underneath the daemon mid-deployment.
+ *
+ * No-op if this RCB has no existing cache entry at all (a target with zero
+ * dataset members never got one - see buildMemberRefCache's own "count > 0"
+ * gate) or if memberRefs is empty.
+ */
+static void
+refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarget* target,
+        const char* liveDataset, LinkedList memberRefs) {
+    if (!liveDataset) return;
+
+    MmsReportClientMemberRefCacheEntry* entry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (!entry) return;
+
+    Semaphore_wait(handle->memberRefCacheLock);
+    bool needsRebuild = !entry->resolvedDatasetReference || strcmp(entry->resolvedDatasetReference, liveDataset) != 0;
+    Semaphore_post(handle->memberRefCacheLock);
+    if (!needsRebuild) return;
+
+    int count = memberRefs ? LinkedList_size(memberRefs) : 0;
+    if (count <= 0) return;
+
+    char** array = calloc((size_t) count, sizeof(char*));
+    if (!array) return;
+    int i = 0;
+    for (LinkedList el = LinkedList_getNext(memberRefs); el; el = LinkedList_getNext(el)) {
+        array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
+    }
+
+    MmsReportClientMemberRefCacheEntry* fresh = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            handle->iedModel, target->objectReference, array, count, liveDataset);
+    if (!fresh) return;
+
+    Semaphore_wait(handle->memberRefCacheLock);
+    MmsReportClientUseCases_swapMemberRefCacheEntryShape(entry, fresh);
+    Semaphore_post(handle->memberRefCacheLock);
+}
+
+/*
+ * Tier 3's counterpart of refreshPulledMemberRefCache, called once
+ * effectiveDatasetReference is known to be getOrCreateDynamicDataset's own
+ * deterministic "@dyn_<lnReference>" name (or NULL, if even self-creation
+ * failed - a no-op, nothing to reconcile). Because that name/shape is 100%
+ * deterministic per LN and was ALREADY built into this entry as the
+ * LN-fallback PROVISIONAL shape at MmsReportClient_start time
+ * (buildMemberRefCache, mms_report_client_api.c - tagged with a NULL
+ * resolvedDatasetReference precisely so this first call always confirms it),
+ * this is bookkeeping-only in the overwhelmingly common case: first-ever
+ * successful tier-3 enable, or any reconnect after that (the name is
+ * deterministic, so it matches every time) just stamps the fingerprint under
+ * the lock - zero array rebuilding, zero extra calls beyond createDataSet
+ * itself. The only case this actually rebuilds the shape is a transition
+ * BACK from a previously-active tier-2 pulled dataset (resolvedDatasetReference
+ * held some prior live dataset's name, now gone/unresolvable this cycle) - in
+ * that one case, the LN-fallback shape is recomputed from scratch via
+ * IedModel_getReportableAttributeReferencesForLogicalNode (purely local, no
+ * wire call - the same offline call buildMemberRefCache itself makes) and
+ * swapped in exactly like refreshPulledMemberRefCache's own shape-swap, with
+ * the same value-diff-cache-reset consequence and the same rationale.
+ */
+static void
+ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarget* target,
+        const char* effectiveDatasetReference) {
+    if (!effectiveDatasetReference) return;
+
+    MmsReportClientMemberRefCacheEntry* entry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (!entry) return;
+
+    Semaphore_wait(handle->memberRefCacheLock);
+    bool needsRebuild = !entry->resolvedDatasetReference
+            || strcmp(entry->resolvedDatasetReference, effectiveDatasetReference) != 0;
+    if (!needsRebuild) {
+        Semaphore_post(handle->memberRefCacheLock);
+        return;
+    }
+    Semaphore_post(handle->memberRefCacheLock);
+
+    LinkedList members = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
+            target->lnReference);
+    int count = members ? LinkedList_size(members) : 0;
+    if (count <= 0) {
+        if (members) LinkedList_destroyDeep(members, free);
+        /* Nothing reportable for this LN (mirrors getOrCreateDynamicDataset's
+         * own "no reportable attributes" log-and-skip posture) - still stamp
+         * the fingerprint so this rebuild isn't retried on every single
+         * enable. */
+        Semaphore_wait(handle->memberRefCacheLock);
+        free(entry->resolvedDatasetReference);
+        entry->resolvedDatasetReference = MmsReportClientUtils_safeStringDup(effectiveDatasetReference);
+        Semaphore_post(handle->memberRefCacheLock);
+        return;
+    }
+
+    char** array = calloc((size_t) count, sizeof(char*));
+    if (!array) {
+        LinkedList_destroyDeep(members, free);
+        return;
+    }
+    int i = 0;
+    for (LinkedList el = LinkedList_getNext(members); el; el = LinkedList_getNext(el)) {
+        array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
+    }
+    LinkedList_destroyDeep(members, free);
+
+    MmsReportClientMemberRefCacheEntry* fresh = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            handle->iedModel, target->objectReference, array, count, effectiveDatasetReference);
+    if (!fresh) return;
+
+    Semaphore_wait(handle->memberRefCacheLock);
+    MmsReportClientUseCases_swapMemberRefCacheEntryShape(entry, fresh);
+    Semaphore_post(handle->memberRefCacheLock);
+}
+
 static void
 enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, LinkedList dynamicDatasetCache) {
     /* Defense-in-depth against enableAllTargets' own loop-top check below -
@@ -269,18 +521,46 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * RCB_ELEMENT_DATSET alongside RPT_ENA too, using the same "$"-joined
      * reference format ied_model already hands us in datasetReference.
      *
-     * If neither SCL nor a prior client has assigned this RCB a dataset, this
-     * is a "dynamic" RCB (IEC 61850 permits an RCB to exist with no dataset
-     * until one is assigned at runtime, datSet="Dyn" in SCL terms) -
-     * getOrCreateDynamicDataset synthesizes one covering every reportable
-     * (FC=ST/MX) attribute of the RCB's own LN, association-scoped so it
-     * needs no explicit cleanup. If that also fails (no reportable
-     * attributes, or the device rejects creation - cap exceeded, etc.),
-     * DATSET is left unset and setRCBValues below fails with
-     * IED_ERROR_OBJECT_VALUE_INVALID, same as before this feature existed. */
+     * Three-tier resolution order for which dataset to assign:
+     *   1. STATIC - target->datasetReference, if SCL declared one for this
+     *      RCB. Never touches the network; this branch is skipped entirely
+     *      below whenever it applies.
+     *   2. PULL LIVE - if neither SCL nor this branch, this is a "dynamic"
+     *      RCB (IEC 61850 permits an RCB to exist with no dataset until one
+     *      is assigned at runtime, datSet="Dyn" in SCL terms). Before
+     *      creating our own, check whether the live device ALREADY has a
+     *      dataset assigned to this RCB right now - realistically, one
+     *      created by a commissioning/engineering tool (e.g. Siemens DIGSI)
+     *      during substation engineering, independent of whatever client
+     *      connects later; whoever set it and whether they're still
+     *      connected is irrelevant, only the live RCB value matters (see
+     *      pullLiveDataset's own doc comment). Reusing it means every report
+     *      against this RCB must decode against ITS real member list, not the
+     *      LN-wide fallback shape buildMemberRefCache provisionally seeded at
+     *      start time - refreshPulledMemberRefCache reconciles that.
+     *   3. SELF-CREATE - only if both above are absent/unusable,
+     *      getOrCreateDynamicDataset synthesizes one covering every
+     *      reportable (FC=ST/MX) attribute of the RCB's own LN,
+     *      association-scoped so it needs no explicit cleanup - UNCHANGED
+     *      from this feature's original dynamic-dataset-creation behavior;
+     *      this tier's own mechanism/lifetime is not touched by tiers 1-2
+     *      existing above it, only the priority order is new.
+     * If even tier 3 fails (no reportable attributes, or the device rejects
+     * creation - cap exceeded, etc.), DATSET is left unset and setRCBValues
+     * below fails with IED_ERROR_OBJECT_VALUE_INVALID, same as before this
+     * feature existed. */
     const char* effectiveDatasetReference = target->datasetReference;
     if (!effectiveDatasetReference) {
-        effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, dynamicDatasetCache);
+        LinkedList pulledMemberRefs = NULL;
+        if (pullLiveDataset(handle, target, rcb, &pulledMemberRefs)) {
+            const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
+            refreshPulledMemberRefCache(handle, target, liveDataset, pulledMemberRefs);
+            LinkedList_destroyDeep(pulledMemberRefs, free);
+            effectiveDatasetReference = liveDataset;
+        } else {
+            effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, dynamicDatasetCache);
+            ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference);
+        }
     }
     if (effectiveDatasetReference) {
         ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
