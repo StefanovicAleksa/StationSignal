@@ -170,7 +170,13 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   dataset — purely local, never over-the-wire (see Hard Rules). `IedModel_listIedNames` lists
   every `<IED name="...">` for `orchestration`'s IED-name auto-detection.
   `IedModel_getReportableAttributeReferencesForLogicalNode` returns every FC=ST/MX leaf under one
-  LN, used by `mms_report_client`'s dynamic-dataset synthesis. `IedModel_getDataSetMemberLeafWireTypes`
+  LN, used by `mms_report_client`'s dynamic-dataset synthesis. `IedModel_getDynDataSetMax`/
+  `_getDynDataSetMaxAttributes` expose SCL's `<Services><DynDataSet max="N" maxAttributes="M"/>`
+  (a direct child of `<IED>`, a sibling of `<AccessPoint>` — not nested under `Server`), parsed by
+  `ied_model_scl_loader.c` and stored on the handle; `-1` if `<Services>`/`<DynDataSet>` is absent
+  or a given attribute is missing, `0` a real distinct "device declares zero capacity" value — the
+  first bare-scalar-returning accessors in this feature, used by `mms_report_client`'s dynamic
+  dataset budget/chunking (see that feature's own bullet). `IedModel_getDataSetMemberLeafWireTypes`
   + `IedModel_dataAttributeTypeMatchesMmsType` give Gap-4 decomposition's reorder step a per-leaf
   expected-vs-actual type signal (disambiguation only, never a reject gate — see that step's own
   bullet below) alongside the count check. `IedModel_wrapDynamicModel(model, iedName, mode)` wraps an
@@ -222,8 +228,28 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `$`-segments, not a last-`$` strip) does — value drags quality along and vice versa; a `NULL`
   value is excluded from being dragged in. `IpcDispatcherUseCases_pairQuality` mirrors this.
   **Dynamic dataset creation**: for an RCB with no SCL `datSet`, `getOrCreateDynamicDataset`
-  synthesizes an association-scoped dataset covering every FC=ST/MX leaf under the RCB's LN (no
-  chunking against `maxAttributes`; no per-LDevice dataset-count cap).
+  synthesizes an association-scoped dataset covering every FC=ST/MX leaf under the RCB's LN,
+  respecting the device's own declared caps when SCL provides them
+  (`<Services><DynDataSet max="N" maxAttributes="M"/>`, parsed by `ied_model` and exposed via
+  `IedModel_getDynDataSetMax`/`_getDynDataSetMaxAttributes` — `-1` if not declared, e.g. no
+  `<Services>` at all or a dynamically-built online-discovered model). A `DynamicDatasetSession`
+  (per-connect-cycle, alongside the existing LN-keyed dedup cache — never carried across
+  reconnects, since association-scoped datasets don't survive one either) tracks a budget copied
+  from `max` at the top of `enableAllTargets`: once exhausted, `getOrCreateDynamicDataset`
+  short-circuits further `createDataSet` attempts for the rest of the cycle instead of burning
+  wasted round-trips on every remaining RCB (confirmed against a real device log: dozens of doomed
+  attempts after the wall was hit). When an LN's full leaf set exceeds `maxAttributes`,
+  `buildChunkPlan` splits it into DO-atomic chunks (`MmsReportClientUseCases_chunkReferencesByDoGroup`
+  — greedy, order-preserving, never splits one DO's own leaves across chunks) and assigns chunk *i*
+  to the LN's *i*-th spare Dyn RCB target in `handle->targets`' own order, instead of every RCB on
+  that LN wastefully duplicating the same (too-large) dataset; an LN with more chunks than spare
+  RCB instances logs the uncovered chunk(s) explicitly rather than silently dropping data.
+  `ensureLnFallbackMemberRefCache` is chunk-aware too — a chunked target's decode-time member list
+  is rebuilt from its own chunk, never the full LN, or report decoding would silently corrupt back
+  to the LN-wide shape on that target's first enable. Entirely inert (identical to pre-existing
+  behavior) whenever SCL doesn't declare `<DynDataSet>`. The no-SCL empirical/adaptive-discovery
+  case (inferring caps from `createDataSet` failures when `<Services>` is absent) remains
+  unimplemented — deferred, see `GAP3_DYNAMIC_DATASET_NOTES.md`.
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
   **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered

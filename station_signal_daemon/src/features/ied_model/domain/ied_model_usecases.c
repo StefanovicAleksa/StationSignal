@@ -836,6 +836,16 @@ IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle h
     return result;
 }
 
+int
+IedModelUseCases_getDynDataSetMax(IedModelHandle handle) {
+    return handle ? handle->dynDataSetMax : -1;
+}
+
+int
+IedModelUseCases_getDynDataSetMaxAttributes(IedModelHandle handle) {
+    return handle ? handle->dynDataSetMaxAttributes : -1;
+}
+
 LinkedList
 IedModelUseCases_getReadTargets(IedModelHandle handle) {
     LinkedList result = LinkedList_create();

@@ -61,6 +61,8 @@
 #define TEST_PORT_ENTRY_ID_RESUME 10212
 #define TEST_PORT_AUTH_REJECTED_CALLBACK 10213
 #define TEST_PORT_PULLED_DATASET 10214
+#define TEST_PORT_CHUNKING 10215
+#define TEST_PORT_BUDGET 10216
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -89,6 +91,25 @@ static bool lastEntry0PreviousValue;
 static char interestedRcbReference[256];
 static volatile bool dynamicRcbEnabled;
 static volatile bool dynamicRcbFailed;
+
+/* urcbDyn2's own enable-outcome trackers - the chunking/budget fixtures
+ * (reporter1_chunking.cid / reporter1_budget.cid) declare a second Dyn RCB on
+ * GGIO1 alongside urcbDyn, so buildChunkPlan has two spare targets to split
+ * an oversized LN's leaf set across. No other fixture in this suite declares
+ * urcbDyn2 - see sim_server.c's own comment on that RCB. */
+static volatile bool dynamicRcb2Enabled;
+static volatile bool dynamicRcb2Failed;
+
+/* Per-RCB report captures for urcbDyn/urcbDyn2 specifically, populated
+ * unconditionally in onReport (NOT gated by interestedRcbReference) - the
+ * chunking test needs to observe both RCBs' own independent report content
+ * at once, which interestedRcbReference's single-slot filter can't express. */
+static volatile bool urcbDynGotReport;
+static volatile bool urcbDyn2GotReport;
+static int urcbDynEntryCount;
+static int urcbDyn2EntryCount;
+static char urcbDynEntry0Reference[256];
+static char urcbDyn2Entry0Reference[256];
 
 /* Counts MMS_REPORT_CLIENT_CONNECTED transitions, for
  * test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue
@@ -128,11 +149,34 @@ onRcbStatus(void* userParam, const char* rcbReference, bool enabled, IedClientEr
         if (enabled) dynamicRcbEnabled = true;
         else dynamicRcbFailed = true;
     }
+
+    if (rcbReference && strcmp(rcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn2") == 0) {
+        if (enabled) dynamicRcb2Enabled = true;
+        else dynamicRcb2Failed = true;
+    }
 }
 
 static void
 onReport(void* userParam, const MmsReportRecord* record) {
     (void) userParam;
+
+    if (record->rcbReference && strcmp(record->rcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn") == 0) {
+        urcbDynEntryCount = record->entryCount;
+        if (record->entryCount > 0) {
+            strncpy(urcbDynEntry0Reference, record->entries[0].reference ? record->entries[0].reference : "",
+                    sizeof(urcbDynEntry0Reference) - 1);
+            urcbDynEntry0Reference[sizeof(urcbDynEntry0Reference) - 1] = '\0';
+        }
+        urcbDynGotReport = true;
+    } else if (record->rcbReference && strcmp(record->rcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn2") == 0) {
+        urcbDyn2EntryCount = record->entryCount;
+        if (record->entryCount > 0) {
+            strncpy(urcbDyn2Entry0Reference, record->entries[0].reference ? record->entries[0].reference : "",
+                    sizeof(urcbDyn2Entry0Reference) - 1);
+            urcbDyn2Entry0Reference[sizeof(urcbDyn2Entry0Reference) - 1] = '\0';
+        }
+        urcbDyn2GotReport = true;
+    }
 
     if (interestedRcbReference[0] != '\0'
             && (!record->rcbReference || strcmp(record->rcbReference, interestedRcbReference) != 0)) {
@@ -215,6 +259,14 @@ setUp(void) {
     interestedRcbReference[0] = '\0';
     dynamicRcbEnabled = false;
     dynamicRcbFailed = false;
+    dynamicRcb2Enabled = false;
+    dynamicRcb2Failed = false;
+    urcbDynGotReport = false;
+    urcbDyn2GotReport = false;
+    urcbDynEntryCount = 0;
+    urcbDyn2EntryCount = 0;
+    urcbDynEntry0Reference[0] = '\0';
+    urcbDyn2Entry0Reference[0] = '\0';
     connectedCount = 0;
     brcbMainEnableCount = 0;
     sawConnectionRejected = false;
@@ -1163,6 +1215,146 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves DO-grouped chunking (buildChunkPlan/getOrCreateDynamicDataset,
+ * mms_report_client_connection.c): fixtures/reporter1_chunking.cid declares
+ * <Services><DynDataSet max="10" maxAttributes="3"/></Services>, so GGIO1's
+ * full 6-leaf set (Ind1.stVal/q/t + SPCSO1.stVal/q/t) exceeds maxAttributes
+ * and must split into two 3-member DO-atomic chunks - one per spare Dyn RCB
+ * instance on that LN (urcbDyn, urcbDyn2, in that fixture-declaration order).
+ * buildChunkPlan assigns chunk i to the LN's i-th Dyn target in list order,
+ * so urcbDyn (declared first) is expected to get Ind1's own chunk and
+ * urcbDyn2 (declared second) SPCSO1's - asserted directly here since that
+ * ordering is the documented contract (see buildChunkPlan's own doc
+ * comment), not an incidental implementation detail. The simulator's own
+ * device-side caps (SimServer_createWithDatasetLimits) are configured
+ * generously (would happily accept both chunks as one 6-member dataset too)
+ * so any failure here is provably ours, not the device's.
+ */
+void
+test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
+    SimServer sim = SimServer_createWithDatasetLimits(100, 10);
+    SimServer_start(sim, TEST_PORT_CHUNKING);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile("fixtures/reporter1_chunking.cid", "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_chunking.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_CHUNKING,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
+            "expected urcbDyn to get its own chunked dataset and enable successfully");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcb2Enabled),
+            "expected urcbDyn2 to get its own chunked dataset and enable successfully");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn must not fail when a small maxAttributes forces chunking");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcb2Failed, "urcbDyn2 must not fail when a small maxAttributes forces chunking");
+
+    /* Each RCB's own GI-triggered snapshot seeds its own value-diff cache and
+     * must never itself reach the callback - mirrors
+     * test_dynamicDataset_createdOnEnable_andReportsRealChange's own
+     * reasoning, just for two independent RCBs instead of one. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDynGotReport), "urcbDyn's GI snapshot must not reach the callback");
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDyn2GotReport), "urcbDyn2's GI snapshot must not reach the callback");
+
+    SimServer_setIndication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDynGotReport),
+            "expected urcbDyn (assigned Ind1's own chunk) to report the Ind1.stVal flip");
+    TEST_ASSERT_FALSE_MESSAGE(urcbDyn2GotReport,
+            "urcbDyn2's own chunk (SPCSO1) must not report an Ind1 change it has no member for");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDynEntryCount,
+            "urcbDyn's own chunk is exactly Ind1's DO group (stVal + its q/t siblings) - never the full "
+            "6-member LN-wide set");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", urcbDynEntry0Reference);
+
+    urcbDynGotReport = false;
+    SimServer_setSpcso1Indication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDyn2GotReport),
+            "expected urcbDyn2 (assigned SPCSO1's own chunk) to report the SPCSO1.stVal flip");
+    TEST_ASSERT_FALSE_MESSAGE(urcbDynGotReport,
+            "urcbDyn's own chunk (Ind1) must not report an SPCSO1 change it has no member for");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDyn2EntryCount,
+            "urcbDyn2's own chunk is exactly SPCSO1's DO group (stVal + its q/t siblings)");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$stVal", urcbDyn2Entry0Reference);
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves the per-connect-cycle dataset-count budget (DynamicDatasetSession,
+ * mms_report_client_connection.c): fixtures/reporter1_budget.cid declares
+ * <Services><DynDataSet max="1" maxAttributes="3"/></Services> - the same
+ * maxAttributes=3 as reporter1_chunking.cid (forcing the same two-chunk
+ * split), but max="1" means this connect cycle's own budget only allows ONE
+ * new createDataSet: urcbDyn (the LN's first spare Dyn target) succeeds,
+ * urcbDyn2 (the second) must fail cleanly via the budget short-circuit - no
+ * DATSET gets set, setRCBValues fails, rcbStatusCallback fires false - while
+ * an unrelated SCL-static RCB (brcbMain, entirely untouched by dynamic-
+ * dataset bookkeeping) keeps enabling normally, proving graceful degradation
+ * rather than a cascade failure. The simulator's own device-side count cap
+ * (SimServer_createWithDatasetLimits) is configured generously (10) so the
+ * failure here is provably from OUR OWN SCL-declared budget, not an
+ * incidental device-side rejection.
+ */
+void
+test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly(void) {
+    SimServer sim = SimServer_createWithDatasetLimits(100, 10);
+    SimServer_start(sim, TEST_PORT_BUDGET);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile("fixtures/reporter1_budget.cid", "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_budget.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_BUDGET,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&brcbMainEnableCount, 1),
+            "expected brcbMain (SCL-static dataset, unrelated to dynamic-dataset budget bookkeeping) "
+            "to enable normally regardless of urcbDyn2's budget failure");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
+            "expected urcbDyn (the first chunk created this cycle) to succeed within the max=1 budget");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn is the first chunk created this cycle - must succeed");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcb2Failed),
+            "expected urcbDyn2 (the second chunk) to fail cleanly once the max=1 budget is exhausted, "
+            "not silently hang or crash the daemon");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcb2Enabled, "urcbDyn2 must not enable once this cycle's budget is exhausted");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -1177,6 +1369,8 @@ main(void) {
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
     RUN_TEST(test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog);
     RUN_TEST(test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog);
+    RUN_TEST(test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances);
+    RUN_TEST(test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly);
 
     return UNITY_END();
 }

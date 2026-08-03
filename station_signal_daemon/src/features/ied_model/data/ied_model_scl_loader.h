@@ -25,10 +25,17 @@
  *
  * Returns NULL and sets *outError on failure. Caller owns the returned IedModel
  * (IedModel_destroy when done).
+ *
+ * *outDynDataSetMax and *outDynDataSetMaxAttributes are set to -1
+ * immediately, on every path including failure - -1 means "not declared" (no <Services>, a
+ * <Services/> with no <DynDataSet> child, or either attribute genuinely
+ * missing from a <DynDataSet> that is present). 0 is a real, distinct value
+ * (device declares zero capacity) - never conflated with -1. <Services> is a
+ * direct child of <IED>, a sibling of <AccessPoint>.
  */
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics);
+        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes);
 
 /*
  * Lists every direct-child <IED>'s name attribute at the SCL's top level

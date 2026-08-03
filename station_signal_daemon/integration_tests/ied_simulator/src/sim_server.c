@@ -3,8 +3,13 @@
 #include "sim_types.h"
 #include "iec61850_dynamic_model.h"
 
-SimServer
-SimServer_create(void) {
+/* Shared model-building code for SimServer_create/_createWithDatasetLimits -
+ * identical model either way, only how the IedServer itself is constructed
+ * differs (plain IedServer_create vs IedServer_createWithConfig). Returns the
+ * built IedModel* and hands back the two DataAttribute* the caller needs to
+ * populate its own SimServer handle. */
+static IedModel*
+buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal) {
     IedModel* model = IedModel_create("Reporter1");
     LogicalDevice* ld = LogicalDevice_create("LD1", model);
     LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
@@ -123,6 +128,22 @@ SimServer_create(void) {
             RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
             0, 0);
 
+    /* A second Dyn (no datSet) RCB on the same LN (GGIO1) as urcbDyn -
+     * exists purely so an E2E test can prove mms_report_client's dynamic-
+     * dataset chunking (buildChunkPlan/getOrCreateDynamicDataset,
+     * mms_report_client_connection.c): with a small enough maxAttributes,
+     * GGIO1's full 6-leaf set (Ind1.stVal/q/t + SPCSO1.stVal/q/t) splits into
+     * two DO-atomic 3-member chunks, one per spare Dyn target on this LN -
+     * urcbDyn gets one, urcbDyn2 gets the other. Only
+     * fixtures/reporter1_chunking.cid/reporter1_budget.cid declare a matching
+     * <ReportControl name="urcbDyn2">, so no other E2E test that links this
+     * same sim_server.c ever attempts to enable it - same convention as
+     * brcbDup/urcbDyn above. */
+    ReportControlBlock_create("urcbDyn2", ggio1, "urcbDyn2", false, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            0, 0);
+
     /* GSEControlBlock over the same ds1 dataset - lets goose_subscriber's E2E
      * test observe the same GGIO1.Ind1.stVal flip that mms_report_client's
      * E2E test observes via reporting. minTime=10/maxTime=5000 mirror
@@ -168,13 +189,49 @@ SimServer_create(void) {
     uint8_t gooseDupDstMac[6] = { 0x01, 0x0c, 0xcd, 0x01, 0x00, 0x02 };
     GSEControlBlock_addPhyComAddress(gcbDup, PhyComAddress_create(4, 10, 0x1001, gooseDupDstMac));
 
+    *outIndicationStVal = stVal;
+    *outSpcso1StVal = spcso1StVal;
+    return model;
+}
+
+SimServer
+SimServer_create(void) {
+    DataAttribute* indicationStVal;
+    DataAttribute* spcso1StVal;
+    IedModel* model = buildModel(&indicationStVal, &spcso1StVal);
+
     SimServer self = calloc(1, sizeof(struct sSimServer));
     self->model = model;
     self->server = IedServer_create(model);
-    self->indicationStVal = stVal;
+    self->indicationStVal = indicationStVal;
     self->indicationValue = false;
     self->spcso1StVal = spcso1StVal;
     self->spcso1Value = false;
+
+    return self;
+}
+
+SimServer
+SimServer_createWithDatasetLimits(int maxDataSetEntries, int maxAssociationSpecificDataSets) {
+    DataAttribute* indicationStVal;
+    DataAttribute* spcso1StVal;
+    IedModel* model = buildModel(&indicationStVal, &spcso1StVal);
+
+    IedServerConfig config = IedServerConfig_create();
+    IedServerConfig_setMaxDataSetEntries(config, maxDataSetEntries);
+    IedServerConfig_setMaxAssociationSpecificDataSets(config, maxAssociationSpecificDataSets);
+
+    SimServer self = calloc(1, sizeof(struct sSimServer));
+    self->model = model;
+    self->server = IedServer_createWithConfig(model, NULL, config);
+    self->indicationStVal = indicationStVal;
+    self->indicationValue = false;
+    self->spcso1StVal = spcso1StVal;
+    self->spcso1Value = false;
+
+    /* Values are copied out synchronously during IedServer_createWithConfig
+     * (confirmed against the vendored source) - safe to destroy immediately. */
+    IedServerConfig_destroy(config);
 
     return self;
 }

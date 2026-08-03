@@ -75,6 +75,77 @@ lookupDynamicDatasetName(LinkedList cache, const char* lnReference) {
     return NULL;
 }
 
+/*
+ * Everything getOrCreateDynamicDataset needs for one connect cycle: the
+ * existing LN-keyed dedup cache, plus a budget counter copied from SCL's own
+ * <Services><DynDataSet max="N"/> (IedModel_getDynDataSetMax) at the top of
+ * enableAllTargets. remainingBudget models "how many MORE of our own new
+ * createDataSet attempts this connect cycle may still make" - not a live
+ * device-side usage readout (no ACSI service exposes that; other consumers,
+ * e.g. other clients' domain-scoped datasets or leftovers from other tooling,
+ * can already be eating into the real device-side budget invisibly - a real
+ * device run showed exactly this). -1 (SCL never declared a cap) must never
+ * trigger the short-circuit - see MmsReportClientUseCases_isDynamicDatasetBudgetExhausted.
+ * Decremented only on a genuinely new successful createDataSet, never on a
+ * cache hit (reuse is free). budgetExhaustedLogged edge-triggers the
+ * "stopping" log so it fires once per cycle, not once per remaining target -
+ * without this, a device with many RCBs past the budget wall would print one
+ * near-identical line per remaining target instead of one.
+ *
+ * Built fresh in enableAllTargets for every (re)connect, same lifetime as
+ * DynamicDatasetCacheEntry's own cache - see that struct's doc comment for why
+ * neither is carried across reconnects.
+ */
+typedef struct {
+    LinkedList cache;
+    int remainingBudget;
+    bool budgetExhaustedLogged;
+    LinkedList chunkAssignments; /* DynamicDatasetChunkAssignment* list - see that struct's own doc
+                                     comment and buildChunkPlan. Empty (never NULL) whenever
+                                     maxAttributes is unknown/unusable - the whole chunking
+                                     mechanism is then a no-op. */
+} DynamicDatasetSession;
+
+/*
+ * One LN's full leaf set didn't fit under SCL's declared maxAttributes cap -
+ * see buildChunkPlan's own doc comment for how/when this gets populated. Each
+ * assignment maps ONE DO-atomic chunk (MmsReportClientUseCases_chunkReferencesByDoGroup)
+ * onto ONE of that LN's own spare Dyn RCB targets - 1:1, never shared, unlike
+ * the un-chunked LN-wide dedup path in getOrCreateDynamicDataset.
+ * rcbReference matches that target's own objectReference (not lnReference -
+ * that's the whole point, each chunked target gets its own unique dataset).
+ */
+typedef struct {
+    char* rcbReference;      /* owned copy, == the assigned target's own objectReference */
+    char** memberReferences; /* owned array of owned strings - this chunk's own DO-atomic subset */
+    int memberCount;
+} DynamicDatasetChunkAssignment;
+
+static void
+destroyDynamicDatasetChunkAssignment(void* entry) {
+    if (!entry) return;
+    DynamicDatasetChunkAssignment* e = (DynamicDatasetChunkAssignment*) entry;
+    free(e->rcbReference);
+    if (e->memberReferences) {
+        for (int i = 0; i < e->memberCount; i++) free(e->memberReferences[i]);
+        free(e->memberReferences);
+    }
+    free(e);
+}
+
+static DynamicDatasetChunkAssignment*
+lookupChunkAssignment(LinkedList chunkAssignments, const char* rcbReference) {
+    if (!chunkAssignments || !rcbReference) return NULL;
+
+    LinkedList element = LinkedList_getNext(chunkAssignments);
+    while (element) {
+        DynamicDatasetChunkAssignment* entry = (DynamicDatasetChunkAssignment*) LinkedList_getData(element);
+        if (entry->rcbReference && strcmp(entry->rcbReference, rcbReference) == 0) return entry;
+        element = LinkedList_getNext(element);
+    }
+    return NULL;
+}
+
 /* Small duplicated lookup (mirrors mms_report_client_report_adapter.c's own
  * lookupMemberRefCache) - both are tiny, data-layer-local, and this feature's
  * own convention already duplicates snippets this size across files rather
@@ -113,53 +184,28 @@ buildDynamicDatasetName(const char* lnReference) {
 }
 
 /*
- * For an RCB whose SCL declared no datSet (datasetReference == NULL,
- * datSet="Dyn" in SCL terms - see CLAUDE.md's own bullet on this): creates an
- * association-scoped dataset covering every FC=ST/MX leaf attribute under the
- * RCB's own LN (member list already resolved once, locally, into
- * handle->memberRefCache by buildMemberRefCache - see that function's own
- * comment on why the same list is reused here rather than re-walked).
- *
- * dynamicDatasetCache de-dupes by LN within one connect cycle: many real
- * IEDs expose several reserved RCB instances per LN (e.g. urcbA..urcbJ) that
- * would otherwise each trigger their own createDataSet call for what is
- * conceptually the same dataset - wasteful, and unnecessarily consumes the
- * device's (often small, e.g. 15) dataset-count budget.
- *
- * Returns the dataset name (borrowed - owned by dynamicDatasetCache, valid
- * for the rest of the current connect cycle) on success, or NULL if no
- * reportable attributes were found for this LN, or if dataset creation
- * itself failed (cap exceeded, maxAttributes exceeded, etc.) - either way,
- * the caller falls back to today's pre-existing behavior (skip DATSET, let
- * setRCBValues fail, log, move on).
+ * Shared createDataSet + cache-insert + budget-decrement plumbing for both of
+ * getOrCreateDynamicDataset's paths below (LN-wide unchunked, and per-target
+ * chunked) - the only difference between the two callers is which reference
+ * the cache entry/generated name is keyed by (LN-wide: target->lnReference;
+ * chunked: target->objectReference, already unique per target so it doubles
+ * as a naming/cache key with no new scheme needed) and which member list
+ * feeds wireRefs. `logLnReference`/`logRcbReference` are for messages only.
+ * Caller has already confirmed the budget isn't exhausted.
  */
 static const char*
-getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target,
-        LinkedList dynamicDatasetCache) {
-    if (!dynamicDatasetCache || !target->lnReference) return NULL;
-
-    const char* existing = lookupDynamicDatasetName(dynamicDatasetCache, target->lnReference);
-    if (existing) return existing;
-
-    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
-    if (!cacheEntry || cacheEntry->memberCount <= 0) {
-        fprintf(stderr, "[mms_report_client] no reportable (FC=ST/MX) attributes found for LN '%s' - "
-                "'%s' will not get a dynamic dataset\n",
-                target->lnReference, target->objectReference);
-        return NULL;
-    }
-
-    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(
-            (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount);
+createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
+        const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
+        int memberCount) {
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
     if (!wireRefs || LinkedList_size(wireRefs) == 0) {
         fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' - "
-                "'%s' will not get a dynamic dataset\n",
-                target->lnReference, target->objectReference);
+                "'%s' will not get a dynamic dataset\n", logLnReference, logRcbReference);
         if (wireRefs) LinkedList_destroyDeep(wireRefs, free);
         return NULL;
     }
 
-    char* datasetName = buildDynamicDatasetName(target->lnReference);
+    char* datasetName = buildDynamicDatasetName(cacheKey);
     if (!datasetName) {
         LinkedList_destroyDeep(wireRefs, free);
         return NULL;
@@ -172,7 +218,7 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
      * failure below only shows a raw error code with nothing to compare it
      * against. */
     fprintf(stderr, "[mms_report_client] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s)\n",
-            datasetName, target->lnReference, cacheEntry->memberCount);
+            datasetName, logLnReference, memberCount);
 
     IedClientError err = IED_ERROR_OK;
     IedConnection_createDataSet(handle->connection, &err, datasetName, wireRefs);
@@ -180,13 +226,14 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
 
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
-                "'%s' will not report\n", target->lnReference, err, target->objectReference);
+                "'%s' will not report\n", logLnReference, err, logRcbReference);
         free(datasetName);
         return NULL;
     }
 
-    fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName,
-            target->lnReference);
+    fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName, logLnReference);
+
+    if (session->remainingBudget > 0) session->remainingBudget--;
 
     DynamicDatasetCacheEntry* cacheNode = malloc(sizeof(DynamicDatasetCacheEntry));
     if (!cacheNode) {
@@ -198,11 +245,83 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
         free(datasetName);
         return NULL;
     }
-    cacheNode->lnReference = MmsReportClientUtils_safeStringDup(target->lnReference);
+    cacheNode->lnReference = MmsReportClientUtils_safeStringDup(cacheKey);
     cacheNode->datasetName = datasetName;
-    LinkedList_add(dynamicDatasetCache, cacheNode);
+    LinkedList_add(session->cache, cacheNode);
 
     return cacheNode->datasetName;
+}
+
+/*
+ * For an RCB whose SCL declared no datSet (datasetReference == NULL,
+ * datSet="Dyn" in SCL terms - see CLAUDE.md's own bullet on this): creates an
+ * association-scoped dataset. Two paths, chosen by whether buildChunkPlan
+ * assigned this target its own chunk this cycle (session->chunkAssignments):
+ *
+ *   - CHUNKED (an assignment exists): this LN's full leaf set exceeded SCL's
+ *     declared maxAttributes, so this target gets ONLY its own DO-atomic
+ *     subset, in its own uniquely-named dataset (keyed/named by
+ *     target->objectReference) - no sharing, no LN-wide dedup.
+ *   - UNCHUNKED (no assignment - the common case, and the ONLY case whenever
+ *     maxAttributes is unknown/unusable): covers every FC=ST/MX leaf
+ *     attribute under the RCB's own LN (member list already resolved once,
+ *     locally, into handle->memberRefCache by buildMemberRefCache). Dedupes
+ *     by LN (session->cache, keyed by target->lnReference) within one connect
+ *     cycle: many real IEDs expose several reserved RCB instances per LN
+ *     (e.g. urcbA..urcbJ) that would otherwise each trigger their own
+ *     createDataSet call for what is conceptually the same dataset -
+ *     wasteful, and unnecessarily consumes the device's (often small, e.g.
+ *     15) dataset-count budget.
+ *
+ * Returns the dataset name (borrowed - owned by session->cache, valid for
+ * the rest of the current connect cycle) on success, or NULL if no
+ * reportable attributes were found, if this connect cycle's own
+ * dataset-count budget is already exhausted (see DynamicDatasetSession's own
+ * doc comment), or if dataset creation itself failed (cap exceeded,
+ * maxAttributes exceeded, etc.) - either way, the caller falls back to
+ * today's pre-existing behavior (skip DATSET, let setRCBValues fail, log,
+ * move on).
+ */
+static const char*
+getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target,
+        DynamicDatasetSession* session) {
+    if (!session || !target->lnReference) return NULL;
+
+    DynamicDatasetChunkAssignment* chunk =
+            lookupChunkAssignment(session->chunkAssignments, target->objectReference);
+    const char* cacheKey = chunk ? target->objectReference : target->lnReference;
+
+    const char* existing = lookupDynamicDatasetName(session->cache, cacheKey);
+    if (existing) return existing;
+
+    /* Cache hits above stay free (zero wire cost, always allowed) - only a
+     * genuinely NEW createDataSet attempt is gated by the budget. */
+    if (MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(session->remainingBudget)) {
+        if (!session->budgetExhaustedLogged) {
+            fprintf(stderr, "[mms_report_client] dynamic dataset count budget (SCL DynDataSet max=%d) "
+                    "exhausted this connect cycle - no further createDataSet attempts will be made; "
+                    "remaining RCB(s) needing a dynamic dataset will not report\n",
+                    IedModel_getDynDataSetMax(handle->iedModel));
+            session->budgetExhaustedLogged = true;
+        }
+        return NULL;
+    }
+
+    if (chunk) {
+        return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
+                target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount);
+    }
+
+    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
+    if (!cacheEntry || cacheEntry->memberCount <= 0) {
+        fprintf(stderr, "[mms_report_client] no reportable (FC=ST/MX) attributes found for LN '%s' - "
+                "'%s' will not get a dynamic dataset\n",
+                target->lnReference, target->objectReference);
+        return NULL;
+    }
+
+    return createAndCacheDynamicDataset(handle, session, target->lnReference, target->lnReference,
+            target->objectReference, (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount);
 }
 
 /* Cheap, purely-local skip: true if datasetRef looks like a name
@@ -216,17 +335,36 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
  * reconnect. This is belt-and-suspenders only, not the sole safety net - the
  * real one is pullLiveDataset's own IedConnection_getDataSetDirectory failure
  * handling below, which falls through to getOrCreateDynamicDataset either
- * way (a dangling reference would fail to resolve there too). */
+ * way (a dangling reference would fail to resolve there too).
+ *
+ * Checks both naming schemes getOrCreateDynamicDataset can produce for this
+ * target: the LN-wide name (buildDynamicDatasetName(lnReference), used when
+ * this LN's leaf set fits under maxAttributes / maxAttributes is unknown) and
+ * the per-target chunked name (buildDynamicDatasetName(objectReference), used
+ * when this target was assigned a chunk - see DynamicDatasetChunkAssignment).
+ * Checked unconditionally, not gated on whether this target actually has a
+ * chunk assignment THIS cycle - it may have been chunked on a prior cycle
+ * whose association-scoped dataset is now dangling from this cycle's point of
+ * view. */
 static bool
-looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const char* lnReference) {
-    if (!datasetRef || !lnReference) return false;
+looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlockTarget* target) {
+    if (!datasetRef || !target) return false;
 
-    char* expected = buildDynamicDatasetName(lnReference);
-    if (!expected) return false;
+    if (target->lnReference) {
+        char* expectedLnWide = buildDynamicDatasetName(target->lnReference);
+        bool match = expectedLnWide && strcmp(datasetRef, expectedLnWide) == 0;
+        free(expectedLnWide);
+        if (match) return true;
+    }
 
-    bool match = (strcmp(datasetRef, expected) == 0);
-    free(expected);
-    return match;
+    if (target->objectReference) {
+        char* expectedChunked = buildDynamicDatasetName(target->objectReference);
+        bool match = expectedChunked && strcmp(datasetRef, expectedChunked) == 0;
+        free(expectedChunked);
+        if (match) return true;
+    }
+
+    return false;
 }
 
 /*
@@ -269,7 +407,7 @@ pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         LinkedList* outMemberRefs) {
     const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
     if (!liveDataset || liveDataset[0] == '\0') return false;
-    if (looksLikeOurOwnDynamicDatasetName(liveDataset, target->lnReference)) return false;
+    if (looksLikeOurOwnDynamicDatasetName(liveDataset, target)) return false;
 
     IedClientError err = IED_ERROR_OK;
     bool isDeletable = false;
@@ -406,10 +544,22 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
  * wire call - the same offline call buildMemberRefCache itself makes) and
  * swapped in exactly like refreshPulledMemberRefCache's own shape-swap, with
  * the same value-diff-cache-reset consequence and the same rationale.
+ *
+ * REQUIRED for chunking correctness, not just an optimization: if `target`
+ * has a chunk assignment this cycle (session->chunkAssignments -
+ * getOrCreateDynamicDataset already built its dataset from exactly this
+ * chunk's own member subset), the rebuilt shape here must come from that same
+ * subset too - otherwise a correctly-sized, chunk-scoped dataset would exist
+ * on the wire while this entry's decode-time shape silently reverts to the
+ * LN's FULL leaf set, corrupting report decoding on this target's very first
+ * enable (confirmed by reading this function's own effect - not merely
+ * theoretical). `session` may be NULL (caller has no chunk plan at all),
+ * which behaves exactly like "no assignment for this target" - the ordinary
+ * LN-wide path below, unchanged from before chunking existed.
  */
 static void
 ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarget* target,
-        const char* effectiveDatasetReference) {
+        const char* effectiveDatasetReference, DynamicDatasetSession* session) {
     if (!effectiveDatasetReference) return;
 
     MmsReportClientMemberRefCacheEntry* entry = lookupMemberRefCacheByRcb(handle, target->objectReference);
@@ -424,32 +574,48 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     }
     Semaphore_post(handle->memberRefCacheLock);
 
-    LinkedList members = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
-            target->lnReference);
-    int count = members ? LinkedList_size(members) : 0;
-    if (count <= 0) {
+    DynamicDatasetChunkAssignment* chunk =
+            session ? lookupChunkAssignment(session->chunkAssignments, target->objectReference) : NULL;
+
+    int count;
+    char** array = NULL;
+    if (chunk) {
+        count = chunk->memberCount;
+        if (count > 0) {
+            array = calloc((size_t) count, sizeof(char*));
+            if (!array) return;
+            for (int i = 0; i < count; i++) {
+                array[i] = MmsReportClientUtils_safeStringDup(chunk->memberReferences[i]);
+            }
+        }
+    } else {
+        LinkedList members = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
+                target->lnReference);
+        count = members ? LinkedList_size(members) : 0;
+        if (count > 0) {
+            array = calloc((size_t) count, sizeof(char*));
+            if (!array) {
+                LinkedList_destroyDeep(members, free);
+                return;
+            }
+            int i = 0;
+            for (LinkedList el = LinkedList_getNext(members); el; el = LinkedList_getNext(el)) {
+                array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
+            }
+        }
         if (members) LinkedList_destroyDeep(members, free);
-        /* Nothing reportable for this LN (mirrors getOrCreateDynamicDataset's
-         * own "no reportable attributes" log-and-skip posture) - still stamp
-         * the fingerprint so this rebuild isn't retried on every single
-         * enable. */
+    }
+
+    if (count <= 0) {
+        /* Nothing reportable (mirrors getOrCreateDynamicDataset's own
+         * "no reportable attributes" log-and-skip posture) - still stamp the
+         * fingerprint so this rebuild isn't retried on every single enable. */
         Semaphore_wait(handle->memberRefCacheLock);
         free(entry->resolvedDatasetReference);
         entry->resolvedDatasetReference = MmsReportClientUtils_safeStringDup(effectiveDatasetReference);
         Semaphore_post(handle->memberRefCacheLock);
         return;
     }
-
-    char** array = calloc((size_t) count, sizeof(char*));
-    if (!array) {
-        LinkedList_destroyDeep(members, free);
-        return;
-    }
-    int i = 0;
-    for (LinkedList el = LinkedList_getNext(members); el; el = LinkedList_getNext(el)) {
-        array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
-    }
-    LinkedList_destroyDeep(members, free);
 
     MmsReportClientMemberRefCacheEntry* fresh = MmsReportClientUseCases_buildMemberRefCacheEntry(
             handle->iedModel, target->objectReference, array, count, effectiveDatasetReference);
@@ -461,7 +627,7 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
 }
 
 static void
-enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, LinkedList dynamicDatasetCache) {
+enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session) {
     /* Defense-in-depth against enableAllTargets' own loop-top check below -
      * covers the narrow gap between that check and this call actually
      * landing, if a stop lands on the connection concurrently mid-loop. */
@@ -575,8 +741,8 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             effectiveDatasetReference = liveDataset;
             datasetTier = "live";
         } else {
-            effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, dynamicDatasetCache);
-            ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference);
+            effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, session);
+            ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference, session);
             datasetTier = "self-created";
         }
     }
@@ -733,6 +899,165 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     ClientReportControlBlock_destroy(rcb);
 }
 
+/* Small owned-string-list membership check - used only by buildChunkPlan to
+ * track which LNs it has already processed (so a 10-RCB-instance LN's leaf
+ * set isn't re-fetched/re-chunked once per instance). */
+static bool
+stringListContains(LinkedList list, const char* value) {
+    if (!list || !value) return false;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        char* entry = (char*) LinkedList_getData(element);
+        if (entry && strcmp(entry, value) == 0) return true;
+        element = LinkedList_getNext(element);
+    }
+    return false;
+}
+
+/*
+ * Computes, once per connect cycle (called at the top of enableAllTargets),
+ * which of this IED's Dyn (SCL datSet="Dyn", target->datasetReference == NULL)
+ * RCB targets need to split their LN's full leaf set into multiple DO-atomic
+ * chunks because it exceeds SCL's own declared maxAttributes cap - see
+ * MmsReportClientUseCases_chunkReferencesByDoGroup for the packing strategy.
+ *
+ * Returns an EMPTY list immediately if IedModel_getDynDataSetMaxAttributes is
+ * unknown (-1) or a declared-but-unusable 0 - this is the guarantee that this
+ * whole mechanism stays completely inert for any device/fixture without a
+ * declared cap (every existing test today), falling through unchanged to the
+ * pre-existing single-shared-dataset-per-LN path in getOrCreateDynamicDataset.
+ *
+ * For each LN whose full leaf set exceeds maxAttributes: chunk i is assigned
+ * to the LN's i-th Dyn target in handle->targets' own existing list order (no
+ * new field on ReportControlBlockTarget, no ied_model changes - "which target
+ * am I" is derived purely from position during this scan). If an LN needs
+ * more chunks than it has spare (Dyn) targets, the overflow chunk(s) are
+ * logged and left unassigned - an explicit, visible gap, never a silent drop.
+ * An LN whose full leaf set FITS under maxAttributes gets no assignment at
+ * all - it falls through untouched to the pre-existing LN-wide dedup path.
+ *
+ * Recomputed fresh every connect cycle rather than cached on the handle: it's
+ * a pure function of already-static data (handle->iedModel, handle->targets,
+ * both fixed for the client's whole lifetime), so recomputation is cheap
+ * (string work over at most tens of targets, no wire calls) and idempotent -
+ * not worth growing sMmsReportClientHandle for.
+ */
+static LinkedList
+buildChunkPlan(MmsReportClientHandle handle) {
+    LinkedList plan = LinkedList_create();
+
+    int maxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
+    if (maxAttributes <= 0 || !handle->targets) return plan;
+
+    LinkedList processedLns = LinkedList_create();
+
+    LinkedList outerElement = LinkedList_getNext(handle->targets);
+    while (outerElement) {
+        ReportControlBlockTarget* lnTarget = (ReportControlBlockTarget*) LinkedList_getData(outerElement);
+        outerElement = LinkedList_getNext(outerElement);
+
+        if (lnTarget->datasetReference || !lnTarget->lnReference) continue;
+        if (stringListContains(processedLns, lnTarget->lnReference)) continue;
+        LinkedList_add(processedLns, MmsReportClientUtils_safeStringDup(lnTarget->lnReference));
+
+        /* Every Dyn target on this LN, in handle->targets' own existing
+         * order - a list of BORROWED ReportControlBlockTarget* (owned by
+         * handle->targets itself), destroyed with LinkedList_destroyStatic
+         * below, never Deep. */
+        LinkedList lnDynTargets = LinkedList_create();
+        LinkedList scanElement = LinkedList_getNext(handle->targets);
+        while (scanElement) {
+            ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(scanElement);
+            if (!t->datasetReference && t->lnReference && strcmp(t->lnReference, lnTarget->lnReference) == 0) {
+                LinkedList_add(lnDynTargets, t);
+            }
+            scanElement = LinkedList_getNext(scanElement);
+        }
+
+        LinkedList leafRefs = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
+                lnTarget->lnReference);
+        int leafCount = leafRefs ? LinkedList_size(leafRefs) : 0;
+
+        if (leafCount <= maxAttributes) {
+            /* Fits under the cap - no chunking needed, falls through to the
+             * pre-existing LN-wide dedup path untouched. */
+            if (leafRefs) LinkedList_destroyDeep(leafRefs, free);
+            LinkedList_destroyStatic(lnDynTargets);
+            continue;
+        }
+
+        char** leafArray = calloc((size_t) leafCount, sizeof(char*));
+        if (!leafArray) {
+            LinkedList_destroyDeep(leafRefs, free);
+            LinkedList_destroyStatic(lnDynTargets);
+            continue;
+        }
+        int idx = 0;
+        for (LinkedList el = LinkedList_getNext(leafRefs); el; el = LinkedList_getNext(el)) {
+            leafArray[idx++] = (char*) LinkedList_getData(el);
+        }
+
+        LinkedList chunkLists = MmsReportClientUseCases_chunkReferencesByDoGroup(
+                (const char* const*) leafArray, leafCount, maxAttributes);
+        free(leafArray);
+        LinkedList_destroyDeep(leafRefs, free);
+
+        int totalChunks = LinkedList_size(chunkLists);
+        int dynTargetCount = LinkedList_size(lnDynTargets);
+        int assignedChunks = 0;
+
+        LinkedList chunkElement = LinkedList_getNext(chunkLists);
+        LinkedList dynTargetElement = LinkedList_getNext(lnDynTargets);
+        while (chunkElement) {
+            if (!dynTargetElement) {
+                fprintf(stderr, "[mms_report_client] LN '%s' needs %d dataset chunk(s) (maxAttributes=%d) "
+                        "but only has %d RCB instance(s) with no SCL-assigned dataset - %d chunk(s) will "
+                        "not be reported\n", lnTarget->lnReference, totalChunks, maxAttributes, dynTargetCount,
+                        totalChunks - assignedChunks);
+                break;
+            }
+
+            LinkedList chunkMembers = (LinkedList) LinkedList_getData(chunkElement);
+            ReportControlBlockTarget* assignedTarget = (ReportControlBlockTarget*) LinkedList_getData(dynTargetElement);
+
+            int memberCount = LinkedList_size(chunkMembers);
+            char** memberArray = calloc((size_t) memberCount, sizeof(char*));
+            if (memberArray) {
+                int m = 0;
+                for (LinkedList mEl = LinkedList_getNext(chunkMembers); mEl; mEl = LinkedList_getNext(mEl)) {
+                    memberArray[m++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(mEl));
+                }
+
+                DynamicDatasetChunkAssignment* assignment = malloc(sizeof(DynamicDatasetChunkAssignment));
+                if (assignment) {
+                    assignment->rcbReference = MmsReportClientUtils_safeStringDup(assignedTarget->objectReference);
+                    assignment->memberReferences = memberArray;
+                    assignment->memberCount = memberCount;
+                    LinkedList_add(plan, assignment);
+                } else {
+                    for (int f = 0; f < memberCount; f++) free(memberArray[f]);
+                    free(memberArray);
+                }
+            }
+
+            assignedChunks++;
+            chunkElement = LinkedList_getNext(chunkElement);
+            dynTargetElement = LinkedList_getNext(dynTargetElement);
+        }
+
+        LinkedList chunkCleanup = LinkedList_getNext(chunkLists);
+        while (chunkCleanup) {
+            LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkCleanup), free);
+            chunkCleanup = LinkedList_getNext(chunkCleanup);
+        }
+        LinkedList_destroyStatic(chunkLists);
+        LinkedList_destroyStatic(lnDynTargets);
+    }
+
+    LinkedList_destroyDeep(processedLns, free);
+    return plan;
+}
+
 /* One bad RCB must not abort the rest - enableOneTarget catches its own
  * errors and enableAllTargets always visits every cached target, UNLESS a
  * concurrent stop request lands mid-loop (checked each iteration below).
@@ -754,16 +1079,22 @@ enableAllTargets(MmsReportClientHandle handle) {
     if (!handle->targets) return;
 
     /* Fresh per connect cycle, never carried across reconnects - see
-     * DynamicDatasetCacheEntry's own doc comment. */
-    LinkedList dynamicDatasetCache = LinkedList_create();
+     * DynamicDatasetSession's own doc comment. */
+    DynamicDatasetSession session = {
+        .cache = LinkedList_create(),
+        .remainingBudget = IedModel_getDynDataSetMax(handle->iedModel),
+        .budgetExhaustedLogged = false,
+        .chunkAssignments = buildChunkPlan(handle),
+    };
 
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element && !handle->stopRequested) {
-        enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), dynamicDatasetCache);
+        enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), &session);
         element = LinkedList_getNext(element);
     }
 
-    if (dynamicDatasetCache) LinkedList_destroyDeep(dynamicDatasetCache, destroyDynamicDatasetCacheEntry);
+    if (session.cache) LinkedList_destroyDeep(session.cache, destroyDynamicDatasetCacheEntry);
+    if (session.chunkAssignments) LinkedList_destroyDeep(session.chunkAssignments, destroyDynamicDatasetChunkAssignment);
 }
 
 /* Sleeps in small chunks so MmsReportClientConnection_stop()'s bounded wait

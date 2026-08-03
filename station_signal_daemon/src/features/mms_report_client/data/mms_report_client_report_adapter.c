@@ -44,7 +44,18 @@ void
 MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     MmsReportClientHandle handle = (MmsReportClientHandle) parameter;
 
-    if (!handle || !handle->reportCallback || !report) return;
+    if (!handle || !handle->reportCallback || !report) {
+        /* Should be unreachable in practice (orchestration always wires the
+         * callback before a report can arrive) - logged anyway, since a
+         * report silently vanishing here with no trace would otherwise look
+         * identical to "nothing happened" to anyone watching the daemon's
+         * output, all the way up to a real device operator making a real
+         * change and seeing no report anywhere. */
+        fprintf(stderr, "[mms_report_client] report arrived but cannot be delivered (handle=%p, "
+                "reportCallback=%p, report=%p)\n", (void*) handle,
+                handle ? (void*) handle->reportCallback : NULL, (void*) report);
+        return;
+    }
 
     char* rcbReference = ClientReport_getRcbReference(report);
     char* rptId = ClientReport_getRptId(report);
@@ -57,6 +68,16 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     ReasonForInclusion* reasons = NULL;
     const char** dataReferences = NULL;
     bool hasDataReference = ClientReport_hasDataReference(report);
+
+    /* The one place that proves a report physically arrived at all - every
+     * other fprintf in this feature is about enabling/resolving a dataset
+     * BEFORE any report exists. Without this, a report that arrives and then
+     * gets filtered out below (by design or by bug) is completely
+     * indistinguishable, from the terminal, from the device never having
+     * sent one in the first place. */
+    fprintf(stderr, "[mms_report_client] report received for '%s' rptId='%s' buffered=%d entries=%d "
+            "hasDataReference=%d\n", rcbReference ? rcbReference : "?", rptId ? rptId : "?", buffered,
+            entryCount, hasDataReference);
 
     if (entryCount > 0) {
         reasons = malloc(sizeof(ReasonForInclusion) * (size_t) entryCount);
@@ -92,6 +113,8 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * this path (a stale entry is by definition <= the current cached
      * value, so leaving it alone is correct either way). */
     if (fallback && MmsReportClientUseCases_isEntryIdStale(entryId, fallback->lastEntryId)) {
+        fprintf(stderr, "[mms_report_client] dropping stale/duplicate report for '%s' "
+                "(entryId not newer than last cached)\n", rcbReference ? rcbReference : "?");
         Semaphore_post(handle->memberRefCacheLock);
         free(reasons);
         free(dataReferences);
@@ -123,7 +146,11 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
 
     /* Allocation failure building the record: nothing safe to deliver - drop
      * this report rather than risk the caller dereferencing a partial one. */
-    if (!record) return;
+    if (!record) {
+        fprintf(stderr, "[mms_report_client] failed to build report record for '%s' - dropped\n",
+                rcbReference ? rcbReference : "?");
+        return;
+    }
 
     /* record->entryCount > 0: survived the per-RCB hybrid event filter.
      * shouldForwardAcrossRcb is the second, independent gate: even a report
@@ -133,6 +160,8 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * MmsReportClientCrossRcbDedupCache's own doc comment. */
     if (record->entryCount > 0 && MmsReportClientUseCases_shouldForwardAcrossRcb(
             &handle->crossRcbDedupCache, record->rcbReference, record->entries, record->entryCount)) {
+        fprintf(stderr, "[mms_report_client] forwarding report for '%s' (%d entr%s) to ipc_dispatcher\n",
+                rcbReference ? rcbReference : "?", record->entryCount, record->entryCount == 1 ? "y" : "ies");
         handle->reportCallback(handle->reportCallbackParam, record);
     } else {
         /* Either every entry was filtered by the per-RCB hybrid event filter
@@ -141,6 +170,15 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
          * a moment ago from a different RCB - nothing worth forwarding to
          * ipc_dispatcher either way. The callback (which would otherwise own
          * destroying this record) never runs, so free it here instead. */
+        if (record->entryCount == 0) {
+            fprintf(stderr, "[mms_report_client] report for '%s' had %d raw entr%s, 0 survived the "
+                    "per-RCB value-diff filter (bootstrap-seed or unchanged) - nothing forwarded\n",
+                    rcbReference ? rcbReference : "?", entryCount, entryCount == 1 ? "y" : "ies");
+        } else {
+            fprintf(stderr, "[mms_report_client] report for '%s' (%d entr%s) dropped by cross-RCB dedup - "
+                    "identical content already forwarded from another RCB\n",
+                    rcbReference ? rcbReference : "?", record->entryCount, record->entryCount == 1 ? "y" : "ies");
+        }
         MmsReportClientUseCases_freeReportRecord(record);
     }
 }

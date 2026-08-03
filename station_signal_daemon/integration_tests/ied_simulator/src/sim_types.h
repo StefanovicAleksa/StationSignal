@@ -56,6 +56,22 @@ typedef struct sSimServer* SimServer;
 SimServer
 SimServer_create(void);
 
+/*
+ * Same model as SimServer_create, but the IedServer is created via
+ * IedServer_createWithConfig with an explicit dataset-size/count cap
+ * (IedServerConfig_setMaxDataSetEntries / _setMaxAssociationSpecificDataSets)
+ * instead of library defaults (100 entries / 10 association-specific
+ * datasets respectively) - added specifically so an E2E test can
+ * deterministically reproduce mms_report_client's dynamic-dataset chunking
+ * (maxAttributes) and count-budget-exhaustion (DynDataSet max) behavior
+ * without needing a real capacity-limited device. Both config values are
+ * copied out of the IedServerConfig object synchronously during
+ * IedServer_createWithConfig (confirmed against the vendored source,
+ * ied_server.c), so the config object is destroyed before this function
+ * returns - it does not need to outlive the call. */
+SimServer
+SimServer_createWithDatasetLimits(int maxDataSetEntries, int maxAssociationSpecificDataSets);
+
 /* Starts listening for client connections on tcpPort (spawns libiec61850's
  * own internal connection-handling and event-worker threads - non-blocking),
  * and starts GOOSE publishing on "lo" (spawns IedServer's own GOOSE event

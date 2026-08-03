@@ -136,6 +136,16 @@ struct sIedModelHandle {
      * wire on that path, an already-accepted limitation, not a regression. */
     IedModelDaSemanticEntry* daSemantics;
     int daSemanticCount;
+
+    /* SCL's <Services><DynDataSet max="N" maxAttributes="M"/> for this IED,
+     * used by mms_report_client to budget/chunk dynamic dataset creation
+     * against the device's own declared caps. -1 = not declared (no
+     * <Services>, no <DynDataSet> child, or a model built via
+     * IedModel_wrapDynamicModel - no <Services> is ever available on that
+     * path). 0 is a real, distinct value (device declares zero capacity) -
+     * never conflated with -1. */
+    int dynDataSetMax;
+    int dynDataSetMaxAttributes;
 };
 
 typedef struct sIedModelHandle* IedModelHandle;

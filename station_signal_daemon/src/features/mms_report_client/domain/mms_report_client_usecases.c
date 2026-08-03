@@ -91,6 +91,11 @@ MmsReportClientUseCases_shouldRequestGiOnEnable(bool buffered, bool hasResumable
     return !(buffered && hasResumableEntryId);
 }
 
+bool
+MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(int remainingBudget) {
+    return remainingBudget == 0;
+}
+
 /* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
  * clone, if any, and clones newValue into its place). NULL-safe/no-op if
  * memberRefCache/lastForwardedValues is absent or slot is out of range - a
@@ -1033,6 +1038,96 @@ MmsReportClientUseCases_buildWireMemberReferences(const char* const* memberRefer
         if (wireRef) LinkedList_add(result, wireRef);
     }
     return result;
+}
+
+char*
+MmsReportClientUseCases_extractDoGroupKey(const char* memberReference) {
+    if (!memberReference) return NULL;
+
+    /* "LD/LN$FC$DO[$SDO...]$DA" - the 3rd "$"-segment is the DO name. Walk
+     * to the start of that segment (skip past the first two '$'s), then copy
+     * up to (but not including) the next '$' or the string end. */
+    const char* doStart = strchr(memberReference, '$');
+    if (doStart) doStart = strchr(doStart + 1, '$');
+    if (!doStart) {
+        /* Fewer than 2 '$'s - malformed, treat the whole string as its own
+         * singleton group rather than erroring. */
+        return MmsReportClientUtils_safeStringDup(memberReference);
+    }
+    doStart++;
+
+    const char* doEnd = strchr(doStart, '$');
+    size_t len = doEnd ? (size_t) (doEnd - doStart) : strlen(doStart);
+
+    char* key = malloc(len + 1);
+    if (!key) return NULL;
+    memcpy(key, doStart, len);
+    key[len] = '\0';
+    return key;
+}
+
+LinkedList
+MmsReportClientUseCases_chunkReferencesByDoGroup(const char* const* references, int count, int maxAttributes) {
+    LinkedList chunks = LinkedList_create();
+    if (!references || count <= 0 || maxAttributes <= 0) return chunks;
+
+    char** doKeys = calloc((size_t) count, sizeof(char*));
+    if (!doKeys) return chunks;
+    for (int i = 0; i < count; i++) {
+        doKeys[i] = references[i] ? MmsReportClientUseCases_extractDoGroupKey(references[i]) : NULL;
+    }
+
+    LinkedList currentChunk = NULL;
+    int currentChunkSize = 0;
+
+    int i = 0;
+    while (i < count) {
+        if (!references[i]) {
+            i++;
+            continue;
+        }
+
+        /* Extent of this DO group: the maximal run of consecutive references
+         * sharing the same DO key as references[i]. collectLnLeavesByFc's own
+         * DO-then-DA nested walk already emits one DO's leaves contiguously
+         * within a given FC pass, so a simple adjacency scan is sufficient -
+         * no cross-list DO-key matching is attempted (the same DO name
+         * appearing again in a later, non-adjacent FC pass is treated as its
+         * own separate group, which is fine - it isn't the same contiguous
+         * run this invariant is about). */
+        int groupEnd = i + 1;
+        while (groupEnd < count && references[groupEnd] && doKeys[groupEnd] && doKeys[i]
+                && strcmp(doKeys[groupEnd], doKeys[i]) == 0) {
+            groupEnd++;
+        }
+        int groupSize = groupEnd - i;
+
+        /* Roll over to a new chunk only if the CURRENT chunk already has
+         * something in it and the whole incoming group wouldn't fit - never
+         * split the group itself, and never roll over an empty chunk (so a
+         * lone oversized group still gets exactly one chunk, not an empty one
+         * followed by an oversized one). */
+        if (currentChunk && currentChunkSize > 0 && currentChunkSize + groupSize > maxAttributes) {
+            LinkedList_add(chunks, currentChunk);
+            currentChunk = NULL;
+            currentChunkSize = 0;
+        }
+        if (!currentChunk) currentChunk = LinkedList_create();
+
+        for (int j = i; j < groupEnd; j++) {
+            LinkedList_add(currentChunk, MmsReportClientUtils_safeStringDup(references[j]));
+        }
+        currentChunkSize += groupSize;
+
+        i = groupEnd;
+    }
+
+    if (currentChunk) LinkedList_add(chunks, currentChunk);
+
+    for (int k = 0; k < count; k++) free(doKeys[k]);
+    free(doKeys);
+
+    return chunks;
 }
 
 /* Removes any "(...)" array-index annotation from one dot-separated path

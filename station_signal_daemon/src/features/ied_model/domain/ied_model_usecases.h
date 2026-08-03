@@ -91,6 +91,12 @@ LinkedList IedModelUseCases_getDataSetMemberLeafWireTypes(IedModelHandle handle,
 LinkedList IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle,
         const char* lnReference);
 
+/* SCL's <Services><DynDataSet max="N" maxAttributes="M"/> for this IED. -1 if
+ * not declared (see sIedModelHandle's own field doc comment); NULL handle
+ * also returns -1. */
+int IedModelUseCases_getDynDataSetMax(IedModelHandle handle);
+int IedModelUseCases_getDynDataSetMaxAttributes(IedModelHandle handle);
+
 /*
  * Member-reference-keyed counterparts of getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberSemantics(one entry)/

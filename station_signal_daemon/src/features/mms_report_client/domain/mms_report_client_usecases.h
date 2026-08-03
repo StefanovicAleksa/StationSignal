@@ -127,6 +127,19 @@ MmsReportClientUseCases_isEntryIdStale(const MmsValue* incomingEntryId, const Mm
 bool
 MmsReportClientUseCases_shouldRequestGiOnEnable(bool buffered, bool hasResumableEntryId);
 
+/*
+ * True once this connect cycle's own dataset-count budget (a copy of SCL's
+ * <Services><DynDataSet max="N"/>, see IedModel_getDynDataSetMax) has been
+ * fully spent on new self-created datasets - see getOrCreateDynamicDataset's
+ * own doc comment (mms_report_client_connection.c) for where this gates
+ * further createDataSet attempts. remainingBudget == -1 (SCL never declared a
+ * cap) must never be "exhausted" - only a genuine 0 counts. Extracted as a
+ * pure predicate purely so it's directly unit-testable without a live server
+ * round-trip.
+ */
+bool
+MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(int remainingBudget);
+
 /* LinkedListValueDeleteFunction-compatible: frees an
  * MmsReportClientMemberRefCacheEntry, including the Gap 4 (memberLeafReferences)
  * cache and the value-diff cache (leafSlotOffsets/lastForwardedValues)
@@ -200,6 +213,46 @@ MmsReportClientUseCases_destroyCrossRcbDedupCache(MmsReportClientCrossRcbDedupCa
  */
 LinkedList
 MmsReportClientUseCases_buildWireMemberReferences(const char* const* memberReferences, int count);
+
+/*
+ * Extracts the DO group key (the 3rd "$"-segment: "LD/LN$FC$DO[$SDO...]$DA" -
+ * same format as MmsReportClientUseCases_buildWireMemberReferences's own input)
+ * from one member reference, for MmsReportClientUseCases_chunkReferencesByDoGroup's
+ * own DO-atomic grouping below. A malformed reference (fewer than 3
+ * "$"-segments) returns a copy of the whole string as its own singleton
+ * group, rather than erroring - this function only groups, it never rejects.
+ * Caller owns the returned string (free).
+ */
+char*
+MmsReportClientUseCases_extractDoGroupKey(const char* memberReference);
+
+/*
+ * Greedily packs `references` (already scoped to one LN, in their existing
+ * FC=ST-then-MX declaration order - see
+ * IedModel_getReportableAttributeReferencesForLogicalNode) into DO-atomic
+ * chunks of at most maxAttributes members each: one Data Object's own leaves
+ * (stVal/q/t, etc.) are never split across two chunks, even if that DO alone
+ * exceeds maxAttributes - that DO becomes its own oversized chunk instead,
+ * handled downstream exactly like any other tier-3 createDataSet failure, not
+ * specially. Used by mms_report_client_connection.c's buildChunkPlan to map
+ * an oversized LN's full leaf set onto its own spare RCB instances, one chunk
+ * per instance.
+ *
+ * Strategy is deliberately simple: greedy, order-preserving, DO-atomic - no
+ * bin-packing optimization, no reordering to minimize chunk count. This is
+ * also the one piece of logic likely reusable as-is by a future no-SCL
+ * empirical-discovery follow-up (deferred - see GAP3_DYNAMIC_DATASET_NOTES.md),
+ * once that path has discovered a working size limit some other way; it
+ * doesn't care where maxAttributes came from.
+ *
+ * maxAttributes <= 0 or count <= 0 returns an empty list (nothing to chunk).
+ * Returns a LinkedList of LinkedList-of-owned-char*, one inner list per chunk
+ * in chunk order. Caller owns the outer list AND must
+ * LinkedList_destroyDeep(innerList, free) each inner list before
+ * LinkedList_destroyStatic(outerList).
+ */
+LinkedList
+MmsReportClientUseCases_chunkReferencesByDoGroup(const char* const* references, int count, int maxAttributes);
 
 /*
  * Converts one ACSI dot/bracket-form dataset member reference

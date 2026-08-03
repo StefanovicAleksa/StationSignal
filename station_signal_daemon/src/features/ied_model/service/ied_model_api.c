@@ -45,7 +45,10 @@ IedModelHandle
 IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError) {
     IedModelLoadError localError;
     LinkedList daSemanticsList = NULL;
-    IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList);
+    int dynDataSetMax = -1;
+    int dynDataSetMaxAttributes = -1;
+    IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList,
+            &dynDataSetMax, &dynDataSetMaxAttributes);
 
     if (outError) *outError = localError;
     if (!model) {
@@ -65,6 +68,8 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     handle->accessMode = mode;
     handle->iedName = copyString(iedName);
     adoptDaSemantics(handle, daSemanticsList);
+    handle->dynDataSetMax = dynDataSetMax;
+    handle->dynDataSetMaxAttributes = dynDataSetMaxAttributes;
 
     return handle;
 }
@@ -89,6 +94,10 @@ IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode)
      * regression. Every accessor degrades to IED_MODEL_DA_SEMANTIC_NONE. */
     handle->daSemantics = NULL;
     handle->daSemanticCount = 0;
+    /* No <Services> is ever available on a dynamically-built (online-discovered)
+     * model - same "unknown" posture as daSemantics above. */
+    handle->dynDataSetMax = -1;
+    handle->dynDataSetMaxAttributes = -1;
 
     return handle;
 }
@@ -145,6 +154,16 @@ IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsType act
 LinkedList
 IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference) {
     return IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, lnReference);
+}
+
+int
+IedModel_getDynDataSetMax(IedModelHandle handle) {
+    return IedModelUseCases_getDynDataSetMax(handle);
+}
+
+int
+IedModel_getDynDataSetMaxAttributes(IedModelHandle handle) {
+    return IedModelUseCases_getDynDataSetMaxAttributes(handle);
 }
 
 LinkedList

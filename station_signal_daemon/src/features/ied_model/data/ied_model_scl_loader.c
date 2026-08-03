@@ -1003,8 +1003,10 @@ IedModelSclLoader_listIedNames(const char* path, IedModelLoadError* outError) {
 
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics) {
+        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes) {
     if (outDaSemantics) *outDaSemantics = NULL;
+    if (outDynDataSetMax) *outDynDataSetMax = -1;
+    if (outDynDataSetMaxAttributes) *outDynDataSetMaxAttributes = -1;
 
     mxml_node_t* tree;
     mxml_node_t* sclRoot = loadSclRoot(path, &tree, outError);
@@ -1015,6 +1017,16 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
         *outError = IED_MODEL_ERR_IED_NOT_FOUND;
         mxmlDelete(tree);
         return NULL;
+    }
+
+    /* <Services> is a direct child of <IED>, a sibling of <AccessPoint> - not
+     * nested inside the AccessPoint/Server tree the two loops below walk. */
+    mxml_node_t* servicesNode = findFirstChildElement(iedNode, "Services");
+    mxml_node_t* dynDataSetNode = servicesNode ? findFirstChildElement(servicesNode, "DynDataSet") : NULL;
+    if (dynDataSetNode) {
+        if (outDynDataSetMax) *outDynDataSetMax = IedModelUtils_attrInt(dynDataSetNode, "max", -1);
+        if (outDynDataSetMaxAttributes)
+            *outDynDataSetMaxAttributes = IedModelUtils_attrInt(dynDataSetNode, "maxAttributes", -1);
     }
 
     /* May legitimately be NULL - individual type lookups then fail gracefully (warn +

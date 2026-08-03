@@ -175,6 +175,22 @@ bool IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsTyp
 LinkedList IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference);
 
 /*
+ * SCL's <Services><DynDataSet max="N" maxAttributes="M"/> for this IED - the
+ * device's own declared dynamic-dataset-count budget and per-dataset
+ * attribute cap, used by mms_report_client to budget/chunk dynamic dataset
+ * creation instead of guessing. -1 means "not declared": no <Services>
+ * element, a <Services/> with no <DynDataSet> child, that attribute missing
+ * from a <DynDataSet> that IS present, or a model built via
+ * IedModel_wrapDynamicModel (no <Services> is ever available over the wire).
+ * 0 is a real, distinct value (device declares zero capacity) - never
+ * conflated with -1. NULL handle also returns -1. Available at
+ * IED_MODEL_ACCESS_REPORT_ONLY and above (i.e. always). Unlike every other
+ * accessor in this header, these return a bare scalar, not a
+ * LinkedList/bool/enum - nothing to free. */
+int IedModel_getDynDataSetMax(IedModelHandle handle);
+int IedModel_getDynDataSetMaxAttributes(IedModelHandle handle);
+
+/*
  * Member-reference-keyed counterparts of IedModel_getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberLeafSemantics, plus a
  * single-member counterpart of _getDataSetMemberSemantics - resolved directly

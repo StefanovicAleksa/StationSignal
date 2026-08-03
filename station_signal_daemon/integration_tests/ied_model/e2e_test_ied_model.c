@@ -409,6 +409,67 @@ test_leadingComment_doesNotDerailSclRootResolution(void) {
     IedModel_release(handle);
 }
 
+/*
+ * ---- services_dyn_dataset.icd: <Services><DynDataSet max="15" maxAttributes="60"/></Services>
+ * as a direct child of <IED> (a sibling of <AccessPoint>, not nested under
+ * Server) - the real shape confirmed against IEC61850-Station.scd (a real
+ * Siemens SIPROTEC 6MD SCD). Proves the parser reads both attributes off a
+ * genuinely present <DynDataSet> element.
+ */
+void
+test_services_dynDataSet_parsesMaxAndMaxAttributes(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile("fixtures/services_dyn_dataset.icd", "ServicesDynDatasetIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(15, IedModel_getDynDataSetMax(handle));
+    TEST_ASSERT_EQUAL_INT(60, IedModel_getDynDataSetMaxAttributes(handle));
+
+    IedModel_release(handle);
+}
+
+/*
+ * ---- services_empty.icd: a self-closing <Services/> with no <DynDataSet>
+ * child at all - a real, schema-legal shape (some IEDs in
+ * IEC61850-Station.scd, e.g. "Clock", have exactly this). Both values must
+ * report -1 ("not declared"), not 0 or garbage.
+ */
+void
+test_services_selfClosingEmpty_reportsUnknown(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile("fixtures/services_empty.icd", "ServicesEmptyIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMax(handle));
+    TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMaxAttributes(handle));
+
+    IedModel_release(handle);
+}
+
+/*
+ * ---- private_only.icd has no <Services> element at all (predates this
+ * feature) - reuses that existing fixture rather than adding a new one, to
+ * prove the "absent <Services>" case (as opposed to "present but empty",
+ * covered above) also reports -1/-1.
+ */
+void
+test_services_absent_reportsUnknown(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile("fixtures/private_only.icd", "PrivateOnlyIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+    TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMax(handle));
+    TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMaxAttributes(handle));
+
+    IedModel_release(handle);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -429,6 +490,10 @@ main(void) {
     RUN_TEST(test_privateControlBlockStorage_malformedPayloads_loadSuccessfullyWithNoTargets);
     RUN_TEST(test_privateControlBlockStorage_multipleEntries_allDiscovered);
     RUN_TEST(test_leadingComment_doesNotDerailSclRootResolution);
+
+    RUN_TEST(test_services_dynDataSet_parsesMaxAndMaxAttributes);
+    RUN_TEST(test_services_selfClosingEmpty_reportsUnknown);
+    RUN_TEST(test_services_absent_reportsUnknown);
 
     return UNITY_END();
 }

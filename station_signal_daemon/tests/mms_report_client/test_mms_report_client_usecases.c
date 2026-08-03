@@ -1726,6 +1726,170 @@ test_buildWireMemberReferences_empty_whenArrayIsNull(void) {
     LinkedList_destroyDeep(wireRefs, free);
 }
 
+/* ---- isDynamicDatasetBudgetExhausted (Gap 3: per-connect-cycle dataset-
+ * count budget short-circuit) ---- */
+
+void
+test_isDynamicDatasetBudgetExhausted_zero_isExhausted(void) {
+    TEST_ASSERT_TRUE_MESSAGE(MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(0),
+            "a genuine zero remaining budget must be treated as exhausted");
+}
+
+void
+test_isDynamicDatasetBudgetExhausted_positive_isNotExhausted(void) {
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(5));
+    TEST_ASSERT_FALSE(MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(1));
+}
+
+void
+test_isDynamicDatasetBudgetExhausted_unknownNegativeOne_isNotExhausted(void) {
+    TEST_ASSERT_FALSE_MESSAGE(MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(-1),
+            "-1 means SCL never declared a DynDataSet max at all - must never trigger the "
+            "short-circuit, or every device without a declared cap would stop self-creating "
+            "datasets after zero attempts");
+}
+
+/* ---- extractDoGroupKey (Gap 3: DO-atomic chunking's grouping key) ---- */
+
+void
+test_extractDoGroupKey_simpleReference_returnsDoSegment(void) {
+    char* key = MmsReportClientUseCases_extractDoGroupKey("IED1LD1/LLN0$ST$Mod$stVal");
+    TEST_ASSERT_EQUAL_STRING("Mod", key);
+    free(key);
+}
+
+void
+test_extractDoGroupKey_nestedSdoReference_returnsTopLevelDoSegment(void) {
+    /* "LD/LN$FC$DO$SDO...$DA" - the 3rd segment (the top-level DO) is the
+     * group key even when the reference descends into nested SDOs, so every
+     * leaf under the same top-level DO (however deeply nested) still groups
+     * together, never split across a chunk boundary. */
+    char* key = MmsReportClientUseCases_extractDoGroupKey("IED1LD1/LLN0$MX$PhV$cVal$mag");
+    TEST_ASSERT_EQUAL_STRING("PhV", key);
+    free(key);
+}
+
+void
+test_extractDoGroupKey_malformedFewerThanTwoDollarSigns_returnsWholeStringAsSingleton(void) {
+    char* key = MmsReportClientUseCases_extractDoGroupKey("IED1LD1/LLN0$ST");
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST", key);
+    free(key);
+
+    char* keyNoDollar = MmsReportClientUseCases_extractDoGroupKey("garbage");
+    TEST_ASSERT_EQUAL_STRING("garbage", keyNoDollar);
+    free(keyNoDollar);
+}
+
+void
+test_extractDoGroupKey_null_returnsNull(void) {
+    TEST_ASSERT_NULL(MmsReportClientUseCases_extractDoGroupKey(NULL));
+}
+
+/* ---- chunkReferencesByDoGroup (Gap 3: greedy DO-atomic packing against
+ * SCL's declared maxAttributes cap) ---- */
+
+void
+test_chunkReferencesByDoGroup_fitsInOneChunk_singleChunkContainingAll(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Ind1$stVal", "IED1LD1/LLN0$ST$Ind1$q" };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 2, 10);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(chunks));
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(chunk0));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesByDoGroup_twoDoGroups_splitsIntoTwoChunks_neverSplittingADo(void) {
+    /* Ind1's 3-member group (stVal/q/t) plus SPCSO1's 3-member group
+     * (stVal/q/t) - matches GGIO1's real leaf order in reporter1_chunking.cid.
+     * maxAttributes=3 exactly fits one group but not both together. */
+    const char* refs[] = {
+        "IED1LD1/GGIO1$ST$Ind1$stVal", "IED1LD1/GGIO1$ST$Ind1$q", "IED1LD1/GGIO1$ST$Ind1$t",
+        "IED1LD1/GGIO1$ST$SPCSO1$stVal", "IED1LD1/GGIO1$ST$SPCSO1$q", "IED1LD1/GGIO1$ST$SPCSO1$t",
+    };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 6, 3);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(chunks));
+
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(3, LinkedList_size(chunk0));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/GGIO1$ST$Ind1$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk0)));
+
+    LinkedList chunk1 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(chunks)));
+    TEST_ASSERT_EQUAL_INT(3, LinkedList_size(chunk1));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/GGIO1$ST$SPCSO1$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk1)));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesByDoGroup_oversizedSingleDoGroup_becomesItsOwnChunkExceedingCap(void) {
+    /* One DO group alone (4 members) exceeds maxAttributes=3 - must become
+     * its own chunk anyway (never split a DO's own leaves), even though that
+     * chunk itself then exceeds the cap. */
+    const char* refs[] = {
+        "IED1LD1/LLN0$CO$Oper$ctlVal", "IED1LD1/LLN0$CO$Oper$origin", "IED1LD1/LLN0$CO$Oper$ctlNum",
+        "IED1LD1/LLN0$CO$Oper$T",
+    };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 4, 3);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, LinkedList_size(chunks),
+            "a single oversized DO group must land in exactly one chunk, not be split or dropped");
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(4, LinkedList_size(chunk0));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesByDoGroup_maxAttributesZeroOrNegative_returnsEmpty(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+
+    LinkedList chunksZero = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 1, 0);
+    TEST_ASSERT_NOT_NULL(chunksZero);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunksZero));
+    LinkedList_destroyStatic(chunksZero);
+
+    LinkedList chunksNeg = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 1, -1);
+    TEST_ASSERT_NOT_NULL(chunksNeg);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunksNeg));
+    LinkedList_destroyStatic(chunksNeg);
+}
+
+void
+test_chunkReferencesByDoGroup_countZeroOrNegative_returnsEmpty(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesByDoGroup(refs, 0, 10);
+    TEST_ASSERT_NOT_NULL(chunks);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunks));
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesByDoGroup_nullReferences_returnsEmpty(void) {
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesByDoGroup(NULL, 3, 10);
+    TEST_ASSERT_NOT_NULL(chunks);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunks));
+    LinkedList_destroyStatic(chunks);
+}
+
 /* ---- convertAcsiRefToMemberReference (tier-2 pulled-dataset ACSI -> this
  * feature's own "$"-joined member-reference conversion - the mirror image of
  * buildWireMemberReferences above, and NOT the same as
@@ -2003,6 +2167,22 @@ main(void) {
     RUN_TEST(test_buildWireMemberReferences_skipsNullEntry);
     RUN_TEST(test_buildWireMemberReferences_empty_whenCountIsZeroOrNegative);
     RUN_TEST(test_buildWireMemberReferences_empty_whenArrayIsNull);
+
+    RUN_TEST(test_isDynamicDatasetBudgetExhausted_zero_isExhausted);
+    RUN_TEST(test_isDynamicDatasetBudgetExhausted_positive_isNotExhausted);
+    RUN_TEST(test_isDynamicDatasetBudgetExhausted_unknownNegativeOne_isNotExhausted);
+
+    RUN_TEST(test_extractDoGroupKey_simpleReference_returnsDoSegment);
+    RUN_TEST(test_extractDoGroupKey_nestedSdoReference_returnsTopLevelDoSegment);
+    RUN_TEST(test_extractDoGroupKey_malformedFewerThanTwoDollarSigns_returnsWholeStringAsSingleton);
+    RUN_TEST(test_extractDoGroupKey_null_returnsNull);
+
+    RUN_TEST(test_chunkReferencesByDoGroup_fitsInOneChunk_singleChunkContainingAll);
+    RUN_TEST(test_chunkReferencesByDoGroup_twoDoGroups_splitsIntoTwoChunks_neverSplittingADo);
+    RUN_TEST(test_chunkReferencesByDoGroup_oversizedSingleDoGroup_becomesItsOwnChunkExceedingCap);
+    RUN_TEST(test_chunkReferencesByDoGroup_maxAttributesZeroOrNegative_returnsEmpty);
+    RUN_TEST(test_chunkReferencesByDoGroup_countZeroOrNegative_returnsEmpty);
+    RUN_TEST(test_chunkReferencesByDoGroup_nullReferences_returnsEmpty);
 
     RUN_TEST(test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix);
     RUN_TEST(test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar);

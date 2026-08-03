@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="services-empty-fixture" nameStructure="IEDName" />
+
+  <IED name="ServicesEmptyIED">
+    <Services />
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="ED1">
+          <LN0 lnClass="LLN0" lnType="SvcEmptyLLN0Type" inst="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="SvcEmptyLLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+    </DOType>
+  </DataTypeTemplates>
+</SCL>
