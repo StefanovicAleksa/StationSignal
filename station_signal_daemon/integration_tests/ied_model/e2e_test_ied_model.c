@@ -285,13 +285,14 @@ test_hardening_ldNameFunctionalNaming_resolvesFcdaAndRoundTrips(void) {
 
 /*
  * ---- private_only.icd: a vendor Private-encoded-control-block situation
- * (see this feature's own Architecture bullet in CLAUDE.md) - proves this
- * is detected (via stderr diagnostic, not asserted here) without crashing
- * or erroring the whole load, and correctly yields empty target lists
- * rather than fabricating anything from the Private payload.
+ * (see this feature's own Architecture bullet in CLAUDE.md) - proves the
+ * escaped <ReportControl> payload is unescaped, parsed, and resolved to a
+ * real report target (runtime name taken from rptID's suffix, same as a
+ * literal SCL element would get via resolveRcbRuntimeName), not just
+ * detected-and-ignored.
  */
 void
-test_privateOnly_loadsSuccessfully_withEmptyTargets(void) {
+test_privateOnly_parsesEscapedReportControl(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/private_only.icd", "PrivateOnlyIED",
             IED_MODEL_ACCESS_REPORT_ONLY, &error);
@@ -301,11 +302,83 @@ test_privateOnly_loadsSuccessfully_withEmptyTargets(void) {
 
     LinkedList report = IedModel_getReportSubscriptionTargets(handle);
     LinkedList goose = IedModel_getGooseSubscriptionTargets(handle);
-    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(report));
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(report));
     TEST_ASSERT_EQUAL_INT(0, LinkedList_size(goose));
+
+    ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(LinkedList_getNext(report));
+    TEST_ASSERT_EQUAL_STRING("PrivateOnlyIEDED1/LLN0.RP.urcbA01", target->objectReference);
+    TEST_ASSERT_FALSE(target->buffered);
+    TEST_ASSERT_NULL(target->datasetReference);
 
     LinkedList_destroyDeep(report, IedModel_destroyReportControlBlockTarget);
     LinkedList_destroyDeep(goose, IedModel_destroyGooseSubscriptionTarget);
+    IedModel_release(handle);
+}
+
+/*
+ * ---- private_control_block_storage_malformed.icd: two genuinely broken
+ * Private ControlBlockStorage payloads (no "<key>|<xml>" separator at all;
+ * a separator followed by unparseable XML) under one LN - proves the loader
+ * still loads successfully with zero report targets and doesn't crash,
+ * preserving the same graceful-degradation guarantee the vendor pattern
+ * always had, now that real payloads are actually parsed.
+ */
+void
+test_privateControlBlockStorage_malformedPayloads_loadSuccessfullyWithNoTargets(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile("fixtures/private_control_block_storage_malformed.icd",
+            "MalformedPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected malformed Private payloads to still load successfully");
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+
+    LinkedList report = IedModel_getReportSubscriptionTargets(handle);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(report));
+
+    LinkedList_destroyDeep(report, IedModel_destroyReportControlBlockTarget);
+    IedModel_release(handle);
+}
+
+/*
+ * ---- private_control_block_storage_multi.icd: mirrors the real Siemens
+ * SIPROTEC station export shape - several predefined RCBs (urcbA/urcbB
+ * unbuffered, brcbA buffered) all parented under one LN, each its own
+ * escaped Private entry. Proves buildReportControls' loop discovers every
+ * one, not just a single entry.
+ */
+void
+test_privateControlBlockStorage_multipleEntries_allDiscovered(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile("fixtures/private_control_block_storage_multi.icd",
+            "MultiPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected private_control_block_storage_multi.icd to load successfully");
+    TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
+
+    LinkedList report = IedModel_getReportSubscriptionTargets(handle);
+    TEST_ASSERT_EQUAL_INT(3, LinkedList_size(report));
+
+    bool sawUrcbA = false, sawUrcbB = false, sawBrcbA = false;
+    LinkedList element = LinkedList_getNext(report);
+    while (element) {
+        ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+        if (strcmp(target->objectReference, "MultiPrivateIEDED1/LLN0.RP.urcbA01") == 0) {
+            sawUrcbA = true;
+            TEST_ASSERT_FALSE(target->buffered);
+        } else if (strcmp(target->objectReference, "MultiPrivateIEDED1/LLN0.RP.urcbB01") == 0) {
+            sawUrcbB = true;
+            TEST_ASSERT_FALSE(target->buffered);
+        } else if (strcmp(target->objectReference, "MultiPrivateIEDED1/LLN0.BR.brcbA01") == 0) {
+            sawBrcbA = true;
+            TEST_ASSERT_TRUE(target->buffered);
+        }
+        element = LinkedList_getNext(element);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(sawUrcbA, "expected urcbA01 among discovered report targets");
+    TEST_ASSERT_TRUE_MESSAGE(sawUrcbB, "expected urcbB01 among discovered report targets");
+    TEST_ASSERT_TRUE_MESSAGE(sawBrcbA, "expected brcbA01 among discovered report targets");
+
+    LinkedList_destroyDeep(report, IedModel_destroyReportControlBlockTarget);
     IedModel_release(handle);
 }
 
@@ -352,7 +425,9 @@ main(void) {
     RUN_TEST(test_hardening_sdiWrappedOverride_appliesNestedValue);
     RUN_TEST(test_hardening_nonNumericEnumOverride_resolvesRealOrdinal);
     RUN_TEST(test_hardening_ldNameFunctionalNaming_resolvesFcdaAndRoundTrips);
-    RUN_TEST(test_privateOnly_loadsSuccessfully_withEmptyTargets);
+    RUN_TEST(test_privateOnly_parsesEscapedReportControl);
+    RUN_TEST(test_privateControlBlockStorage_malformedPayloads_loadSuccessfullyWithNoTargets);
+    RUN_TEST(test_privateControlBlockStorage_multipleEntries_allDiscovered);
     RUN_TEST(test_leadingComment_doesNotDerailSclRootResolution);
 
     return UNITY_END();

@@ -8,8 +8,9 @@
         <LDevice inst="ED1">
           <LN0 lnClass="LLN0" lnType="PrivLLN0Type" inst="">
             <!-- Deliberately zero literal ReportControl/GSEControl/DataSet
-                 elements - only a vendor Private blob claiming to hold one,
-                 the way a raw/unconfigured device-type template does. -->
+                 elements - only a vendor Private blob holding one escaped
+                 <ReportControl>, the way a real Siemens SIPROTEC export
+                 does for a not-yet-"activated" predefined control block. -->
             <Private type="Vendor-ControlBlockStorage">urcbA|&lt;ReportControl name="urcbA" rptID="PrivateOnlyIEDED1/LLN0$RP$urcbA01" confRev="0" buffered="false"&gt;&lt;/ReportControl&gt;</Private>
           </LN0>
         </LDevice>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="private-control-block-storage-multi-fixture" nameStructure="IEDName" />
+
+  <!-- Mirrors the real Siemens SIPROTEC station export shape: several
+       predefined report control blocks (unbuffered urcbA/urcbB, buffered
+       brcbA) all parented under one LN, each stored as its own escaped
+       <Private type="...ControlBlockStorage..."> entry rather than a
+       literal SCL element. Proves buildReportControls' new loop discovers
+       every one of them, not just a single entry. -->
+  <IED name="MultiPrivateIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="ED1">
+          <LN0 lnClass="LLN0" lnType="PrivLLN0Type" inst="">
+            <Private type="Siemens-ControlBlockStorage">urcbA|&lt;ReportControl name="urcbA" rptID="MultiPrivateIEDED1/LLN0$RP$urcbA01" confRev="0" bufTime="100" buffered="false"&gt; &lt;TrgOps dchg="true" qchg="true" /&gt; &lt;OptFields seqNum="true" timeStamp="true" dataSet="true" /&gt; &lt;RptEnabled max="1" /&gt; &lt;/ReportControl&gt;</Private>
+            <Private type="Siemens-ControlBlockStorage">urcbB|&lt;ReportControl name="urcbB" rptID="MultiPrivateIEDED1/LLN0$RP$urcbB01" confRev="0" bufTime="100" buffered="false"&gt; &lt;TrgOps dchg="true" qchg="true" /&gt; &lt;OptFields seqNum="true" timeStamp="true" dataSet="true" /&gt; &lt;RptEnabled max="1" /&gt; &lt;/ReportControl&gt;</Private>
+            <Private type="Siemens-ControlBlockStorage">brcbA|&lt;ReportControl name="brcbA" rptID="MultiPrivateIEDED1/LLN0$BR$brcbA01" confRev="0" bufTime="100" buffered="true"&gt; &lt;TrgOps dchg="true" qchg="true" /&gt; &lt;OptFields seqNum="true" timeStamp="true" dataSet="true" entryID="true" /&gt; &lt;RptEnabled max="1" /&gt; &lt;/ReportControl&gt;</Private>
+          </LN0>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="PrivLLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+    </DOType>
+  </DataTypeTemplates>
+</SCL>

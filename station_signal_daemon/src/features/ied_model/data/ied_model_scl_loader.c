@@ -503,45 +503,126 @@ resolveRcbRuntimeName(const char* sclName, const char* rptId, uint32_t maxInstan
     return name;
 }
 
+/*
+ * True for a vendor pattern (confirmed against a real Siemens SIPROTEC
+ * export) where a control block isn't a real SCL element at all - it's
+ * HTML-escaped text embedded inside a <Private type="Siemens-ControlBlockStorage">
+ * wrapper element, meant to be "activated" into a literal element only once
+ * assigned in a project. `strstr` (substring, not exact match) deliberately,
+ * to also catch other vendor-prefixed "...ControlBlockStorage..." Private
+ * types beyond the one confirmed exact string. Shared by
+ * containsPrivateControlBlockStorage (diagnostic scan) and
+ * buildReportControls (actual parsing, see processControlBlockStoragePrivate).
+ */
+static bool
+isControlBlockStoragePrivate(mxml_node_t* privateNode) {
+    const char* type = IedModelUtils_attrOrDefault(privateNode, "type", "");
+    return strstr(type, "ControlBlockStorage") != NULL;
+}
+
+static void
+processReportControlNode(mxml_node_t* rcNode, LogicalNode* ln) {
+    const char* name = IedModelUtils_attrRequired(rcNode, "name");
+    if (!name) {
+        fprintf(stderr, "[ied_model] WARN: skipping malformed ReportControl under LN '%s'\n", ln->name);
+        return;
+    }
+
+    /* datSet is genuinely optional per the SCL schema - a real device's
+     * report control block can rely on a server-side default dataset
+     * instead of one fixed in SCL (confirmed against a real Siemens
+     * SIPROTEC device's own predefined report control blocks, which
+     * omit datSet entirely). mms_report_client already handles a NULL
+     * datasetReference gracefully - it just skips asserting
+     * RCB_ELEMENT_DATSET on enable rather than fabricating one, see that
+     * function's own comment. */
+    const char* datSet = IedModelUtils_attrOrDefault(rcNode, "datSet", NULL);
+    const char* rptId = IedModelUtils_attrOrDefault(rcNode, "rptID", NULL);
+    bool buffered = IedModelUtils_attrBool(rcNode, "buffered", false);
+    uint32_t confRev = (uint32_t) IedModelUtils_attrInt(rcNode, "confRev", 1);
+    uint32_t bufTime = (uint32_t) IedModelUtils_attrInt(rcNode, "bufTime", 0);
+    uint32_t intgPd = (uint32_t) IedModelUtils_attrInt(rcNode, "intgPd", 0);
+
+    mxml_node_t* trgOpsNode = findFirstChildElement(rcNode, "TrgOps");
+    mxml_node_t* optFieldsNode = findFirstChildElement(rcNode, "OptFields");
+    mxml_node_t* rptEnabledNode = findFirstChildElement(rcNode, "RptEnabled");
+
+    uint8_t trgOps = IedModelUtils_buildTrgOps(trgOpsNode);
+    uint8_t optFlds = IedModelUtils_buildOptFlds(optFieldsNode);
+    uint32_t maxInstances = rptEnabledNode ? (uint32_t) IedModelUtils_attrInt(rptEnabledNode, "max", 1) : 1;
+
+    char* runtimeName = resolveRcbRuntimeName(name, rptId, maxInstances);
+    if (runtimeName) {
+        ReportControlBlock_create(runtimeName, ln, rptId, buffered, datSet, confRev, trgOps, optFlds, bufTime,
+                intgPd);
+        free(runtimeName);
+    }
+}
+
+/*
+ * Unescapes and parses one Siemens-style <Private type="...ControlBlockStorage...">
+ * payload (see isControlBlockStoragePrivate's own doc comment for the vendor
+ * pattern this addresses), feeding a resulting <ReportControl> fragment
+ * through the exact same processReportControlNode path a literal SCL element
+ * would take - no divergent behavior between "real SCL" and "unescaped from
+ * Private storage" RCBs.
+ *
+ * mxmlGetOpaque() on privateNode already returns fully entity-decoded text
+ * (mxml decodes &lt;/&gt;/etc. during parsing itself, independent of the
+ * value-type callback used - MXML_OPAQUE_CALLBACK only controls how the
+ * decoded string is subsequently typed/stored) - so no manual HTML-unescaping
+ * is needed here, only splitting off the vendor's own leading "<key>|" prefix
+ * (a vendor-internal index, mirroring the RCB's own "name" attribute in every
+ * sample seen - not itself needed, since the inner element carries every
+ * attribute processReportControlNode reads).
+ *
+ * Only <ReportControl> payloads are unescaped and used - <DataSet>/<GSEControl>
+ * wrapped the same way have never been observed in a real export (this
+ * station's own SCD wraps 2736/2736 escaped entries as <ReportControl>, zero
+ * as anything else) and are deliberately left unhandled (WARN + skip) rather
+ * than guessed at.
+ */
+static void
+processControlBlockStoragePrivate(mxml_node_t* privateNode, LogicalNode* ln) {
+    const char* payload = mxmlGetOpaque(privateNode);
+    if (!payload || !payload[0]) {
+        fprintf(stderr, "[ied_model] WARN: empty Private ControlBlockStorage payload under LN '%s'\n", ln->name);
+        return;
+    }
+
+    const char* separator = strchr(payload, '|');
+    if (!separator || !separator[1]) {
+        fprintf(stderr, "[ied_model] WARN: malformed Private ControlBlockStorage payload under LN '%s' "
+                "(no '<key>|<xml>' separator)\n", ln->name);
+        return;
+    }
+
+    mxml_node_t* fragmentRoot = mxmlLoadString(NULL, separator + 1, MXML_OPAQUE_CALLBACK);
+    if (!fragmentRoot) {
+        fprintf(stderr, "[ied_model] WARN: unparseable Private ControlBlockStorage XML under LN '%s'\n", ln->name);
+        return;
+    }
+
+    if (isElement(fragmentRoot, "ReportControl")) {
+        const char* rcName = IedModelUtils_attrOrDefault(fragmentRoot, "name", "?");
+        fprintf(stderr, "[ied_model] parsed ReportControl '%s' from Private ControlBlockStorage under LN '%s'\n",
+                rcName, ln->name);
+        processReportControlNode(fragmentRoot, ln);
+    } else {
+        fprintf(stderr, "[ied_model] WARN: Private ControlBlockStorage under LN '%s' wraps an unhandled "
+                "element (only ReportControl is parsed today)\n", ln->name);
+    }
+
+    mxmlDelete(fragmentRoot);
+}
+
 static void
 buildReportControls(mxml_node_t* lnNode, LogicalNode* ln) {
     for (mxml_node_t* rcNode = firstElementChild(lnNode); rcNode; rcNode = nextElementSibling(rcNode)) {
-        if (!isElement(rcNode, "ReportControl")) continue;
-
-        const char* name = IedModelUtils_attrRequired(rcNode, "name");
-        if (!name) {
-            fprintf(stderr, "[ied_model] WARN: skipping malformed ReportControl under LN '%s'\n", ln->name);
-            continue;
-        }
-
-        /* datSet is genuinely optional per the SCL schema - a real device's
-         * report control block can rely on a server-side default dataset
-         * instead of one fixed in SCL (confirmed against a real Siemens
-         * SIPROTEC device's own predefined report control blocks, which
-         * omit datSet entirely). mms_report_client already handles a NULL
-         * datasetReference gracefully - it just skips asserting
-         * RCB_ELEMENT_DATSET on enable rather than fabricating one, see that
-         * function's own comment. */
-        const char* datSet = IedModelUtils_attrOrDefault(rcNode, "datSet", NULL);
-        const char* rptId = IedModelUtils_attrOrDefault(rcNode, "rptID", NULL);
-        bool buffered = IedModelUtils_attrBool(rcNode, "buffered", false);
-        uint32_t confRev = (uint32_t) IedModelUtils_attrInt(rcNode, "confRev", 1);
-        uint32_t bufTime = (uint32_t) IedModelUtils_attrInt(rcNode, "bufTime", 0);
-        uint32_t intgPd = (uint32_t) IedModelUtils_attrInt(rcNode, "intgPd", 0);
-
-        mxml_node_t* trgOpsNode = findFirstChildElement(rcNode, "TrgOps");
-        mxml_node_t* optFieldsNode = findFirstChildElement(rcNode, "OptFields");
-        mxml_node_t* rptEnabledNode = findFirstChildElement(rcNode, "RptEnabled");
-
-        uint8_t trgOps = IedModelUtils_buildTrgOps(trgOpsNode);
-        uint8_t optFlds = IedModelUtils_buildOptFlds(optFieldsNode);
-        uint32_t maxInstances = rptEnabledNode ? (uint32_t) IedModelUtils_attrInt(rptEnabledNode, "max", 1) : 1;
-
-        char* runtimeName = resolveRcbRuntimeName(name, rptId, maxInstances);
-        if (runtimeName) {
-            ReportControlBlock_create(runtimeName, ln, rptId, buffered, datSet, confRev, trgOps, optFlds, bufTime,
-                    intgPd);
-            free(runtimeName);
+        if (isElement(rcNode, "ReportControl")) {
+            processReportControlNode(rcNode, ln);
+        } else if (isElement(rcNode, "Private") && isControlBlockStoragePrivate(rcNode)) {
+            processControlBlockStoragePrivate(rcNode, ln);
         }
     }
 }
@@ -824,28 +905,20 @@ buildAccessPointReferences(mxml_node_t* apNode, LoaderContext* ctx) {
 /* ---- entry point ---- */
 
 /*
- * Detects a vendor pattern (confirmed against a real Siemens SIPROTEC
- * export) where report/GOOSE control blocks aren't real SCL elements at
- * all - they're HTML-escaped text embedded inside <Private
- * type="Siemens-ControlBlockStorage"> wrapper elements, meant to be
- * "activated" into literal elements only once assigned in a project. A
- * file like this parses with no XML error and produces a structurally
- * valid but completely empty (zero RCB/GoCB/DataSet) IedModel, with
- * nothing ever indicating why. Parsing the escaped payload itself is out
- * of scope (vendor-specific, substantial); this is detection-only, so the
- * situation is never silently invisible again. `strstr` (substring, not
- * exact match) deliberately, to also catch other vendor-prefixed
- * "...ControlBlockStorage..." Private types beyond the one confirmed
- * exact string - purely widens when the diagnostic fires, never affects
- * parsing/data.
+ * Detects the same vendor pattern isControlBlockStoragePrivate matches,
+ * anywhere in the tree, purely to log a diagnostic - `<ReportControl>`
+ * payloads found this way are now actually unescaped and parsed (see
+ * buildReportControls/processControlBlockStoragePrivate), so this no longer
+ * means "silently produced an empty model"; it's kept as a standalone
+ * recursive scan mainly to flag the deliberately-unhandled cases (a wrapped
+ * `<DataSet>`/`<GSEControl>`, never observed in practice - see
+ * processControlBlockStoragePrivate's own doc comment) so those don't go
+ * silently unnoticed either.
  */
 static bool
 containsPrivateControlBlockStorage(mxml_node_t* node) {
     for (mxml_node_t* child = firstElementChild(node); child; child = nextElementSibling(child)) {
-        if (isElement(child, "Private")) {
-            const char* type = IedModelUtils_attrOrDefault(child, "type", "");
-            if (strstr(type, "ControlBlockStorage")) return true;
-        }
+        if (isElement(child, "Private") && isControlBlockStoragePrivate(child)) return true;
         if (containsPrivateControlBlockStorage(child)) return true;
     }
     return false;
@@ -976,10 +1049,10 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
     if (!model->rcbs && !model->gseCBs && !model->dataSets && containsPrivateControlBlockStorage(iedNode)) {
         fprintf(stderr,
                 "[ied_model] WARN: IED '%s' has zero ReportControl/GSEControl/DataSet elements but "
-                "contains vendor <Private type=\"...ControlBlockStorage...\"> element(s) - this looks "
-                "like a vendor export where control blocks are embedded inside <Private> payloads "
-                "instead of literal SCL elements, which this loader does not parse. The resulting "
-                "IedModel has no report/GOOSE targets at all.\n", iedName);
+                "contains vendor <Private type=\"...ControlBlockStorage...\"> element(s) - this loader "
+                "unescapes and parses a <ReportControl> found this way (see processControlBlockStoragePrivate), "
+                "but every one here either failed to parse/resolve or wraps a <DataSet>/<GSEControl> instead, "
+                "which are not handled. The resulting IedModel has no report/GOOSE targets at all.\n", iedName);
     }
 
     mxmlDelete(tree);

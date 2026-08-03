@@ -165,6 +165,15 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
         return NULL;
     }
 
+    /* Logged before the call, not just on failure - this member count is the
+     * single most useful number for diagnosing a device's maxAttributes-cap
+     * rejection (e.g. libiec61850's IED_ERROR_UNKNOWN/99, seen against a real
+     * SIPROTEC 6MD663 declaring DynDataSet maxAttributes="60") - without it, a
+     * failure below only shows a raw error code with nothing to compare it
+     * against. */
+    fprintf(stderr, "[mms_report_client] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s)\n",
+            datasetName, target->lnReference, cacheEntry->memberCount);
+
     IedClientError err = IED_ERROR_OK;
     IedConnection_createDataSet(handle->connection, &err, datasetName, wireRefs);
     LinkedList_destroyDeep(wireRefs, free);
@@ -175,6 +184,9 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
         free(datasetName);
         return NULL;
     }
+
+    fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName,
+            target->lnReference);
 
     DynamicDatasetCacheEntry* cacheNode = malloc(sizeof(DynamicDatasetCacheEntry));
     if (!cacheNode) {
@@ -295,6 +307,9 @@ pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         LinkedList_destroyDeep(wireRefs, free);
         return false;
     }
+
+    fprintf(stderr, "[mms_report_client] reusing live-assigned dataset '%s' for '%s' (%d member(s))\n",
+            liveDataset, target->objectReference, LinkedList_size(wireRefs));
 
     *outMemberRefs = wireRefs;
     return true;
@@ -550,6 +565,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * below fails with IED_ERROR_OBJECT_VALUE_INVALID, same as before this
      * feature existed. */
     const char* effectiveDatasetReference = target->datasetReference;
+    const char* datasetTier = effectiveDatasetReference ? "SCL" : NULL;
     if (!effectiveDatasetReference) {
         LinkedList pulledMemberRefs = NULL;
         if (pullLiveDataset(handle, target, rcb, &pulledMemberRefs)) {
@@ -557,11 +573,22 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             refreshPulledMemberRefCache(handle, target, liveDataset, pulledMemberRefs);
             LinkedList_destroyDeep(pulledMemberRefs, free);
             effectiveDatasetReference = liveDataset;
+            datasetTier = "live";
         } else {
             effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, dynamicDatasetCache);
             ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference);
+            datasetTier = "self-created";
         }
     }
+    /* Which of the three tiers (see this function's own doc comment just
+     * above) actually resolved the dataset - or that none did, the same
+     * "DATSET left unset, setRCBValues about to fail" case documented there.
+     * Logged unconditionally (not just on failure) so a real run shows, per
+     * RCB, exactly which path was taken without having to infer it from
+     * whichever failure fprintf's did or didn't fire. */
+    fprintf(stderr, "[mms_report_client] '%s' dataset resolved via %s: '%s'\n", target->objectReference,
+            effectiveDatasetReference ? datasetTier : "none",
+            effectiveDatasetReference ? effectiveDatasetReference : "(none)");
     if (effectiveDatasetReference) {
         ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
         mask |= RCB_ELEMENT_DATSET;
@@ -691,6 +718,13 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         ClientReportControlBlock_destroy(rcb);
         return;
     }
+
+    /* The one success-path log line in this function - every other fprintf
+     * here fires only on failure, so today there is no way to see which RCBs
+     * are actually reporting short of watching the IPC stream itself. */
+    fprintf(stderr, "[mms_report_client] enabled reporting for '%s' (buffered=%d, dataset='%s', gi=%d)\n",
+            target->objectReference, target->buffered,
+            effectiveDatasetReference ? effectiveDatasetReference : "(none)", requestGi);
 
     if (handle->rcbStatusCallback) {
         handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, true, IED_ERROR_OK);

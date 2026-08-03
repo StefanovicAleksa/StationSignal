@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="private-control-block-storage-malformed-fixture" nameStructure="IEDName" />
+
+  <IED name="MalformedPrivateIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="ED1">
+          <LN0 lnClass="LLN0" lnType="PrivLLN0Type" inst="">
+            <!-- No "<key>|<xml>" separator at all - genuinely malformed,
+                 not a real vendor export shape. Must be skipped (WARN),
+                 never crash the whole load. -->
+            <Private type="Vendor-ControlBlockStorage">urcbAnoSeparator</Private>
+            <!-- Separator present, but what follows isn't parseable XML at
+                 all - mxmlLoadString must return NULL here, handled the
+                 same defensive way. -->
+            <Private type="Vendor-ControlBlockStorage">urcbB|not xml &lt;&lt;&lt;</Private>
+          </LN0>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="PrivLLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="ModType1" />
+    </LNodeType>
+
+    <DOType id="ModType1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+    </DOType>
+  </DataTypeTemplates>
+</SCL>
