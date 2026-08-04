@@ -183,7 +183,7 @@ sync_avahi_hosts() {
 
     local tmp
     tmp="$(mktemp)"
-    sed "\\|^$AVAHI_HOSTS_MARKER_BEGIN\$|,\\|^$AVAHI_HOSTS_MARKER_END\$|d" "$AVAHI_HOSTS_FILE" >"$tmp" 2>/dev/null
+    sed "\\|^$AVAHI_HOSTS_MARKER_BEGIN$|,\\|^$AVAHI_HOSTS_MARKER_END$|d" "$AVAHI_HOSTS_FILE" >"$tmp" 2>/dev/null
     {
         echo "$AVAHI_HOSTS_MARKER_BEGIN"
         echo "$ip $AVAHI_HOSTNAME"

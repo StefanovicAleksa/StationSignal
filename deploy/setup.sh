@@ -168,7 +168,7 @@ fi
 AVAHI_HOSTS_MARKER_BEGIN="# station-signal: managed entry, do not edit by hand (see deploy/setup.sh / deploy/scripts/station-signal-netconfig.sh)"
 AVAHI_HOSTS_MARKER_END="# station-signal: end managed entry"
 sudo touch /etc/avahi/hosts
-sudo sed -i "\|^$AVAHI_HOSTS_MARKER_BEGIN\$|,\|^$AVAHI_HOSTS_MARKER_END\$|d" /etc/avahi/hosts
+sudo sed -i "\|^$AVAHI_HOSTS_MARKER_BEGIN$|,\|^$AVAHI_HOSTS_MARKER_END$|d" /etc/avahi/hosts
 {
     echo "$AVAHI_HOSTS_MARKER_BEGIN"
     echo "$BOX_IP $HOSTNAME_NAME"
