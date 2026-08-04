@@ -47,6 +47,8 @@ struct sSimServer {
     bool indicationValue;
     DataAttribute* spcso1StVal; /* GGIO1.SPCSO1.stVal - see SimServer_setSpcso1Indication's own doc comment */
     bool spcso1Value;
+    DataAttribute* modStVal; /* LLN0.Mod.stVal - see SimServer_setModStVal's own doc comment */
+    DataAttribute* behStVal; /* LLN0.Beh.stVal - see SimServer_setBehStVal's own doc comment */
     const char* expectedPassword; /* borrowed, NULL = no authentication required */
 };
 
@@ -105,6 +107,26 @@ SimServer_setIndication(SimServer self, bool value);
  */
 void
 SimServer_setSpcso1Indication(SimServer self, bool value);
+
+/*
+ * Flips LLN0.Mod.stVal (INC1, INT32) to the given value - added so an E2E
+ * test can observe a real report over a whole-device dynamic-dataset cluster
+ * that lands on LLN0's own leaves (Mod/Beh/Health) rather than GGIO1's, since
+ * whole-device clustering (mms_report_client's buildWholeDeviceClusterPlan)
+ * can assign a Dyn RCB slot to any part of the device, not just its own
+ * parent LN. Same thread-safety guarantee as SimServer_setIndication.
+ */
+void
+SimServer_setModStVal(SimServer self, int32_t value);
+
+/*
+ * Flips LLN0.Beh.stVal (ENS1, ENUMERATED) to the given value - the sibling
+ * counterpart of SimServer_setModStVal, over a DIFFERENT DO group (Beh, not
+ * Mod), for the same whole-device-clustering testing need. Same
+ * thread-safety guarantee as SimServer_setIndication.
+ */
+void
+SimServer_setBehStVal(SimServer self, int32_t value);
 
 /*
  * Points the server's MMS file services (GetFileDirectory/GetFile) at a real

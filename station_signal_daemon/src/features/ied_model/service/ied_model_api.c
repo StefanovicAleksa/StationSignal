@@ -156,6 +156,11 @@ IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, c
     return IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, lnReference);
 }
 
+LinkedList
+IedModel_getReportableAttributeReferencesForWholeDevice(IedModelHandle handle) {
+    return IedModelUseCases_getReportableAttributeReferencesForWholeDevice(handle);
+}
+
 int
 IedModel_getDynDataSetMax(IedModelHandle handle) {
     return IedModelUseCases_getDynDataSetMax(handle);

@@ -64,6 +64,7 @@
 #define TEST_PORT_CHUNKING 10215
 #define TEST_PORT_BUDGET 10216
 #define TEST_PORT_BUFFERED_DYNAMIC_DATASET 10217
+#define TEST_PORT_ORPHAN_CLEANUP 10218
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -492,17 +493,26 @@ test_authRequired_wrongPassword_firesConnectionRejectedCallback(void) {
  * Proves mms_report_client's dynamic dataset creation
  * (IedConnection_createDataSet, data/mms_report_client_connection.c's
  * getOrCreateDynamicDataset) end-to-end against a real MMS association: the
- * fixture's "urcbDyn" (parented under GGIO1, no datSet attribute at all -
- * datSet="Dyn" in SCL terms) would otherwise fail setRCBValues with
- * IED_ERROR_OBJECT_VALUE_INVALID, exactly as it does against a real device
- * like E13_6MD. Instead, mms_report_client synthesizes an association-scoped
- * dataset covering every FC=ST leaf under GGIO1 (Ind1.stVal/q/t,
- * SPCSO1.stVal/q/t - GGIO1 has no FC=MX attributes in this fixture), enables
- * the RCB against it, and a real data-change report arrives after flipping
- * GGIO1.Ind1.stVal.
+ * fixture's Dyn RCBs (no datSet attribute at all - datSet="Dyn" in SCL terms)
+ * would otherwise fail setRCBValues with IED_ERROR_OBJECT_VALUE_INVALID,
+ * exactly as they do against a real device like E13_6MD. Instead,
+ * mms_report_client's whole-device clustering (buildWholeDeviceClusterPlan)
+ * covers every FC=ST/MX leaf across the ENTIRE device - not just each Dyn
+ * RCB's own parent LN - and assigns clusters to Dyn slots in model-
+ * declaration order. Since LLN0 is declared before GGIO1 in this fixture, and
+ * "urcbDyn" (unbuffered, parented under GGIO1) is the first Dyn slot while
+ * "brcbDyn" (buffered, also parented under GGIO1) is the second, the
+ * assignment lands: urcbDyn <- LLN0's own cluster (Mod/Beh/Health, 9 leaves),
+ * brcbDyn <- GGIO1's own cluster (Ind1.stVal/q/t, SPCSO1.stVal/q/t, 6 leaves)
+ * - a real, deterministic consequence of a Dyn RCB's parent LN no longer
+ * constraining what it reports on (see buildWholeDeviceClusterPlan's own doc
+ * comment). This test exercises the GGIO1 cluster and its real data-change
+ * flip via brcbDyn, matching this test's original intent (proving a
+ * self-created dataset genuinely reports GGIO1's real content) even though
+ * the specific RCB it lands on shifted with this feature.
  *
  * This client now deterministically requests GI on every enable, purely to
- * seed the value-diff cache - urcbDyn's GI-triggered snapshot seeds all 6
+ * seed the value-diff cache - brcbDyn's GI-triggered snapshot seeds all 6
  * dataset members (cached == NULL for each) and is itself bootstrap-suppressed
  * regardless of its own reason (see shouldForwardAndUpdateCache's own doc
  * comment for why a real-change reason is never trusted to bypass this, even
@@ -536,22 +546,22 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
     TEST_ASSERT_NOT_NULL(client);
     TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
 
-    strncpy(interestedRcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn", sizeof(interestedRcbReference) - 1);
+    strncpy(interestedRcbReference, "Reporter1LD1/GGIO1.BR.brcbDyn", sizeof(interestedRcbReference) - 1);
     MmsReportClient_setReportCallback(client, onReport, NULL);
     MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
 
     MmsReportClientError startError = MmsReportClient_start(client);
     TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
 
-    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
-            "expected urcbDyn (no SCL-declared datSet) to get a dynamically-created dataset and enable successfully");
-    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed,
-            "urcbDyn must not fail after this feature exists - it used to fail with error 32 (OBJECT_VALUE_INVALID)");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected brcbDyn (no SCL-declared datSet) to get a dynamically-created dataset and enable successfully");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
+            "brcbDyn must not fail after this feature exists - it used to fail with error 32 (OBJECT_VALUE_INVALID)");
 
-    /* urcbDyn's GI-triggered snapshot (all 6 dataset members, live defaults)
+    /* brcbDyn's GI-triggered snapshot (all 6 dataset members, live defaults)
      * seeds the cache and must never itself reach the callback. */
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
-            "urcbDyn's GI snapshot must never reach the callback - it silently seeds the cache "
+            "brcbDyn's GI snapshot must never reach the callback - it silently seeds the cache "
             "for all 6 dataset members instead");
 
     /* Because GI already seeded the cache, this single flip is itself a
@@ -560,9 +570,9 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
     SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
-            "expected a report from urcbDyn's dynamically-created dataset after flipping Ind1.stVal");
+            "expected a report from brcbDyn's dynamically-created dataset after flipping Ind1.stVal");
 
-    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.RP.urcbDyn", lastRcbReference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.BR.brcbDyn", lastRcbReference);
     TEST_ASSERT_EQUAL_INT_MESSAGE(3, lastEntryCount,
             "only Ind1's own group (stVal + its q/t siblings, dragged along by group-extension) "
             "should survive - SPCSO1's unrelated group stays suppressed (unchanged since the GI seed)");
@@ -678,6 +688,152 @@ test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect(void) {
     TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
             "brcbDyn's reconnect must not fail - IED_ERROR_OBJECT_EXISTS must be treated as a "
             "successful reuse, not an error");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves proactive orphan cleanup (cleanupOrphanedDatasets, called at the end
+ * of every enableAllTargets): a domain-scoped dataset matching a real
+ * buffered target's own deterministic name (buildDynamicDatasetName), but
+ * left genuinely unclaimed this cycle because earlier-discovered candidates
+ * satisfied every target's own adoption need first, gets deleted to reclaim
+ * budget - closing the real-world gap an ungracefully-terminated prior run
+ * leaves behind (MmsReportClientConnection_stop's own cleanup-on-stop never
+ * runs if the daemon is killed/crashes instead of going through
+ * STOP_REPORTING).
+ *
+ * Pre-seeds four datasets via a side-channel connection. Which candidate a
+ * given target adopts is governed by discoverExistingServerDatasets'/
+ * adoptUnclaimedDataset's own list order, which empirically follows the
+ * vendored reference server's own IedConnection_getLogicalDeviceDataSets
+ * enumeration - observed (here and in every other test in this suite
+ * exercising adoption) to return existing datasets in ASCII-lexicographic
+ * order by full "LD/item" name, not creation order. This test's own two
+ * decoy names ("...$AAA_decoy1"/"...$AAB_decoy2") are deliberately chosen to
+ * sort BEFORE brcbDyn's own name ("...$BR$brcbDyn$dyn") for exactly this
+ * reason - guaranteeing both Dyn targets (urcbDyn, brcbDyn) are satisfied by
+ * a decoy each before either ever reaches brcbDyn's own name, regardless of
+ * which of the two targets processes first:
+ *   1/2. "AAA_decoy1"/"AAB_decoy2" - throwaway 1-member datasets, sorting
+ *      before everything else under this LD (including the shared
+ *      simulator's own pre-existing "ds1"/"ds2", both "LLN0$..." - 'G' <
+ *      'L' - and brcbDyn's own name) - claimed one each by urcbDyn and
+ *      brcbDyn, in whichever order they're processed.
+ *   3. brcbDyn's own exact deterministic name -
+ *      buildDynamicDatasetName("Reporter1LD1/GGIO1.BR.brcbDyn", true) =
+ *      "Reporter1LD1/GGIO1$BR$brcbDyn$dyn" - matches OUR OWN naming
+ *      convention exactly, standing in for a leftover from an earlier,
+ *      ungracefully-terminated run of this very client. Left genuinely
+ *      unclaimed this cycle (both Dyn targets already satisfied by the two
+ *      decoys above) - the case cleanupOrphanedDatasets exists to catch.
+ *   4. "foreign" - a dataset that does NOT match any real target's own
+ *      deterministic name at all - must be left completely untouched no
+ *      matter what (cleanupOrphanedDatasets never deletes anything it can't
+ *      prove is ours), whether or not it happens to get adopted too.
+ *
+ * Verified via a THIRD side-channel connection, opened only after the real
+ * client has fully connected/enabled (cleanup already ran synchronously at
+ * the end of that same enableAllTargets call, before either RCB's status
+ * callback could even fire): brcbDyn's own exact-match dataset must be GONE
+ * (IedConnection_getDataSetDirectory fails), while "foreign" must still
+ * resolve successfully.
+ */
+void
+test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_ORPHAN_CLEANUP);
+
+    IedConnection setupConn = IedConnection_create();
+    IedClientError setupErr = IED_ERROR_OK;
+    IedConnection_connect(setupConn, &setupErr, "127.0.0.1", TEST_PORT_ORPHAN_CLEANUP);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected the setup connection to associate");
+
+    LinkedList decoy1Members = LinkedList_create();
+    LinkedList_add(decoy1Members, (void*) "Reporter1LD1/GGIO1.SPCSO1.stVal[ST]");
+    IedConnection_createDataSet(setupConn, &setupErr, "Reporter1LD1/GGIO1$AAA_decoy1", decoy1Members);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected decoy1 to be created");
+    LinkedList_destroyStatic(decoy1Members);
+
+    LinkedList decoy2Members = LinkedList_create();
+    LinkedList_add(decoy2Members, (void*) "Reporter1LD1/GGIO1.SPCSO1.q[ST]");
+    IedConnection_createDataSet(setupConn, &setupErr, "Reporter1LD1/GGIO1$AAB_decoy2", decoy2Members);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected decoy2 to be created");
+    LinkedList_destroyStatic(decoy2Members);
+
+    LinkedList ownNameMembers = LinkedList_create();
+    LinkedList_add(ownNameMembers, (void*) "Reporter1LD1/GGIO1.SPCSO1.q[ST]");
+    IedConnection_createDataSet(setupConn, &setupErr, "Reporter1LD1/GGIO1$BR$brcbDyn$dyn", ownNameMembers);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected brcbDyn's own exact-name dataset to be created");
+    LinkedList_destroyStatic(ownNameMembers);
+
+    LinkedList foreignMembers = LinkedList_create();
+    LinkedList_add(foreignMembers, (void*) "Reporter1LD1/GGIO1.Ind1.t[ST]");
+    IedConnection_createDataSet(setupConn, &setupErr, "Reporter1LD1/GGIO1$foreign", foreignMembers);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected the foreign dataset to be created");
+    LinkedList_destroyStatic(foreignMembers);
+
+    IedConnection_close(setupConn);
+    IedConnection_destroy(setupConn);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_ORPHAN_CLEANUP,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected brcbDyn to enable successfully (via whichever tier - adoption or self-create)");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled), "expected urcbDyn to enable successfully too");
+
+    /* Settle margin only - cleanupOrphanedDatasets already ran synchronously
+     * before either enable callback above could even fire; this just avoids
+     * any race with this test's own verification connection opening before
+     * the daemon's delete call has been fully acknowledged server-side. */
+    Thread_sleep(300);
+
+    IedConnection verifyConn = IedConnection_create();
+    IedClientError verifyErr = IED_ERROR_OK;
+    IedConnection_connect(verifyConn, &verifyErr, "127.0.0.1", TEST_PORT_ORPHAN_CLEANUP);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, verifyErr, "expected the verification connection to associate");
+
+    bool ownNameIsDeletable = false;
+    LinkedList ownNameDirectory = IedConnection_getDataSetDirectory(verifyConn, &verifyErr,
+            "Reporter1LD1/GGIO1$BR$brcbDyn$dyn", &ownNameIsDeletable);
+    TEST_ASSERT_NULL_MESSAGE(ownNameDirectory,
+            "brcbDyn's own exact-name dataset was genuinely unclaimed this cycle (an earlier candidate "
+            "satisfied brcbDyn's own adoption need first) - cleanupOrphanedDatasets must have deleted "
+            "it to reclaim budget");
+    if (ownNameDirectory) LinkedList_destroyDeep(ownNameDirectory, free);
+
+    bool foreignIsDeletable = false;
+    verifyErr = IED_ERROR_OK;
+    LinkedList foreignDirectory = IedConnection_getDataSetDirectory(verifyConn, &verifyErr,
+            "Reporter1LD1/GGIO1$foreign", &foreignIsDeletable);
+    TEST_ASSERT_NOT_NULL_MESSAGE(foreignDirectory,
+            "the foreign dataset (matching no real target's own deterministic name) must be left "
+            "completely untouched, whether or not any target happened to adopt it");
+    if (foreignDirectory) LinkedList_destroyDeep(foreignDirectory, free);
+
+    IedConnection_close(verifyConn);
+    IedConnection_destroy(verifyConn);
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1335,20 +1491,32 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
 }
 
 /*
- * Proves DO-grouped chunking (buildChunkPlan/getOrCreateDynamicDataset,
+ * Proves DO-grouped chunking (buildWholeDeviceClusterPlan/getOrCreateDynamicDataset,
  * mms_report_client_connection.c): fixtures/reporter1_chunking.cid declares
- * <Services><DynDataSet max="10" maxAttributes="3"/></Services>, so GGIO1's
- * full 6-leaf set (Ind1.stVal/q/t + SPCSO1.stVal/q/t) exceeds maxAttributes
- * and must split into two 3-member DO-atomic chunks - one per spare Dyn RCB
- * instance on that LN (urcbDyn, urcbDyn2, in that fixture-declaration order).
- * buildChunkPlan assigns chunk i to the LN's i-th Dyn target in list order,
- * so urcbDyn (declared first) is expected to get Ind1's own chunk and
- * urcbDyn2 (declared second) SPCSO1's - asserted directly here since that
- * ordering is the documented contract (see buildChunkPlan's own doc
- * comment), not an incidental implementation detail. The simulator's own
- * device-side caps (SimServer_createWithDatasetLimits) are configured
- * generously (would happily accept both chunks as one 6-member dataset too)
- * so any failure here is provably ours, not the device's.
+ * <Services><DynDataSet max="10" maxAttributes="3"/></Services>, so the
+ * WHOLE device's 15-leaf set (LLN0's Mod/Beh/Health, 9 leaves, walked before
+ * GGIO1's Ind1/SPCSO1, 6 leaves, per LD/LN declaration order) is packed into
+ * five 3-member DO-atomic chunks - Mod, Beh, Health, Ind1, SPCSO1, in that
+ * order, and buildWholeDeviceClusterPlan assigns cluster i to Dyn slot i
+ * (urcbDyn, urcbDyn2, both unbuffered, in that declaration order) - so urcbDyn
+ * is PLANNED to get LLN0's Mod chunk and urcbDyn2 LLN0's Beh chunk.
+ *
+ * But tier "adopt" runs BEFORE tier "self-create" for every target (see
+ * enableOneTarget's own doc comment - "primarily try to use existing/foreign
+ * datasets and create our own only via necessity"), and the shared simulator
+ * always has a pre-existing, SCL-unclaimed domain-scoped dataset ("ds2",
+ * GGIO1.Ind1.stVal only) sitting on it regardless of which fixture the
+ * client loads. urcbDyn (processed first) adopts THAT instead of ever
+ * reaching its own planned Mod chunk - a real, correct consequence of
+ * adoption taking priority, not a bug; the Mod chunk simply goes unused this
+ * cycle. urcbDyn2 (processed second, after ds2 is already claimed and ds1 is
+ * excluded as brcbMain's own SCL-known dataset) finds no adoption candidate
+ * left and falls through to its own planned Beh chunk exactly as designed.
+ * This test exercises both paths: urcbDyn proves adoption pre-empting a
+ * planned cluster, urcbDyn2 proves the chunking/assignment mechanism itself.
+ * The simulator's own device-side caps (SimServer_createWithDatasetLimits)
+ * are configured generously (would happily accept every chunk as one large
+ * dataset too) so any failure here is provably ours, not the device's.
  */
 void
 test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
@@ -1392,24 +1560,27 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
     SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDynGotReport),
-            "expected urcbDyn (assigned Ind1's own chunk) to report the Ind1.stVal flip");
+            "expected urcbDyn (adopted the existing 'ds2' dataset instead of its own planned Mod "
+            "chunk - the shared simulator's own SCL-unclaimed 'ds2' pre-exists on every test's "
+            "server, and tier-3 adoption correctly prefers it over self-creating) to report the "
+            "Ind1.stVal flip");
     TEST_ASSERT_FALSE_MESSAGE(urcbDyn2GotReport,
-            "urcbDyn2's own chunk (SPCSO1) must not report an Ind1 change it has no member for");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDynEntryCount,
-            "urcbDyn's own chunk is exactly Ind1's DO group (stVal + its q/t siblings) - never the full "
-            "6-member LN-wide set");
+            "urcbDyn2's own chunk (Beh) must not report an Ind1 change it has no member for");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, urcbDynEntryCount,
+            "urcbDyn adopted 'ds2', which contains only Ind1.stVal (no q/t siblings) - so exactly 1 "
+            "entry, not a 3-member DO group");
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", urcbDynEntry0Reference);
 
     urcbDynGotReport = false;
-    SimServer_setSpcso1Indication(sim, true);
+    SimServer_setBehStVal(sim, 1);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDyn2GotReport),
-            "expected urcbDyn2 (assigned SPCSO1's own chunk) to report the SPCSO1.stVal flip");
+            "expected urcbDyn2 (assigned LLN0's Beh chunk) to report the Beh.stVal flip");
     TEST_ASSERT_FALSE_MESSAGE(urcbDynGotReport,
-            "urcbDyn's own chunk (Ind1) must not report an SPCSO1 change it has no member for");
+            "urcbDyn's own chunk (Mod) must not report a Beh change it has no member for");
     TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDyn2EntryCount,
-            "urcbDyn2's own chunk is exactly SPCSO1's DO group (stVal + its q/t siblings)");
-    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$stVal", urcbDyn2Entry0Reference);
+            "urcbDyn2's own chunk is exactly Beh's DO group (stVal + its q/t siblings)");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0$ST$Beh$stVal", urcbDyn2Entry0Reference);
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1484,6 +1655,7 @@ main(void) {
     RUN_TEST(test_authRequired_wrongPassword_firesConnectionRejectedCallback);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
     RUN_TEST(test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect);
+    RUN_TEST(test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched);
     RUN_TEST(test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);

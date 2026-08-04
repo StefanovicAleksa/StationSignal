@@ -140,6 +140,24 @@ MmsReportClientUseCases_shouldRequestGiOnEnable(bool buffered, bool hasResumable
 bool
 MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(int remainingBudget);
 
+/*
+ * Corrects the naive "just copy SCL's own declared max" budget seeding by
+ * accounting for datasets that already exist on the server at the start of
+ * this connect cycle (discovered via IedConnection_getLogicalDeviceDataSets,
+ * mms_report_client_connection.c's discoverExistingServerDatasets) - a
+ * device's REAL remaining budget is smaller than its declared max whenever
+ * anything (our own leftover domain-scoped datasets from an ungracefully-
+ * terminated prior run, another client's/tool's own datasets, etc.) is
+ * already consuming it, something the naive per-cycle reset had zero
+ * awareness of. sclMax < 0 (never declared) stays uncapped (-1), regardless
+ * of existingDatasetCount - there's nothing to subtract from. Otherwise
+ * clamped to a minimum of 0 (existingDatasetCount meeting or exceeding
+ * sclMax means no budget for any NEW create this cycle, not a negative
+ * number). Pure arithmetic, directly unit-testable.
+ */
+int
+MmsReportClientUseCases_computeInitialDynamicDatasetBudget(int sclMax, int existingDatasetCount);
+
 /* LinkedListValueDeleteFunction-compatible: frees an
  * MmsReportClientMemberRefCacheEntry, including the Gap 4 (memberLeafReferences)
  * cache and the value-diff cache (leafSlotOffsets/lastForwardedValues)
@@ -253,6 +271,40 @@ MmsReportClientUseCases_extractDoGroupKey(const char* memberReference);
  */
 LinkedList
 MmsReportClientUseCases_chunkReferencesByDoGroup(const char* const* references, int count, int maxAttributes);
+
+/*
+ * Whole-device counterpart of MmsReportClientUseCases_chunkReferencesByDoGroup -
+ * identical greedy, order-preserving, DO-atomic packing strategy and identical
+ * calling convention/ownership rules, but safe for `references` spanning
+ * MULTIPLE LNs (e.g. IedModel_getReportableAttributeReferencesForWholeDevice's
+ * own output) rather than one LN's own leaf list. The only difference is the
+ * internal grouping key: it includes the "LD/LN" prefix, not just the bare DO
+ * name, so two different LNs that happen to share a DO name (e.g. "Mod") can
+ * never be wrongly merged into one atomic group just because they land
+ * adjacent in the flat list - see the .c file's extractLnAndDoGroupKey for
+ * the full reasoning. A resulting chunk MAY legitimately span several
+ * different (small) LNs' worth of leaves when they fit together under
+ * maxAttributes, maximizing device coverage within a tight total
+ * dataset-count budget - this is the intended behavior, not a bug.
+ */
+LinkedList
+MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(const char* const* references, int count, int maxAttributes);
+
+/*
+ * Groups `references` (spanning multiple LNs, e.g.
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own output) into
+ * one group per LN, by contiguous "LD/LN"-prefix run - no size cap. Used as
+ * whole-device clustering's fallback granularity when SCL's own
+ * maxAttributes cap is unknown (chunkReferencesAcrossWholeDevice's own
+ * cross-LN bin-packing needs a real size bound to safely combine multiple
+ * LNs into one dataset; without one, one dataset per LN is the safe
+ * default). count <= 0 or a NULL references returns an empty list. Same
+ * ownership contract as the chunk* functions above: caller owns the outer
+ * list AND must LinkedList_destroyDeep(innerList, free) each inner list
+ * before LinkedList_destroyStatic(outerList).
+ */
+LinkedList
+MmsReportClientUseCases_groupReferencesByLn(const char* const* references, int count);
 
 /*
  * Converts one ACSI dot/bracket-form dataset member reference

@@ -717,6 +717,71 @@ enables successfully where it previously failed with error 32, and a forced reco
 restart on the same port) proves the domain-scoped dataset survives and is gracefully reused via
 the `IED_ERROR_OBJECT_EXISTS` path rather than erroring a second time.
 
+**Redesigned into whole-device clustering + reuse-before-create + proactive orphan cleanup.**
+Diagnosing a follow-on real-device log (leftover datasets from an earlier ungracefully-terminated
+run silently exhausting the real dataset-count budget while this client's own naive
+blind-reset-to-SCL-max counter believed most of it remained) surfaced a much bigger problem:
+`getOrCreateDynamicDataset`'s fallback only ever built a dataset covering **the RCB's own parent
+LN's leaves**. Verified this is purely this feature's own design choice, not a protocol/wire-format
+limitation — `MmsReportClientUseCases_buildWireMemberReferences` does zero cross-LN validation,
+`IedConnection_createDataSet`'s own doc comment confirms each member reference independently
+carries its own `LDName/LNodeName` prefix, and `integration_tests/ied_model/fixtures/breaker1.cid`
+already has a real `LLN0`-parented dataset whose FCDA members span three different LNs. On a real
+SIPROTEC device this meant ~28 of ~30 LDs were entirely invisible to reporting, not because the
+device had no RCBs to spare, but because one LD's `LLN0` alone had dozens of otherwise-redundant
+spare RCB instances all duplicating the same tiny dataset instead of being pointed at the rest of
+the device.
+
+Rebuilt around three phases, all run once per connect cycle before any RCB is enabled:
+
+- **Whole-device clustering** (`IedModel_getReportableAttributeReferencesForWholeDevice`,
+  `mms_report_client_connection.c`'s `buildWholeDeviceClusterPlan`, replacing `buildChunkPlan`):
+  every Dyn RCB slot anywhere on the device — not just slots on an LN that itself has one — is one
+  fungible reporting channel. The whole device's reportable leaves are packed via
+  `MmsReportClientUseCases_chunkReferencesAcrossWholeDevice` (DO-atomic bin-packing that may
+  legitimately span multiple LNs when `maxAttributes` is known — needed a new grouping key,
+  `extractLnAndDoGroupKey`, since the existing `chunkReferencesByDoGroup`'s bare-DO-name key is
+  only safe for single-LN input, and two different LNs can share a DO name like "Mod") or
+  `_groupReferencesByLn` (one dataset per LN, unbounded, when `maxAttributes` is unknown — no safe
+  bound to combine LNs against) and assigned to Dyn slots in model-declaration order, logging
+  whichever side (clusters or slots) runs out first. `getOrCreateDynamicDataset` no longer has an
+  "unchunked, just use my own LN" fallback — a target either gets its whole-device cluster or
+  nothing.
+- **Discover-before-create** (`discoverExistingServerDatasets`, `adoptUnclaimedDataset`): before
+  self-creating, every Dyn target first checks whether an existing, not-yet-claimed dataset already
+  sits on the server under its own LD — via `IedConnection_getLogicalDeviceDataSets`, scoped to the
+  distinct LDs this client's own Dyn targets live under — and adopts it outright (no `createDataSet`
+  call), reconciling decode shape through the same `refreshPulledMemberRefCache` tier 2 already
+  uses. Applies to *any* discovered dataset, not just ones this client created — assignment is
+  non-destructive/shareable, only deletion needs strict provenance — "primarily use existing/
+  foreign datasets, create our own only via necessity," per explicit product direction. A name
+  already known to be a *different* target's own SCL-static `datSet` is excluded from the pool
+  (never redundantly adopts something another RCB is already dedicated to). Also corrects
+  `DynamicDatasetSession.remainingBudget`'s seeding
+  (`MmsReportClientUseCases_computeInitialDynamicDatasetBudget`): SCL's declared max minus what's
+  actually already on the server, instead of a blind reset.
+- **Proactive orphan cleanup** (`cleanupOrphanedDatasets`, end of every `enableAllTargets`): any
+  domain-scoped dataset that exactly reconstructs via `buildDynamicDatasetName(target->objectReference,
+  true)` for a real buffered Dyn target right now, but wasn't claimed by anything this cycle, is
+  deleted to reclaim budget — closing the gap `MmsReportClientConnection_stop`'s own
+  cleanup-on-stop can't reach when the daemon is killed/crashed instead of gracefully stopped.
+  Strict, conservative match only; a foreign dataset is never deleted, only ever adopted.
+
+A latent bug surfaced along the way: `buildDynamicDatasetName`'s buffered branch appended `$dyn` to
+its input without converting embedded dots to `$` the way `IedConnection_createDataSet` does
+internally for domain-scoped names — invisible before (buffered targets always used the dot-free
+`lnReference`), but whole-device clustering now gives every buffered target its own per-`objectReference`
+name (containing a literal `.BR.`/`.RP.` segment), so the kept string no longer matched what was
+actually created server-side, surfacing as the same `error 32` symptom from a completely different
+root cause. Fixed by converting `.` to `$` in the generated name.
+
+Proven end-to-end in `integration_tests/mms_report_client/`: the shared simulator's `LLN0` gained
+real `Mod`/`Beh`/`Health` DataObjects (previously declared in its own SCL fixture but never
+actually implemented — harmless before whole-device clustering started legitimately asking for
+LLN0's own data too), new `SimServer_setModStVal`/`_setBehStVal` helpers, and a dedicated test
+proving a genuinely-orphaned own-named dataset gets deleted while a foreign, non-matching one is
+left completely untouched (`test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched`).
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

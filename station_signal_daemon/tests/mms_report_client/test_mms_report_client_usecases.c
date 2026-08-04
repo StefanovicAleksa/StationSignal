@@ -1749,6 +1749,37 @@ test_isDynamicDatasetBudgetExhausted_unknownNegativeOne_isNotExhausted(void) {
             "datasets after zero attempts");
 }
 
+/* ---- computeInitialDynamicDatasetBudget (real-server-state-aware budget
+ * seeding, correcting the naive "just copy SCL's own max" reset) ---- */
+
+void
+test_computeInitialDynamicDatasetBudget_subtractsExistingFromDeclaredMax(void) {
+    TEST_ASSERT_EQUAL_INT(12, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(15, 3));
+    TEST_ASSERT_EQUAL_INT(0, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(15, 15));
+}
+
+void
+test_computeInitialDynamicDatasetBudget_existingExceedsMax_clampsToZero_neverNegative(void) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(15, 20),
+            "leftover datasets exceeding the declared max must clamp to 0, not go negative");
+}
+
+void
+test_computeInitialDynamicDatasetBudget_sclMaxUnknown_staysUncapped_regardlessOfExisting(void) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(-1, 0),
+            "no declared cap means nothing to correct against - stays -1 (uncapped)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(-1, 50),
+            "still uncapped even with many existing datasets discovered - there's no real cap to "
+            "compare against");
+}
+
+void
+test_computeInitialDynamicDatasetBudget_zeroExisting_matchesDeclaredMax(void) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(15, MmsReportClientUseCases_computeInitialDynamicDatasetBudget(15, 0),
+            "nothing pre-existing on the server means the full declared max is available, same as "
+            "today's naive seeding");
+}
+
 /* ---- extractDoGroupKey (Gap 3: DO-atomic chunking's grouping key) ---- */
 
 void
@@ -1888,6 +1919,179 @@ test_chunkReferencesByDoGroup_nullReferences_returnsEmpty(void) {
     TEST_ASSERT_NOT_NULL(chunks);
     TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunks));
     LinkedList_destroyStatic(chunks);
+}
+
+/* ---- chunkReferencesAcrossWholeDevice (whole-device dataset clustering:
+ * same greedy DO-atomic packing as chunkReferencesByDoGroup, but safe for a
+ * flat reference list spanning multiple LNs) ---- */
+
+void
+test_chunkReferencesAcrossWholeDevice_combinesTwoSmallLnsIntoOneChunk(void) {
+    /* Two DIFFERENT small LNs (LLN0 with 2 members, blkGGIO2 with 2 members)
+     * fit together under maxAttributes=10 - proves cross-LN bin-packing
+     * actually happens, maximizing device coverage within a tight
+     * dataset-count budget (the whole point of this function vs the
+     * per-LN-only chunkReferencesByDoGroup). */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q",
+        "IED1LD1/blkGGIO2$ST$Ind1$stVal", "IED1LD1/blkGGIO2$ST$Ind1$q",
+    };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(refs, 4, 10);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, LinkedList_size(chunks),
+            "two small LNs' worth of leaves should pack into one shared chunk when they fit");
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(4, LinkedList_size(chunk0));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesAcrossWholeDevice_sameDoNameOnDifferentLns_neverMergedAsOneGroup(void) {
+    /* LLN0's own "Mod" DO (1 member) is immediately followed by a DIFFERENT
+     * LN (blkGGIO2) whose FIRST DO also happens to be named "Mod" (2
+     * members) - a real, not-hypothetical collision (common-data DO names
+     * like Mod/Beh/Health repeat across many unrelated LN types). With
+     * maxAttributes=2, if these were wrongly treated as one atomic 3-member
+     * "Mod" group (chunkReferencesByDoGroup's own bare-DO-name bug for
+     * cross-LN input), they'd all land in one oversized chunk. Correctly
+     * keyed by LD/LN too, they must split into two separate chunks instead -
+     * proves the whole-device grouping key genuinely disambiguates by LN,
+     * not just DO name. */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal",
+        "IED1LD1/blkGGIO2$ST$Mod$stVal", "IED1LD1/blkGGIO2$ST$Mod$q",
+    };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(refs, 3, 2);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, LinkedList_size(chunks),
+            "LLN0's Mod and blkGGIO2's own, unrelated Mod must never be merged into one group "
+            "just because they share a bare DO name");
+
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(chunk0));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk0)));
+
+    LinkedList chunk1 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(chunks)));
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(chunk1));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/blkGGIO2$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk1)));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesAcrossWholeDevice_oversizedSingleDoGroup_becomesItsOwnChunkExceedingCap(void) {
+    const char* refs[] = {
+        "IED1LD1/LLN0$CO$Oper$ctlVal", "IED1LD1/LLN0$CO$Oper$origin", "IED1LD1/LLN0$CO$Oper$ctlNum",
+        "IED1LD1/LLN0$CO$Oper$T",
+    };
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(refs, 4, 3);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(chunks));
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT(4, LinkedList_size(chunk0));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
+test_chunkReferencesAcrossWholeDevice_maxAttributesZeroOrNegative_returnsEmpty(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+
+    LinkedList chunksZero = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(refs, 1, 0);
+    TEST_ASSERT_NOT_NULL(chunksZero);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunksZero));
+    LinkedList_destroyStatic(chunksZero);
+
+    LinkedList chunksNeg = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(refs, 1, -1);
+    TEST_ASSERT_NOT_NULL(chunksNeg);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunksNeg));
+    LinkedList_destroyStatic(chunksNeg);
+}
+
+void
+test_chunkReferencesAcrossWholeDevice_nullReferences_returnsEmpty(void) {
+    LinkedList chunks = MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(NULL, 3, 10);
+    TEST_ASSERT_NOT_NULL(chunks);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(chunks));
+    LinkedList_destroyStatic(chunks);
+}
+
+/* ---- groupReferencesByLn (whole-device clustering's no-maxAttributes-known
+ * fallback: one group per LN, unbounded size) ---- */
+
+void
+test_groupReferencesByLn_splitsIntoOneGroupPerContiguousLnRun(void) {
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$MX$TotW$mag",
+        "IED1LD1/GGIO1$ST$Ind1$stVal", "IED1LD1/GGIO1$ST$Ind1$q", "IED1LD1/GGIO1$ST$Ind1$t",
+    };
+    LinkedList groups = MmsReportClientUseCases_groupReferencesByLn(refs, 5);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(groups));
+
+    LinkedList group0 = (LinkedList) LinkedList_getData(LinkedList_getNext(groups));
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(group0));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(group0)));
+
+    LinkedList group1 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(groups)));
+    TEST_ASSERT_EQUAL_INT(3, LinkedList_size(group1));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/GGIO1$ST$Ind1$stVal", (char*) LinkedList_getData(LinkedList_getNext(group1)));
+
+    LinkedList groupElement = LinkedList_getNext(groups);
+    while (groupElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(groupElement), free);
+        groupElement = LinkedList_getNext(groupElement);
+    }
+    LinkedList_destroyStatic(groups);
+}
+
+void
+test_groupReferencesByLn_noSizeCap_oneLnWithManyLeavesStaysOneGroup(void) {
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$A$stVal", "IED1LD1/LLN0$ST$B$stVal", "IED1LD1/LLN0$ST$C$stVal",
+        "IED1LD1/LLN0$ST$D$stVal",
+    };
+    LinkedList groups = MmsReportClientUseCases_groupReferencesByLn(refs, 4);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, LinkedList_size(groups), "one LN, however many leaves, is one group");
+    LinkedList group0 = (LinkedList) LinkedList_getData(LinkedList_getNext(groups));
+    TEST_ASSERT_EQUAL_INT(4, LinkedList_size(group0));
+
+    LinkedList_destroyDeep(group0, free);
+    LinkedList_destroyStatic(groups);
+}
+
+void
+test_groupReferencesByLn_countZeroOrNegative_returnsEmpty(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList groups = MmsReportClientUseCases_groupReferencesByLn(refs, 0);
+    TEST_ASSERT_NOT_NULL(groups);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(groups));
+    LinkedList_destroyStatic(groups);
+}
+
+void
+test_groupReferencesByLn_nullReferences_returnsEmpty(void) {
+    LinkedList groups = MmsReportClientUseCases_groupReferencesByLn(NULL, 3);
+    TEST_ASSERT_NOT_NULL(groups);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(groups));
+    LinkedList_destroyStatic(groups);
 }
 
 /* ---- convertAcsiRefToMemberReference (tier-2 pulled-dataset ACSI -> this
@@ -2172,6 +2376,11 @@ main(void) {
     RUN_TEST(test_isDynamicDatasetBudgetExhausted_positive_isNotExhausted);
     RUN_TEST(test_isDynamicDatasetBudgetExhausted_unknownNegativeOne_isNotExhausted);
 
+    RUN_TEST(test_computeInitialDynamicDatasetBudget_subtractsExistingFromDeclaredMax);
+    RUN_TEST(test_computeInitialDynamicDatasetBudget_existingExceedsMax_clampsToZero_neverNegative);
+    RUN_TEST(test_computeInitialDynamicDatasetBudget_sclMaxUnknown_staysUncapped_regardlessOfExisting);
+    RUN_TEST(test_computeInitialDynamicDatasetBudget_zeroExisting_matchesDeclaredMax);
+
     RUN_TEST(test_extractDoGroupKey_simpleReference_returnsDoSegment);
     RUN_TEST(test_extractDoGroupKey_nestedSdoReference_returnsTopLevelDoSegment);
     RUN_TEST(test_extractDoGroupKey_malformedFewerThanTwoDollarSigns_returnsWholeStringAsSingleton);
@@ -2183,6 +2392,17 @@ main(void) {
     RUN_TEST(test_chunkReferencesByDoGroup_maxAttributesZeroOrNegative_returnsEmpty);
     RUN_TEST(test_chunkReferencesByDoGroup_countZeroOrNegative_returnsEmpty);
     RUN_TEST(test_chunkReferencesByDoGroup_nullReferences_returnsEmpty);
+
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_combinesTwoSmallLnsIntoOneChunk);
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_sameDoNameOnDifferentLns_neverMergedAsOneGroup);
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_oversizedSingleDoGroup_becomesItsOwnChunkExceedingCap);
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_maxAttributesZeroOrNegative_returnsEmpty);
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_nullReferences_returnsEmpty);
+
+    RUN_TEST(test_groupReferencesByLn_splitsIntoOneGroupPerContiguousLnRun);
+    RUN_TEST(test_groupReferencesByLn_noSizeCap_oneLnWithManyLeavesStaysOneGroup);
+    RUN_TEST(test_groupReferencesByLn_countZeroOrNegative_returnsEmpty);
+    RUN_TEST(test_groupReferencesByLn_nullReferences_returnsEmpty);
 
     RUN_TEST(test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix);
     RUN_TEST(test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar);

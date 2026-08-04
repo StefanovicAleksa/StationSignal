@@ -175,6 +175,22 @@ bool IedModel_dataAttributeTypeMatchesMmsType(DataAttributeType expected, MmsTyp
 LinkedList IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference);
 
 /*
+ * Whole-device counterpart of IedModel_getReportableAttributeReferencesForLogicalNode -
+ * same FC=ST/MX "every leaf" convention and output format, but walks every LN
+ * under every LD in the model instead of one caller-supplied LN. A "Dyn" RCB's
+ * own parent LN does not restrict what a dataset assigned to it can report on
+ * (dataset members are independently addressed per-element, not tied to any
+ * one LN - confirmed against IedConnection_createDataSet's own wire format and
+ * this codebase's own MmsReportClientUseCases_buildWireMemberReferences), so
+ * mms_report_client uses this to cluster the ENTIRE device's reportable data
+ * across however many spare "Dyn" RCB slots exist anywhere in the model, not
+ * just slots parented on the same LN as the data. Purely local, never touches
+ * the network. Available at IED_MODEL_ACCESS_REPORT_ONLY and above (i.e.
+ * always). Caller owns the list and its elements:
+ * LinkedList_destroyDeep(list, free). */
+LinkedList IedModel_getReportableAttributeReferencesForWholeDevice(IedModelHandle handle);
+
+/*
  * SCL's <Services><DynDataSet max="N" maxAttributes="M"/> for this IED - the
  * device's own declared dynamic-dataset-count budget and per-dataset
  * attribute cap, used by mms_report_client to budget/chunk dynamic dataset

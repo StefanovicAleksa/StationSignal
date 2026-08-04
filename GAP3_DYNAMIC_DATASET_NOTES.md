@@ -1,5 +1,16 @@
 # Gap 3 — dynamic dataset creation caps/chunking: handoff notes
 
+**Update (later session): whole-device clustering, discover-before-create/adoption, and proactive
+orphan cleanup are now implemented** — see `station_signal_daemon/CHANGELOG.md`'s "Redesigned into
+whole-device clustering + reuse-before-create + proactive orphan cleanup" entry and `CLAUDE.md`'s
+own `mms_report_client` bullet for the current-state description. This closes the per-connection
+dataset-count-budget-tracking half of "Agreed direction so far §3" below (now driven by real
+server-discovered state, not a blind SCL-max reset) and goes further (whole-device coverage,
+adoption of existing/foreign datasets, orphan reclamation) than this file originally scoped. The
+**no-SCL empirical/adaptive-discovery case (§2 below — inferring an unknown cap from
+`createDataSet` *failure* patterns) remains unimplemented** — a genuinely different mechanism from
+the discovery of *already-existing* datasets that is now implemented, still an open gap.
+
 Continuation notes for picking this up in a new chat. Written after two prior sessions:
 (1) diagnosed why the daemon couldn't see/enable Siemens SIPROTEC dynamic-dataset-style RCBs and
 fixed the SCL-parsing gap (gap 1) + added debug logging; (2) analyzed a real run against a real

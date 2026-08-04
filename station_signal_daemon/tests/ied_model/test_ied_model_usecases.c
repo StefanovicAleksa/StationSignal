@@ -745,6 +745,70 @@ test_getReportableAttributeReferencesForLogicalNode_empty_whenNoSlashInReference
     LinkedList_destroyDeep(refs, free);
 }
 
+/* ---- Reportable attribute references for whole-device dynamic-dataset clustering ---- */
+
+void
+test_getReportableAttributeReferencesForWholeDevice_combinesEveryLdAndLn(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld1 = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ld1Ln0 = LogicalNode_create("LLN0", ld1);
+    DataObject* ld1Mod = DataObject_create("Mod", (ModelNode*) ld1Ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) ld1Mod, IEC61850_INT32, IEC61850_FC_ST, 0, 0, 0);
+
+    LogicalDevice* ld2 = LogicalDevice_create("LD2", bareModel);
+    LogicalNode* ld2User1 = LogicalNode_create("USER1", ld2);
+    DataObject* ld2Ind = DataObject_create("Ind1", (ModelNode*) ld2User1, 0);
+    DataAttribute_create("mag", (ModelNode*) ld2Ind, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .iedName = "Bare" };
+
+    /* Proves whole-device coverage isn't limited to LNs that happen to host an
+     * RCB - LD2/USER1 has no RCB anywhere in this fixture, yet its own leaf
+     * still surfaces here, exactly like LD1/LLN0's does. */
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(refs));
+
+    bool foundLd1StVal = false, foundLd2Mag = false;
+    LinkedList element = LinkedList_getNext(refs);
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        if (strcmp(ref, "BareLD1/LLN0$ST$Mod$stVal") == 0) foundLd1StVal = true;
+        if (strcmp(ref, "BareLD2/USER1$MX$Ind1$mag") == 0) foundLd2Mag = true;
+        element = LinkedList_getNext(element);
+    }
+    TEST_ASSERT_TRUE_MESSAGE(foundLd1StVal, "expected LD1/LLN0's own leaf to be included");
+    TEST_ASSERT_TRUE_MESSAGE(foundLd2Mag, "expected LD2/USER1's leaf to be included too, despite no RCB there");
+
+    LinkedList_destroyDeep(refs, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getReportableAttributeReferencesForWholeDevice_matchesPerLnResult_onSingleLdLnFixture(void) {
+    /* Shared fixture (`handle`) has exactly one LD/LN, so the whole-device
+     * result must be identical to the per-LN result on that same LN. */
+    LinkedList wholeDevice = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(handle);
+    LinkedList perLn = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(handle, "TestIEDLD1/LLN0");
+
+    TEST_ASSERT_EQUAL_INT(LinkedList_size(perLn), LinkedList_size(wholeDevice));
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(wholeDevice));
+
+    LinkedList_destroyDeep(wholeDevice, free);
+    LinkedList_destroyDeep(perLn, free);
+}
+
+void
+test_getReportableAttributeReferencesForWholeDevice_empty_whenHandleIsNull(void) {
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(NULL);
+
+    TEST_ASSERT_NOT_NULL(refs);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+
+    LinkedList_destroyDeep(refs, free);
+}
+
 /* ---- Read targets ---- */
 
 void
@@ -872,6 +936,10 @@ main(void) {
     RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenLdDoesNotResolve);
     RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenLnDoesNotResolve);
     RUN_TEST(test_getReportableAttributeReferencesForLogicalNode_empty_whenNoSlashInReference);
+
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_combinesEveryLdAndLn);
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_matchesPerLnResult_onSingleLdLnFixture);
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_empty_whenHandleIsNull);
 
     RUN_TEST(test_getReadTargets_includesOnlyStAndMxAttributes);
     RUN_TEST(test_getReadTargets_empty_whenModelHasNoStOrMxAttributes);

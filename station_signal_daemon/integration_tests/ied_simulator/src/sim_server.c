@@ -9,11 +9,41 @@
  * built IedModel* and hands back the two DataAttribute* the caller needs to
  * populate its own SimServer handle. */
 static IedModel*
-buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal) {
+buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal, DataAttribute** outModStVal,
+        DataAttribute** outBehStVal) {
     IedModel* model = IedModel_create("Reporter1");
     LogicalDevice* ld = LogicalDevice_create("LD1", model);
     LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
     LogicalNode* ggio1 = LogicalNode_create("GGIO1", ld);
+
+    /* LLN0.Mod/Beh/Health (INC1/ENS1-shaped, matching fixtures/reporter1.cid's
+     * own LLN0Type declaration) - previously declared in SCL but never
+     * actually implemented on the live simulator (LLN0 had zero DataObjects
+     * of its own). Harmless while every RCB only ever reported its own
+     * parent LN's data, but a real gap once whole-device dynamic-dataset
+     * clustering started pulling in LLN0's own leaves too, since a real
+     * device is expected to be internally consistent between SCL and what it
+     * actually implements - the fixture needs to be too. Mod.stVal/Beh.stVal
+     * get TRG_OPT_DATA_CHANGED (unlike Health.stVal, never flipped by any
+     * test) so SimServer_setModStVal/_setBehStVal below can drive a real
+     * data-change report the same way SimServer_setIndication already does
+     * for GGIO1.Ind1.stVal. */
+    DataObject* mod = DataObject_create("Mod", (ModelNode*) ln0, 0);
+    DataAttribute* modStVal = DataAttribute_create("stVal", (ModelNode*) mod, IEC61850_INT32, IEC61850_FC_ST,
+            TRG_OPT_DATA_CHANGED, 0, 0);
+    DataAttribute_create("q", (ModelNode*) mod, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("t", (ModelNode*) mod, IEC61850_TIMESTAMP, IEC61850_FC_ST, 0, 0, 0);
+
+    DataObject* beh = DataObject_create("Beh", (ModelNode*) ln0, 0);
+    DataAttribute* behStVal = DataAttribute_create("stVal", (ModelNode*) beh, IEC61850_ENUMERATED, IEC61850_FC_ST,
+            TRG_OPT_DATA_CHANGED, 0, 0);
+    DataAttribute_create("q", (ModelNode*) beh, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("t", (ModelNode*) beh, IEC61850_TIMESTAMP, IEC61850_FC_ST, 0, 0, 0);
+
+    DataObject* health = DataObject_create("Health", (ModelNode*) ln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) health, IEC61850_ENUMERATED, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) health, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("t", (ModelNode*) health, IEC61850_TIMESTAMP, IEC61850_FC_ST, 0, 0, 0);
 
     /* GGIO1.Ind1 (SPS) - the read/reported indication point flipped by
      * SimServer_setIndication. */
@@ -208,6 +238,8 @@ buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal) {
 
     *outIndicationStVal = stVal;
     *outSpcso1StVal = spcso1StVal;
+    *outModStVal = modStVal;
+    *outBehStVal = behStVal;
     return model;
 }
 
@@ -215,7 +247,9 @@ SimServer
 SimServer_create(void) {
     DataAttribute* indicationStVal;
     DataAttribute* spcso1StVal;
-    IedModel* model = buildModel(&indicationStVal, &spcso1StVal);
+    DataAttribute* modStVal;
+    DataAttribute* behStVal;
+    IedModel* model = buildModel(&indicationStVal, &spcso1StVal, &modStVal, &behStVal);
 
     SimServer self = calloc(1, sizeof(struct sSimServer));
     self->model = model;
@@ -224,6 +258,8 @@ SimServer_create(void) {
     self->indicationValue = false;
     self->spcso1StVal = spcso1StVal;
     self->spcso1Value = false;
+    self->modStVal = modStVal;
+    self->behStVal = behStVal;
 
     return self;
 }
@@ -232,7 +268,9 @@ SimServer
 SimServer_createWithDatasetLimits(int maxDataSetEntries, int maxAssociationSpecificDataSets) {
     DataAttribute* indicationStVal;
     DataAttribute* spcso1StVal;
-    IedModel* model = buildModel(&indicationStVal, &spcso1StVal);
+    DataAttribute* modStVal;
+    DataAttribute* behStVal;
+    IedModel* model = buildModel(&indicationStVal, &spcso1StVal, &modStVal, &behStVal);
 
     IedServerConfig config = IedServerConfig_create();
     IedServerConfig_setMaxDataSetEntries(config, maxDataSetEntries);
@@ -245,6 +283,8 @@ SimServer_createWithDatasetLimits(int maxDataSetEntries, int maxAssociationSpeci
     self->indicationValue = false;
     self->spcso1StVal = spcso1StVal;
     self->spcso1Value = false;
+    self->modStVal = modStVal;
+    self->behStVal = behStVal;
 
     /* Values are copied out synchronously during IedServer_createWithConfig
      * (confirmed against the vendored source) - safe to destroy immediately. */
@@ -285,6 +325,16 @@ void
 SimServer_setSpcso1Indication(SimServer self, bool value) {
     self->spcso1Value = value;
     IedServer_updateBooleanAttributeValue(self->server, self->spcso1StVal, value);
+}
+
+void
+SimServer_setModStVal(SimServer self, int32_t value) {
+    IedServer_updateInt32AttributeValue(self->server, self->modStVal, value);
+}
+
+void
+SimServer_setBehStVal(SimServer self, int32_t value) {
+    IedServer_updateInt32AttributeValue(self->server, self->behStVal, value);
 }
 
 void

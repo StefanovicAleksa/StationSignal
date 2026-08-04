@@ -96,6 +96,13 @@ MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(int remainingBudget) {
     return remainingBudget == 0;
 }
 
+int
+MmsReportClientUseCases_computeInitialDynamicDatasetBudget(int sclMax, int existingDatasetCount) {
+    if (sclMax < 0) return -1; /* SCL never declared a cap - stays uncapped, same as today */
+    int remaining = sclMax - existingDatasetCount;
+    return remaining < 0 ? 0 : remaining;
+}
+
 /* Mutates memberRefCache->lastForwardedValues[slot] in place (deletes the old
  * clone, if any, and clones newValue into its place). NULL-safe/no-op if
  * memberRefCache/lastForwardedValues is absent or slot is out of range - a
@@ -1128,6 +1135,181 @@ MmsReportClientUseCases_chunkReferencesByDoGroup(const char* const* references, 
     free(doKeys);
 
     return chunks;
+}
+
+/* Whole-device-safe counterpart of MmsReportClientUseCases_extractDoGroupKey:
+ * that function's key is deliberately just the bare DO name (e.g. "Mod"),
+ * which is only safe when every reference in the list is already known to
+ * belong to the same LN (its only existing caller, chunkReferencesByDoGroup,
+ * is only ever fed one LN's own leaf list). Whole-device clustering feeds a
+ * flat list spanning every LN in the model, where two DIFFERENT LNs can
+ * easily share a DO name (e.g. "Mod"/"Beh"/"Health" common data, or many
+ * same-type LN instances like blkGGIO1..blkGGIO18 all starting with the same
+ * first DO name) - if the last DO of one LN and the first DO of the next
+ * happened to land adjacent in the flat list with an identical bare-DO key,
+ * the greedy packer below would wrongly treat them as one atomic group. This
+ * key includes the "LD/LN" prefix too, so it can only ever match within the
+ * same LN - safe for cross-LN input, while producing IDENTICAL grouping
+ * decisions to the bare-DO-name key for any already-single-LN input (every
+ * reference in that case already shares the same LD/LN prefix, so including
+ * it in the key changes nothing observable there). */
+static char*
+extractLnAndDoGroupKey(const char* memberReference) {
+    if (!memberReference) return NULL;
+
+    /* "LD/LN$FC$DO[$SDO...]$DA" - key is everything up to and including the
+     * DO segment (skip past the FC segment's own '$', then find the end of
+     * the DO segment that follows it). */
+    const char* fcStart = strchr(memberReference, '$');
+    const char* doStart = fcStart ? strchr(fcStart + 1, '$') : NULL;
+    if (!doStart) {
+        /* Fewer than 2 '$'s - malformed, treat the whole string as its own
+         * singleton group rather than erroring, same fallback as
+         * MmsReportClientUseCases_extractDoGroupKey. */
+        return MmsReportClientUtils_safeStringDup(memberReference);
+    }
+    doStart++;
+
+    const char* doEnd = strchr(doStart, '$');
+    size_t len = doEnd ? (size_t) (doEnd - memberReference) : strlen(memberReference);
+
+    char* key = malloc(len + 1);
+    if (!key) return NULL;
+    memcpy(key, memberReference, len);
+    key[len] = '\0';
+    return key;
+}
+
+/* Whole-device counterpart of MmsReportClientUseCases_chunkReferencesByDoGroup -
+ * identical greedy, order-preserving, never-splits-a-DO-group packing
+ * algorithm, safe for a flat reference list spanning multiple LNs (see
+ * extractLnAndDoGroupKey's own doc comment for why the grouping key differs).
+ * Used by mms_report_client's whole-device dynamic-dataset clustering to pack
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own output into
+ * datasets sized to the device's declared maxAttributes cap - unlike the
+ * per-LN chunker, a single resulting chunk here may legitimately span several
+ * different (small) LNs' worth of leaves, maximizing how much of the device
+ * fits within a tight total dataset-count budget. */
+LinkedList
+MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(const char* const* references, int count, int maxAttributes) {
+    LinkedList chunks = LinkedList_create();
+    if (!references || count <= 0 || maxAttributes <= 0) return chunks;
+
+    char** groupKeys = calloc((size_t) count, sizeof(char*));
+    if (!groupKeys) return chunks;
+    for (int i = 0; i < count; i++) {
+        groupKeys[i] = references[i] ? extractLnAndDoGroupKey(references[i]) : NULL;
+    }
+
+    LinkedList currentChunk = NULL;
+    int currentChunkSize = 0;
+
+    int i = 0;
+    while (i < count) {
+        if (!references[i]) {
+            i++;
+            continue;
+        }
+
+        int groupEnd = i + 1;
+        while (groupEnd < count && references[groupEnd] && groupKeys[groupEnd] && groupKeys[i]
+                && strcmp(groupKeys[groupEnd], groupKeys[i]) == 0) {
+            groupEnd++;
+        }
+        int groupSize = groupEnd - i;
+
+        if (currentChunk && currentChunkSize > 0 && currentChunkSize + groupSize > maxAttributes) {
+            LinkedList_add(chunks, currentChunk);
+            currentChunk = NULL;
+            currentChunkSize = 0;
+        }
+        if (!currentChunk) currentChunk = LinkedList_create();
+
+        for (int j = i; j < groupEnd; j++) {
+            LinkedList_add(currentChunk, MmsReportClientUtils_safeStringDup(references[j]));
+        }
+        currentChunkSize += groupSize;
+
+        i = groupEnd;
+    }
+
+    if (currentChunk) LinkedList_add(chunks, currentChunk);
+
+    for (int k = 0; k < count; k++) free(groupKeys[k]);
+    free(groupKeys);
+
+    return chunks;
+}
+
+/* "LD/LN" prefix only (everything before the first '$') - the grouping key
+ * for MmsReportClientUseCases_groupReferencesByLn below. */
+static char*
+extractLnKey(const char* memberReference) {
+    if (!memberReference) return NULL;
+    const char* fcStart = strchr(memberReference, '$');
+    size_t len = fcStart ? (size_t) (fcStart - memberReference) : strlen(memberReference);
+    char* key = malloc(len + 1);
+    if (!key) return NULL;
+    memcpy(key, memberReference, len);
+    key[len] = '\0';
+    return key;
+}
+
+/* Groups `references` (any FC=ST/MX leaf list spanning multiple LNs, e.g.
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own output) into
+ * one group per LN, by contiguous "LD/LN"-prefix run - relies on that
+ * function's own documented ordering guarantee (one LN's leaves are always
+ * emitted together, never interleaved with another LN's). No size cap - used
+ * as whole-device clustering's fallback granularity when SCL's own
+ * maxAttributes cap isn't known (-1 or 0), since
+ * MmsReportClientUseCases_chunkReferencesAcrossWholeDevice's own bin-packing
+ * needs a real upper bound to safely combine multiple LNs into one dataset;
+ * without one, "one dataset per LN" (this function) is the safe default -
+ * identical per-LN granularity to what mms_report_client already did before
+ * whole-device clustering existed, just now assignable to ANY spare Dyn RCB
+ * slot device-wide rather than only a same-LN one.
+ *
+ * Returns a LinkedList of LinkedList-of-owned-char*, same ownership contract
+ * as MmsReportClientUseCases_chunkReferencesByDoGroup/_AcrossWholeDevice:
+ * caller owns the outer list AND must LinkedList_destroyDeep(innerList, free)
+ * each inner list before LinkedList_destroyStatic(outerList). */
+LinkedList
+MmsReportClientUseCases_groupReferencesByLn(const char* const* references, int count) {
+    LinkedList groups = LinkedList_create();
+    if (!references || count <= 0) return groups;
+
+    char** lnKeys = calloc((size_t) count, sizeof(char*));
+    if (!lnKeys) return groups;
+    for (int i = 0; i < count; i++) {
+        lnKeys[i] = references[i] ? extractLnKey(references[i]) : NULL;
+    }
+
+    int i = 0;
+    while (i < count) {
+        if (!references[i]) {
+            i++;
+            continue;
+        }
+
+        int groupEnd = i + 1;
+        while (groupEnd < count && references[groupEnd] && lnKeys[groupEnd] && lnKeys[i]
+                && strcmp(lnKeys[groupEnd], lnKeys[i]) == 0) {
+            groupEnd++;
+        }
+
+        LinkedList group = LinkedList_create();
+        for (int j = i; j < groupEnd; j++) {
+            LinkedList_add(group, MmsReportClientUtils_safeStringDup(references[j]));
+        }
+        LinkedList_add(groups, group);
+
+        i = groupEnd;
+    }
+
+    for (int k = 0; k < count; k++) free(lnKeys[k]);
+    free(lnKeys);
+
+    return groups;
 }
 
 /* Removes any "(...)" array-index annotation from one dot-separated path

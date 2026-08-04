@@ -41,24 +41,26 @@ onStateChanged(void* parameter, IedConnection connection, IedConnectionState new
     Semaphore_post(handle->wakeSignal);
 }
 
-/* One entry per Logical Node whose RCB(s) needed a dynamically-created
+/* One entry per Dyn RCB target that was assigned a dynamically-created
  * dataset within the current connect cycle - see getOrCreateDynamicDataset's
- * own doc comment for why this de-dup exists. Built fresh in enableAllTargets
- * for every (re)connect and discarded at the end of that same call; never
- * carried across reconnects (the @-scoped datasets it names don't survive a
- * reconnect either - see MmsReportClientConnection_create's own comment on
- * the connection object's own reuse for the parallel reasoning). */
+ * own doc comment. Built fresh in enableAllTargets for every (re)connect and
+ * discarded at the end of that same call; never carried across reconnects
+ * (the @-scoped datasets it names don't survive a reconnect either - see
+ * MmsReportClientConnection_create's own comment on the connection object's
+ * own reuse for the parallel reasoning). */
 typedef struct {
-    char* lnReference;  /* owned copy, matches ReportControlBlockTarget.lnReference
-                            (LN-wide path) or ->objectReference (chunked path) */
+    char* lnReference;  /* owned copy, matches ReportControlBlockTarget.objectReference -
+                            every Dyn target gets its own uniquely-clustered dataset now,
+                            keyed by its own objectReference, never shared with another
+                            target's own assignment (field name kept for minimal diff
+                            against this struct's original single-LN-dedup design). */
     char* datasetName;  /* owned copy, e.g. "@dyn_E13_6MD_PTOC1" (unbuffered) or
                             "E13_6MD/PTOC1$dyn" (buffered) */
-    bool buffered;      /* part of the lookup key alongside lnReference - an LN with
-                            both buffered and unbuffered Dyn RCB instances needs two
-                            different cached names (different scheme/lifetime, see
-                            buildDynamicDatasetName), not one shared entry. Not needed
-                            on the chunked path (objectReference is already unique per
-                            target), but harmless there too. */
+    bool buffered;      /* part of the lookup key alongside lnReference - technically
+                            redundant now that every key is already a unique
+                            objectReference, kept for the naming-scheme distinction
+                            buildDynamicDatasetName still needs (buffered vs
+                            association-scoped). */
 } DynamicDatasetCacheEntry;
 
 static void
@@ -87,44 +89,60 @@ lookupDynamicDatasetName(LinkedList cache, const char* lnReference, bool buffere
 }
 
 /*
- * Everything getOrCreateDynamicDataset needs for one connect cycle: the
- * existing LN-keyed dedup cache, plus a budget counter copied from SCL's own
- * <Services><DynDataSet max="N"/> (IedModel_getDynDataSetMax) at the top of
- * enableAllTargets. remainingBudget models "how many MORE of our own new
- * createDataSet attempts this connect cycle may still make" - not a live
- * device-side usage readout (no ACSI service exposes that; other consumers,
- * e.g. other clients' domain-scoped datasets or leftovers from other tooling,
- * can already be eating into the real device-side budget invisibly - a real
- * device run showed exactly this). -1 (SCL never declared a cap) must never
- * trigger the short-circuit - see MmsReportClientUseCases_isDynamicDatasetBudgetExhausted.
- * Decremented only on a genuinely new successful createDataSet, never on a
- * cache hit (reuse is free). budgetExhaustedLogged edge-triggers the
- * "stopping" log so it fires once per cycle, not once per remaining target -
- * without this, a device with many RCBs past the budget wall would print one
- * near-identical line per remaining target instead of one.
+ * Everything getOrCreateDynamicDataset/adoptUnclaimedDataset need for one
+ * connect cycle: the existing LN-keyed dedup cache, plus a budget counter
+ * seeded from SCL's own <Services><DynDataSet max="N"/> (IedModel_getDynDataSetMax)
+ * CORRECTED for datasets already discovered on the server
+ * (MmsReportClientUseCases_computeInitialDynamicDatasetBudget) at the top of
+ * enableAllTargets - not just a blind copy of the declared max, which has no
+ * awareness of what's already consuming the device's real budget (leftover
+ * domain-scoped datasets from an earlier ungracefully-terminated run, other
+ * clients'/tools' own datasets, etc. - a real device run showed exactly this
+ * silently exhausting the real budget while this client's own naive counter
+ * still believed most of it remained). remainingBudget models "how many MORE
+ * of our own new createDataSet attempts this connect cycle may still make".
+ * -1 (SCL never declared a cap) must never trigger the short-circuit - see
+ * MmsReportClientUseCases_isDynamicDatasetBudgetExhausted. Decremented only
+ * on a genuinely new successful createDataSet, never on a cache hit or an
+ * adopted existing dataset (both are free). budgetExhaustedLogged
+ * edge-triggers the "stopping" log so it fires once per cycle, not once per
+ * remaining target - without this, a device with many RCBs past the budget
+ * wall would print one near-identical line per remaining target instead of
+ * one.
  *
  * Built fresh in enableAllTargets for every (re)connect, same lifetime as
  * DynamicDatasetCacheEntry's own cache - see that struct's doc comment for why
- * neither is carried across reconnects.
+ * neither is carried across reconnects (existingServerDatasets/claimedDatasetNames
+ * share the same reasoning: server-side state may have genuinely changed
+ * since the last connect, so discovery re-runs fresh every time too).
  */
 typedef struct {
     LinkedList cache;
     int remainingBudget;
     bool budgetExhaustedLogged;
     LinkedList chunkAssignments; /* DynamicDatasetChunkAssignment* list - see that struct's own doc
-                                     comment and buildChunkPlan. Empty (never NULL) whenever
-                                     maxAttributes is unknown/unusable - the whole chunking
-                                     mechanism is then a no-op. */
+                                     comment and buildWholeDeviceClusterPlan. Empty (never NULL)
+                                     only if the device has no Dyn RCB slots at all or no
+                                     reportable data anywhere in the model. */
+    LinkedList existingServerDatasets; /* owned char* list - see discoverExistingServerDatasets'
+                                     own doc comment. Every dataset already on the server across
+                                     this client's own Dyn targets' LDs, discovered once per
+                                     connect cycle. */
+    LinkedList claimedDatasetNames; /* owned char* list - see adoptUnclaimedDataset's own doc
+                                     comment. Tracks which existingServerDatasets entries have
+                                     already been tried/claimed this cycle, whether successfully
+                                     adopted or found unusable. */
 } DynamicDatasetSession;
 
 /*
- * One LN's full leaf set didn't fit under SCL's declared maxAttributes cap -
- * see buildChunkPlan's own doc comment for how/when this gets populated. Each
- * assignment maps ONE DO-atomic chunk (MmsReportClientUseCases_chunkReferencesByDoGroup)
- * onto ONE of that LN's own spare Dyn RCB targets - 1:1, never shared, unlike
- * the un-chunked LN-wide dedup path in getOrCreateDynamicDataset.
- * rcbReference matches that target's own objectReference (not lnReference -
- * that's the whole point, each chunked target gets its own unique dataset).
+ * One whole-device cluster (a DO-atomic group of reportable leaves, possibly
+ * spanning several different LNs - see buildWholeDeviceClusterPlan's own doc
+ * comment for how/when this gets populated and by which of its two
+ * strategies) assigned to ONE Dyn RCB slot anywhere on the device - 1:1,
+ * never shared. rcbReference matches that target's own objectReference (not
+ * lnReference - every assigned target gets its own unique dataset, since a
+ * cluster's content generally has nothing to do with the target's own parent
+ * LN anymore).
  */
 typedef struct {
     char* rcbReference;      /* owned copy, == the assigned target's own objectReference */
@@ -202,8 +220,23 @@ lookupMemberRefCacheByRcb(MmsReportClientHandle handle, const char* rcbReference
  *     (IedConnection_createDataSet's own doc comment: "LDName/LNodeName.dataSetName
  *     for permanent domain or VMD scope data sets" - the client library
  *     splits on the first '/' for the domain, then converts any '.' in the
- *     remainder to '$' for the wire form, so a "$"-joined suffix here reaches
- *     the server identically without relying on that internal conversion).
+ *     remainder to '$' for the wire form). Whole-device clustering means the
+ *     input here is often target->objectReference instead (e.g.
+ *     "LDName/LNName.BR.rcbName", so each Dyn target gets its own uniquely
+ *     named dataset rather than sharing an LN-wide one) - THAT string
+ *     contains a literal '.' (the ".BR."/".RP." RCB-instance segment), which
+ *     createDataSet's own internal conversion would silently fold to '$' on
+ *     the wire, but this function's own returned string would NOT reflect
+ *     unless it applies the identical conversion itself: any '.' is
+ *     explicitly replaced with '$' below before appending "$dyn", so the
+ *     name we keep for ClientReportControlBlock_setDataSetReference always
+ *     matches the real server-side name bit-for-bit, regardless of createDataSet's
+ *     own internal behavior. Confirmed as a real, previously-latent bug: a
+ *     dot left unconverted here produces a dataset reference the server
+ *     genuinely can't resolve, surfacing as IED_ERROR_OBJECT_VALUE_INVALID/32
+ *     on the following setRCBValues - identical-looking symptom to, but a
+ *     completely different root cause from, the association-scoped-on-a-
+ *     buffered-RCB bug this whole function exists to fix.
  *     Deterministic and stable across reconnects/restarts by construction -
  *     required so a later connect recognizes and reuses its own
  *     already-created dataset (see createAndCacheDynamicDataset's
@@ -217,6 +250,9 @@ buildDynamicDatasetName(const char* lnReference, bool buffered) {
         char* name = malloc(len);
         if (!name) return NULL;
         snprintf(name, len, "%s$dyn", lnReference);
+        for (char* p = name; *p; p++) {
+            if (*p == '.') *p = '$';
+        }
         return name;
     }
 
@@ -253,14 +289,13 @@ rememberDomainScopedDatasetName(MmsReportClientHandle handle, const char* datase
 }
 
 /*
- * Shared createDataSet + cache-insert + budget-decrement plumbing for both of
- * getOrCreateDynamicDataset's paths below (LN-wide unchunked, and per-target
- * chunked) - the only difference between the two callers is which reference
- * the cache entry/generated name is keyed by (LN-wide: target->lnReference;
- * chunked: target->objectReference, already unique per target so it doubles
- * as a naming/cache key with no new scheme needed) and which member list
- * feeds wireRefs. `logLnReference`/`logRcbReference` are for messages only.
- * Caller has already confirmed the budget isn't exhausted.
+ * Shared createDataSet + cache-insert + budget-decrement plumbing for
+ * getOrCreateDynamicDataset: `cacheKey` is always target->objectReference
+ * (already unique per target, doubling as the naming/cache key with no
+ * separate scheme needed) and `memberReferences`/`memberCount` are this
+ * target's own whole-device cluster assignment. `logLnReference`/
+ * `logRcbReference` are for messages only. Caller has already confirmed the
+ * budget isn't exhausted.
  */
 static const char*
 createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
@@ -347,33 +382,26 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
 
 /*
  * For an RCB whose SCL declared no datSet (datasetReference == NULL,
- * datSet="Dyn" in SCL terms - see CLAUDE.md's own bullet on this): creates an
- * association-scoped dataset. Two paths, chosen by whether buildChunkPlan
- * assigned this target its own chunk this cycle (session->chunkAssignments):
- *
- *   - CHUNKED (an assignment exists): this LN's full leaf set exceeded SCL's
- *     declared maxAttributes, so this target gets ONLY its own DO-atomic
- *     subset, in its own uniquely-named dataset (keyed/named by
- *     target->objectReference) - no sharing, no LN-wide dedup.
- *   - UNCHUNKED (no assignment - the common case, and the ONLY case whenever
- *     maxAttributes is unknown/unusable): covers every FC=ST/MX leaf
- *     attribute under the RCB's own LN (member list already resolved once,
- *     locally, into handle->memberRefCache by buildMemberRefCache). Dedupes
- *     by LN (session->cache, keyed by target->lnReference) within one connect
- *     cycle: many real IEDs expose several reserved RCB instances per LN
- *     (e.g. urcbA..urcbJ) that would otherwise each trigger their own
- *     createDataSet call for what is conceptually the same dataset -
- *     wasteful, and unnecessarily consumes the device's (often small, e.g.
- *     15) dataset-count budget.
+ * datSet="Dyn" in SCL terms - see CLAUDE.md's own bullet on this): resolves
+ * (creating if needed) the dataset buildWholeDeviceClusterPlan assigned this
+ * target this cycle (session->chunkAssignments) - a cluster of reportable
+ * leaves that may span several different LNs across the WHOLE device, not
+ * just this target's own parent LN (see that function's own doc comment for
+ * why a Dyn RCB's parent LN doesn't constrain what it can report on). Always
+ * keyed/named by target->objectReference - no LN-wide dedup/sharing (unlike
+ * this feature's original single-LN design, every Dyn target now gets its
+ * own uniquely-clustered dataset, since two different targets' clusters
+ * generally have nothing in common).
  *
  * Returns the dataset name (borrowed - owned by session->cache, valid for
- * the rest of the current connect cycle) on success, or NULL if no
- * reportable attributes were found, if this connect cycle's own
- * dataset-count budget is already exhausted (see DynamicDatasetSession's own
- * doc comment), or if dataset creation itself failed (cap exceeded,
- * maxAttributes exceeded, etc.) - either way, the caller falls back to
- * today's pre-existing behavior (skip DATSET, let setRCBValues fail, log,
- * move on).
+ * the rest of the current connect cycle) on success, or NULL if this target
+ * received no cluster assignment this cycle (the device's reportable data
+ * was already fully covered by other slots - see buildWholeDeviceClusterPlan's
+ * own overflow logging), if this connect cycle's own dataset-count budget is
+ * already exhausted (see DynamicDatasetSession's own doc comment), or if
+ * dataset creation itself failed (cap exceeded, maxAttributes exceeded,
+ * etc.) - either way, the caller falls back to today's pre-existing behavior
+ * (skip DATSET, let setRCBValues fail, log, move on).
  */
 static const char*
 getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target,
@@ -382,9 +410,9 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
 
     DynamicDatasetChunkAssignment* chunk =
             lookupChunkAssignment(session->chunkAssignments, target->objectReference);
-    const char* cacheKey = chunk ? target->objectReference : target->lnReference;
+    if (!chunk) return NULL;
 
-    const char* existing = lookupDynamicDatasetName(session->cache, cacheKey, target->buffered);
+    const char* existing = lookupDynamicDatasetName(session->cache, target->objectReference, target->buffered);
     if (existing) return existing;
 
     /* Cache hits above stay free (zero wire cost, always allowed) - only a
@@ -400,22 +428,8 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
         return NULL;
     }
 
-    if (chunk) {
-        return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
-                target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
-                target->buffered);
-    }
-
-    MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
-    if (!cacheEntry || cacheEntry->memberCount <= 0) {
-        fprintf(stderr, "[mms_report_client] no reportable (FC=ST/MX) attributes found for LN '%s' - "
-                "'%s' will not get a dynamic dataset\n",
-                target->lnReference, target->objectReference);
-        return NULL;
-    }
-
-    return createAndCacheDynamicDataset(handle, session, target->lnReference, target->lnReference,
-            target->objectReference, (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount,
+    return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
+            target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
             target->buffered);
 }
 
@@ -432,30 +446,21 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
  * handling below, which falls through to getOrCreateDynamicDataset either
  * way (a dangling reference would fail to resolve there too).
  *
- * Checks both naming schemes getOrCreateDynamicDataset can produce for this
- * target: the LN-wide name (buildDynamicDatasetName(lnReference, ...), used
- * when this LN's leaf set fits under maxAttributes / maxAttributes is
- * unknown) and the per-target chunked name
- * (buildDynamicDatasetName(objectReference, ...), used when this target was
- * assigned a chunk - see DynamicDatasetChunkAssignment). Both built with
- * target->buffered - a fixed, model-level property of this specific RCB, so
- * whichever scheme this target would itself produce is the only one relevant
- * here; no ambiguity between the "@"-scoped and domain-scoped forms for a
- * single target. Checked unconditionally, not gated on whether this target
- * actually has a chunk assignment THIS cycle - it may have been chunked on a
- * prior cycle whose dataset (association-scoped and gone, or a domain-scoped
- * one this same client already owns and would otherwise re-detect as "live")
- * is now dangling/stale from this cycle's point of view. */
+ * Checks the one naming scheme getOrCreateDynamicDataset can produce for
+ * this target: buildDynamicDatasetName(objectReference, target->buffered) -
+ * every Dyn target is keyed/named by its own objectReference now (whole-
+ * device clustering assigns each target its own unique cluster, no more
+ * LN-wide shared name). target->buffered is a fixed, model-level property of
+ * this specific RCB, so whichever scheme (association-scoped vs
+ * domain-scoped) this target would itself produce is the only one relevant
+ * here. Checked unconditionally, not gated on whether this target has a
+ * cluster assignment THIS cycle - it may have been assigned one on a prior
+ * cycle whose dataset (association-scoped and gone, or a domain-scoped one
+ * this same client already owns and would otherwise re-detect as "live") is
+ * now dangling/stale from this cycle's point of view. */
 static bool
 looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlockTarget* target) {
     if (!datasetRef || !target) return false;
-
-    if (target->lnReference) {
-        char* expectedLnWide = buildDynamicDatasetName(target->lnReference, target->buffered);
-        bool match = expectedLnWide && strcmp(datasetRef, expectedLnWide) == 0;
-        free(expectedLnWide);
-        if (match) return true;
-    }
 
     if (target->objectReference) {
         char* expectedChunked = buildDynamicDatasetName(target->objectReference, target->buffered);
@@ -623,44 +628,287 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
     Semaphore_post(handle->memberRefCacheLock);
 }
 
+/* Small owned-string-list membership check - used by discoverExistingServerDatasets
+ * to dedupe which LDs it has already queried, and by adoptUnclaimedDataset to
+ * track which discovered dataset names have already been tried/claimed this
+ * cycle (so the same unusable candidate isn't re-probed for every remaining
+ * target, and the same usable one isn't handed to two different targets). */
+static bool
+stringListContains(LinkedList list, const char* value) {
+    if (!list || !value) return false;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        char* entry = (char*) LinkedList_getData(element);
+        if (entry && strcmp(entry, value) == 0) return true;
+        element = LinkedList_getNext(element);
+    }
+    return false;
+}
+
+/*
+ * Discovers every dataset already sitting on the server, once per connect
+ * cycle (called at the top of enableAllTargets, before any dataset is
+ * created), scoped to the distinct set of LDs this client's own Dyn targets
+ * live under. Feeds two things: (1) an accurate starting budget (see
+ * MmsReportClientUseCases_computeInitialDynamicDatasetBudget) instead of
+ * blindly trusting SCL's declared max with zero awareness of what already
+ * exists (confirmed on a real device: a leftover pile of domain-scoped
+ * datasets from an earlier ungracefully-terminated run silently ate most of
+ * the real budget before this client's own counter believed anything was
+ * wrong); (2) a pool adoptUnclaimedDataset draws from to reuse an existing
+ * dataset instead of self-creating a new one - "primarily try to use
+ * existing/foreign datasets and create our own only via necessity," per
+ * explicit user direction.
+ *
+ * Uses IedConnection_getLogicalDeviceDataSets (third_party/include/iec61850_client.h)
+ * - a real, always-fresh wire query returning every dataset name under one
+ * LD, in bare MMS notation (e.g. "LLN0$dyn", NOT LD-prefixed) - prefixed with
+ * "<ldName>/" here to produce the same full "LD/LN..." reference form this
+ * feature uses everywhere else. Domain/VMD-scoped datasets only - an
+ * association-scoped ("@"-prefixed) one belongs to whichever OTHER
+ * connection created it and isn't stored under any LD's own namespace, so it
+ * can never appear here and never needs to (it's already gone the moment
+ * that other connection closes, never a discovery/reuse candidate).
+ *
+ * Scoped to Dyn targets' own LDs only, not a full-device sweep of every LD
+ * regardless of relevance - keeps the added round-trip cost proportional to
+ * what this client actually needs (typically far fewer LDs than the device's
+ * total), at the honest cost of not catching a stale leftover under an LD
+ * that no longer has any Dyn target at all (an LN/RCB removed since the
+ * leftover was created) - a real but narrow gap, not worth a full-device
+ * sweep's extra cost to close today.
+ *
+ * Returns a LinkedList of owned, full "LD/LN...$..." reference strings
+ * (never NULL, empty if no Dyn targets or nothing discovered). Caller owns:
+ * LinkedList_destroyDeep(list, free).
+ */
+static LinkedList
+discoverExistingServerDatasets(MmsReportClientHandle handle) {
+    LinkedList existing = LinkedList_create();
+    if (!handle->targets) return existing;
+
+    LinkedList processedLds = LinkedList_create();
+
+    LinkedList element = LinkedList_getNext(handle->targets);
+    while (element) {
+        ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+
+        if (target->datasetReference || !target->lnReference) continue;
+
+        char* slash = strchr(target->lnReference, '/');
+        if (!slash) continue;
+        size_t ldLen = (size_t) (slash - target->lnReference);
+        char* ldName = malloc(ldLen + 1);
+        if (!ldName) continue;
+        memcpy(ldName, target->lnReference, ldLen);
+        ldName[ldLen] = '\0';
+
+        if (stringListContains(processedLds, ldName)) {
+            free(ldName);
+            continue;
+        }
+        LinkedList_add(processedLds, ldName); /* processedLds now owns ldName */
+
+        IedClientError err = IED_ERROR_OK;
+        LinkedList mmsNames = IedConnection_getLogicalDeviceDataSets(handle->connection, &err, ldName);
+        if (!mmsNames) continue;
+
+        LinkedList nameElement = LinkedList_getNext(mmsNames);
+        while (nameElement) {
+            char* mmsName = (char*) LinkedList_getData(nameElement);
+            nameElement = LinkedList_getNext(nameElement);
+            if (!mmsName) continue;
+
+            size_t fullLen = strlen(ldName) + 1 + strlen(mmsName) + 1;
+            char* full = malloc(fullLen);
+            if (!full) continue;
+            snprintf(full, fullLen, "%s/%s", ldName, mmsName);
+            LinkedList_add(existing, full);
+        }
+        LinkedList_destroyDeep(mmsNames, free);
+    }
+
+    LinkedList_destroyDeep(processedLds, free);
+
+    /* Never offer a dataset for adoption that our OWN model already knows is
+     * dedicated to a DIFFERENT RCB's SCL-declared static datSet (e.g. an
+     * SCL-static buffered RCB's own "ds1") - adopting it wouldn't be
+     * incorrect (assignment is non-destructive/shareable), but it would
+     * point a Dyn slot at content already fully covered by that other RCB
+     * instead of genuinely new device data, undermining the whole point of
+     * "primarily use existing datasets" (maximizing distinct coverage, not
+     * redundant coverage). Only filters what THIS client's own model already
+     * knows about - a dataset some OTHER tool/client has claimed, invisible
+     * to us, can't be avoided this way; that's an accepted, honest gap (see
+     * discoverExistingServerDatasets' own doc comment on scope). */
+    LinkedList filterElement = LinkedList_getNext(existing);
+    while (filterElement) {
+        char* candidate = (char*) LinkedList_getData(filterElement);
+        filterElement = LinkedList_getNext(filterElement);
+
+        bool sclKnown = false;
+        LinkedList checkElement = LinkedList_getNext(handle->targets);
+        while (checkElement) {
+            ReportControlBlockTarget* checkTarget = (ReportControlBlockTarget*) LinkedList_getData(checkElement);
+            checkElement = LinkedList_getNext(checkElement);
+            if (checkTarget->datasetReference && strcmp(checkTarget->datasetReference, candidate) == 0) {
+                sclKnown = true;
+                break;
+            }
+        }
+        if (sclKnown) {
+            LinkedList_remove(existing, candidate);
+            free(candidate);
+        }
+    }
+
+    if (LinkedList_size(existing) > 0) {
+        fprintf(stderr, "[mms_report_client] discovered %d existing dataset(s) already on the server "
+                "across this client's own LD(s)\n", LinkedList_size(existing));
+    }
+
+    return existing;
+}
+
+/*
+ * Tier "adopt" of the dataset resolution order (see enableOneTarget's own
+ * doc comment): before self-creating a NEW dataset for a Dyn target's own
+ * whole-device cluster, check whether an existing, not-yet-claimed dataset
+ * already sits on the server under this target's own LD (discoverExistingServerDatasets'
+ * own pool, computed once per connect cycle) - "primarily try to use
+ * existing/foreign datasets and create our own only via necessity," per
+ * explicit user direction. Assigning an existing dataset to an RCB is
+ * non-destructive and shareable - it doesn't modify the dataset object
+ * itself, and any other client/tool that also references it (or created it)
+ * is entirely unaffected - unlike deletion, which stays strictly limited to
+ * datasets this client can prove it created itself (see the orphan-cleanup
+ * pass), adoption applies to ANY existing dataset regardless of origin.
+ *
+ * Each adopted dataset is claimed by exactly ONE target this cycle (tracked
+ * in session->claimedDatasetNames, checked before considering a candidate)
+ * and never shared across multiple targets - maximizing distinct device
+ * coverage the same way whole-device clustering's own fresh-create path
+ * already does, rather than letting several targets redundantly adopt the
+ * same one. A candidate found unusable (unresolvable or empty) is also
+ * claimed, purely so it isn't re-probed via a wasted wire round-trip for
+ * every remaining target this cycle.
+ *
+ * Mirrors pullLiveDataset's own contract closely (bool-shaped success +
+ * outMemberRefs) so the caller (enableOneTarget) can reconcile decode shape
+ * via the SAME refreshPulledMemberRefCache it already uses for tier 2 - an
+ * adopted dataset's real content is resolved live, exactly like a
+ * commissioning-tool-assigned one; the only difference is where the
+ * reference itself came from (server-wide discovery vs. the RCB's own
+ * already-set DatSet attribute). Unlike pullLiveDataset, the resolved name
+ * isn't already known to the caller (there's no live RCB value to read it
+ * from), so it's returned directly - borrowed, owned by
+ * session->existingServerDatasets, valid for the rest of the current
+ * connect cycle.
+ *
+ * Returns NULL (outMemberRefs left untouched) if this target's LN has no
+ * '/' (malformed), no candidate exists under this target's own LD, or every
+ * candidate found there is already claimed/unusable - the caller falls
+ * through to getOrCreateDynamicDataset unchanged in every one of these
+ * cases, exactly as if this tier didn't exist.
+ */
+static const char*
+adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session,
+        LinkedList* outMemberRefs) {
+    if (!session || !session->existingServerDatasets || !target->lnReference) return NULL;
+
+    char* slash = strchr(target->lnReference, '/');
+    if (!slash) return NULL;
+    size_t ldLen = (size_t) (slash - target->lnReference);
+
+    LinkedList element = LinkedList_getNext(session->existingServerDatasets);
+    while (element) {
+        char* candidate = (char*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+
+        if (strncmp(candidate, target->lnReference, ldLen) != 0 || candidate[ldLen] != '/') continue;
+        if (stringListContains(session->claimedDatasetNames, candidate)) continue;
+
+        IedClientError err = IED_ERROR_OK;
+        bool isDeletable = false;
+        LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, candidate, &isDeletable);
+        if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
+            fprintf(stderr, "[mms_report_client] discovered dataset '%s' could not be resolved (error %d) - "
+                    "skipping as an adoption candidate\n", candidate, err);
+            if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
+            LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+            continue;
+        }
+
+        LinkedList wireRefs = LinkedList_create();
+        if (!wireRefs) {
+            LinkedList_destroyDeep(acsiMembers, free);
+            return NULL;
+        }
+
+        LinkedList acsiElement = LinkedList_getNext(acsiMembers);
+        while (acsiElement) {
+            char* acsiRef = (char*) LinkedList_getData(acsiElement);
+            char* memberRef = MmsReportClientUseCases_convertAcsiRefToMemberReference(acsiRef);
+            if (memberRef) LinkedList_add(wireRefs, memberRef);
+            acsiElement = LinkedList_getNext(acsiElement);
+        }
+        LinkedList_destroyDeep(acsiMembers, free);
+
+        if (LinkedList_size(wireRefs) == 0) {
+            fprintf(stderr, "[mms_report_client] discovered dataset '%s' had no wire-convertible members - "
+                    "skipping as an adoption candidate\n", candidate);
+            LinkedList_destroyDeep(wireRefs, free);
+            LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+            continue;
+        }
+
+        fprintf(stderr, "[mms_report_client] adopting existing dataset '%s' for '%s' (%d member(s)) - "
+                "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs));
+
+        LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+        *outMemberRefs = wireRefs;
+        return candidate;
+    }
+
+    return NULL;
+}
+
 /*
  * Tier 3's counterpart of refreshPulledMemberRefCache, called once
  * effectiveDatasetReference is known to be getOrCreateDynamicDataset's own
- * deterministic "@dyn_<lnReference>" name (or NULL, if even self-creation
- * failed - a no-op, nothing to reconcile). Because that name/shape is 100%
- * deterministic per LN and was ALREADY built into this entry as the
- * LN-fallback PROVISIONAL shape at MmsReportClient_start time
- * (buildMemberRefCache, mms_report_client_api.c - tagged with a NULL
- * resolvedDatasetReference precisely so this first call always confirms it),
- * this is bookkeeping-only in the overwhelmingly common case: first-ever
- * successful tier-3 enable, or any reconnect after that (the name is
- * deterministic, so it matches every time) just stamps the fingerprint under
- * the lock - zero array rebuilding, zero extra calls beyond createDataSet
- * itself. The only case this actually rebuilds the shape is a transition
- * BACK from a previously-active tier-2 pulled dataset (resolvedDatasetReference
- * held some prior live dataset's name, now gone/unresolvable this cycle) - in
- * that one case, the LN-fallback shape is recomputed from scratch via
- * IedModel_getReportableAttributeReferencesForLogicalNode (purely local, no
- * wire call - the same offline call buildMemberRefCache itself makes) and
- * swapped in exactly like refreshPulledMemberRefCache's own shape-swap, with
- * the same value-diff-cache-reset consequence and the same rationale.
+ * deterministic per-target name (or NULL, if even self-creation failed - a
+ * no-op, nothing to reconcile). Because that name/shape is 100% deterministic
+ * per target and was ALREADY built into this entry as the cluster-fallback
+ * PROVISIONAL shape at MmsReportClient_start time (buildMemberRefCache,
+ * mms_report_client_api.c - tagged with a NULL resolvedDatasetReference
+ * precisely so this first call always confirms it), this is bookkeeping-only
+ * in the overwhelmingly common case: first-ever successful tier-3 enable, or
+ * any reconnect after that (the name is deterministic, so it matches every
+ * time) just stamps the fingerprint under the lock - zero array rebuilding,
+ * zero extra calls beyond createDataSet itself. The only case this actually
+ * rebuilds the shape is a transition BACK from a previously-active tier-2
+ * pulled dataset (resolvedDatasetReference held some prior live dataset's
+ * name, now gone/unresolvable this cycle) - in that one case, the shape is
+ * recomputed from this target's own cluster assignment
+ * (session->chunkAssignments - see buildWholeDeviceClusterPlan's own doc
+ * comment) and swapped in exactly like refreshPulledMemberRefCache's own
+ * shape-swap, with the same value-diff-cache-reset consequence and the same
+ * rationale.
  *
- * REQUIRED for chunking correctness, not just an optimization: if `target`
- * has a chunk assignment this cycle (session->chunkAssignments -
- * getOrCreateDynamicDataset already built its dataset from exactly this
- * chunk's own member subset), the rebuilt shape here must come from that same
- * subset too - otherwise a correctly-sized, chunk-scoped dataset would exist
- * on the wire while this entry's decode-time shape silently reverts to the
- * LN's FULL leaf set, corrupting report decoding on this target's very first
- * enable (confirmed by reading this function's own effect - not merely
- * theoretical). `session` may be NULL (caller has no chunk plan at all),
- * which behaves exactly like "no assignment for this target" - the ordinary
- * LN-wide path below, unchanged from before chunking existed.
+ * REQUIRED for correctness, not just an optimization: getOrCreateDynamicDataset
+ * only ever returns non-NULL when this target has a real cluster assignment
+ * (whole-device clustering has no "unchunked, whole-LN" fallback anymore - a
+ * target with no assignment gets no dataset at all, see that function's own
+ * doc comment) - the rebuilt shape here must come from that exact same
+ * cluster's own member subset, or a correctly-sized, cluster-scoped dataset
+ * would exist on the wire while this entry's decode-time shape silently
+ * diverges, corrupting report decoding on this target's very first enable.
  */
 static void
 ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarget* target,
         const char* effectiveDatasetReference, DynamicDatasetSession* session) {
-    if (!effectiveDatasetReference) return;
+    if (!effectiveDatasetReference || !session) return;
 
     MmsReportClientMemberRefCacheEntry* entry = lookupMemberRefCacheByRcb(handle, target->objectReference);
     if (!entry) return;
@@ -674,36 +922,17 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     }
     Semaphore_post(handle->memberRefCacheLock);
 
-    DynamicDatasetChunkAssignment* chunk =
-            session ? lookupChunkAssignment(session->chunkAssignments, target->objectReference) : NULL;
+    DynamicDatasetChunkAssignment* chunk = lookupChunkAssignment(session->chunkAssignments, target->objectReference);
+    if (!chunk) return;
 
-    int count;
+    int count = chunk->memberCount;
     char** array = NULL;
-    if (chunk) {
-        count = chunk->memberCount;
-        if (count > 0) {
-            array = calloc((size_t) count, sizeof(char*));
-            if (!array) return;
-            for (int i = 0; i < count; i++) {
-                array[i] = MmsReportClientUtils_safeStringDup(chunk->memberReferences[i]);
-            }
+    if (count > 0) {
+        array = calloc((size_t) count, sizeof(char*));
+        if (!array) return;
+        for (int i = 0; i < count; i++) {
+            array[i] = MmsReportClientUtils_safeStringDup(chunk->memberReferences[i]);
         }
-    } else {
-        LinkedList members = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
-                target->lnReference);
-        count = members ? LinkedList_size(members) : 0;
-        if (count > 0) {
-            array = calloc((size_t) count, sizeof(char*));
-            if (!array) {
-                LinkedList_destroyDeep(members, free);
-                return;
-            }
-            int i = 0;
-            for (LinkedList el = LinkedList_getNext(members); el; el = LinkedList_getNext(el)) {
-                array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
-            }
-        }
-        if (members) LinkedList_destroyDeep(members, free);
     }
 
     if (count <= 0) {
@@ -802,7 +1031,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * RCB_ELEMENT_DATSET alongside RPT_ENA too, using the same "$"-joined
      * reference format ied_model already hands us in datasetReference.
      *
-     * Three-tier resolution order for which dataset to assign:
+     * Four-tier resolution order for which dataset to assign:
      *   1. STATIC - target->datasetReference, if SCL declared one for this
      *      RCB. Never touches the network; this branch is skipped entirely
      *      below whenever it applies.
@@ -819,11 +1048,28 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      *      against this RCB must decode against ITS real member list, not the
      *      LN-wide fallback shape buildMemberRefCache provisionally seeded at
      *      start time - refreshPulledMemberRefCache reconciles that.
-     *   3. SELF-CREATE - only if both above are absent/unusable,
-     *      getOrCreateDynamicDataset synthesizes one covering every
-     *      reportable (FC=ST/MX) attribute of the RCB's own LN. Unbuffered:
-     *      association-scoped so it needs no explicit cleanup - UNCHANGED
-     *      from this feature's original dynamic-dataset-creation behavior.
+     *   3. ADOPT UNCLAIMED - if nothing is assigned to THIS RCB specifically,
+     *      check whether an existing, not-yet-claimed dataset (ours from a
+     *      prior run, or a completely foreign one from another tool)
+     *      already sits on the server under this RCB's own LD
+     *      (adoptUnclaimedDataset, fed by discoverExistingServerDatasets'
+     *      once-per-cycle discovery) - "primarily try to use existing/foreign
+     *      datasets and create our own only via necessity," per explicit user
+     *      direction. Same decode-shape reconciliation as tier 2
+     *      (refreshPulledMemberRefCache), since an adopted dataset's real
+     *      content is resolved live exactly like a pulled one.
+     *   4. SELF-CREATE - only if all three above are absent/unusable,
+     *      getOrCreateDynamicDataset resolves whichever whole-device cluster
+     *      buildWholeDeviceClusterPlan assigned this target this cycle (a
+     *      DO-atomic group of reportable leaves that may span several
+     *      different LNs across the ENTIRE device, not just this RCB's own
+     *      parent LN - a Dyn RCB's parent LN doesn't restrict what a dataset
+     *      assigned to it can report on, see that function's own doc
+     *      comment). A target with no cluster assignment this cycle (the
+     *      device's data was already fully covered by other slots) gets no
+     *      dataset at all here. Unbuffered: association-scoped so it needs no
+     *      explicit cleanup - UNCHANGED from this feature's original
+     *      dynamic-dataset-creation behavior.
      *      Buffered: domain/VMD-scoped instead (buildDynamicDatasetName) -
      *      an association-scoped dataset is destroyed the instant this
      *      connection closes, which a real device rejects assigning to a
@@ -835,9 +1081,9 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      *      management - see handle->domainScopedDynamicDatasetNames' own doc
      *      comment (mms_report_client_types.h) for reuse-on-reconnect and
      *      cleanup-on-stop. This tier's own mechanism/lifetime is not
-     *      otherwise touched by tiers 1-2 existing above it, only the
+     *      otherwise touched by tiers 1-3 existing above it, only the
      *      priority order is new.
-     * If even tier 3 fails (no reportable attributes, or the device rejects
+     * If even tier 4 fails (no reportable attributes, or the device rejects
      * creation - cap exceeded, etc.), DATSET is left unset and setRCBValues
      * below fails with IED_ERROR_OBJECT_VALUE_INVALID, same as before this
      * feature existed. */
@@ -852,9 +1098,18 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             effectiveDatasetReference = liveDataset;
             datasetTier = "live";
         } else {
-            effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, session);
-            ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference, session);
-            datasetTier = "self-created";
+            LinkedList adoptedMemberRefs = NULL;
+            const char* adopted = adoptUnclaimedDataset(handle, target, session, &adoptedMemberRefs);
+            if (adopted) {
+                refreshPulledMemberRefCache(handle, target, adopted, adoptedMemberRefs);
+                LinkedList_destroyDeep(adoptedMemberRefs, free);
+                effectiveDatasetReference = adopted;
+                datasetTier = "adopted";
+            } else {
+                effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, session);
+                ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference, session);
+                datasetTier = "self-created";
+            }
         }
     }
     /* Which of the three tiers (see this function's own doc comment just
@@ -1010,162 +1265,159 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     ClientReportControlBlock_destroy(rcb);
 }
 
-/* Small owned-string-list membership check - used only by buildChunkPlan to
- * track which LNs it has already processed (so a 10-RCB-instance LN's leaf
- * set isn't re-fetched/re-chunked once per instance). */
-static bool
-stringListContains(LinkedList list, const char* value) {
-    if (!list || !value) return false;
-    LinkedList element = LinkedList_getNext(list);
-    while (element) {
-        char* entry = (char*) LinkedList_getData(element);
-        if (entry && strcmp(entry, value) == 0) return true;
-        element = LinkedList_getNext(element);
-    }
-    return false;
-}
-
 /*
  * Computes, once per connect cycle (called at the top of enableAllTargets),
- * which of this IED's Dyn (SCL datSet="Dyn", target->datasetReference == NULL)
- * RCB targets need to split their LN's full leaf set into multiple DO-atomic
- * chunks because it exceeds SCL's own declared maxAttributes cap - see
- * MmsReportClientUseCases_chunkReferencesByDoGroup for the packing strategy.
+ * a device-WIDE dataset plan covering every "Dyn" (SCL datSet="Dyn",
+ * target->datasetReference == NULL) RCB slot on this IED - not just the ones
+ * parented on an LN that itself has a Dyn RCB. A Dyn RCB's own parent LN does
+ * NOT restrict what a dataset assigned to it can report on (dataset members
+ * are independently addressed per-element, not tied to any one LN -
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own doc comment
+ * has the full citation trail), so every Dyn RCB slot anywhere on the device
+ * is treated as a fungible reporting channel that can be pointed at ANY part
+ * of the device's reportable data - covering LDs/LNs that have zero RCBs of
+ * their own (e.g. a real SIPROTEC device where ~28 of ~30 LDs have no RCB at
+ * all, while one LD's LLN0 alone has dozens of otherwise-redundant spare RCB
+ * instances that used to all just duplicate the same tiny LLN0-only dataset).
  *
- * Returns an EMPTY list immediately if IedModel_getDynDataSetMaxAttributes is
- * unknown (-1) or a declared-but-unusable 0 - this is the guarantee that this
- * whole mechanism stays completely inert for any device/fixture without a
- * declared cap (every existing test today), falling through unchanged to the
- * pre-existing single-shared-dataset-per-LN path in getOrCreateDynamicDataset.
+ * Two clustering strategies, chosen by whether SCL declared a real
+ * maxAttributes cap (IedModel_getDynDataSetMaxAttributes):
+ *   - KNOWN (>0): the whole device's leaf list is packed via
+ *     MmsReportClientUseCases_chunkReferencesAcrossWholeDevice - a single
+ *     resulting cluster may legitimately span several different (small) LNs'
+ *     worth of leaves when they fit together, maximizing how much of the
+ *     device fits within a tight total dataset-count budget.
+ *   - UNKNOWN (-1 or 0, e.g. no <Services> at all, or a dynamically-built
+ *     online-discovered model): MmsReportClientUseCases_groupReferencesByLn
+ *     packs one dataset per LN instead, unbounded size - the same per-LN
+ *     granularity this feature always used before whole-device clustering
+ *     existed, since combining multiple LNs into one dataset without a known
+ *     size bound risks an oversized, doomed createDataSet call.
  *
- * For each LN whose full leaf set exceeds maxAttributes: chunk i is assigned
- * to the LN's i-th Dyn target in handle->targets' own existing list order (no
- * new field on ReportControlBlockTarget, no ied_model changes - "which target
- * am I" is derived purely from position during this scan). If an LN needs
- * more chunks than it has spare (Dyn) targets, the overflow chunk(s) are
- * logged and left unassigned - an explicit, visible gap, never a silent drop.
- * An LN whose full leaf set FITS under maxAttributes gets no assignment at
- * all - it falls through untouched to the pre-existing LN-wide dedup path.
+ * Clusters are assigned to Dyn slots in simple model-declaration order
+ * (handle->targets' own existing order - no attempt to prioritize which part
+ * of the device matters more, there's no signal to rank by since this
+ * feature never polls). Whichever list (clusters or slots) runs out first
+ * determines the shortfall, logged plainly either way - never a silent drop:
+ * more clusters than slots means part of the device goes unreported this
+ * cycle; more slots than clusters means some RCB instances simply have
+ * nothing left to assign (the device is already fully covered).
  *
- * Recomputed fresh every connect cycle rather than cached on the handle: it's
- * a pure function of already-static data (handle->iedModel, handle->targets,
+ * Recomputed fresh every connect cycle rather than cached on the handle: a
+ * pure function of already-static data (handle->iedModel, handle->targets,
  * both fixed for the client's whole lifetime), so recomputation is cheap
- * (string work over at most tens of targets, no wire calls) and idempotent -
+ * (string work over the model's own size, no wire calls) and idempotent -
  * not worth growing sMmsReportClientHandle for.
  */
 static LinkedList
-buildChunkPlan(MmsReportClientHandle handle) {
+buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     LinkedList plan = LinkedList_create();
+    if (!handle->targets) return plan;
 
-    int maxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
-    if (maxAttributes <= 0 || !handle->targets) return plan;
-
-    LinkedList processedLns = LinkedList_create();
-
-    LinkedList outerElement = LinkedList_getNext(handle->targets);
-    while (outerElement) {
-        ReportControlBlockTarget* lnTarget = (ReportControlBlockTarget*) LinkedList_getData(outerElement);
-        outerElement = LinkedList_getNext(outerElement);
-
-        if (lnTarget->datasetReference || !lnTarget->lnReference) continue;
-        if (stringListContains(processedLns, lnTarget->lnReference)) continue;
-        LinkedList_add(processedLns, MmsReportClientUtils_safeStringDup(lnTarget->lnReference));
-
-        /* Every Dyn target on this LN, in handle->targets' own existing
-         * order - a list of BORROWED ReportControlBlockTarget* (owned by
-         * handle->targets itself), destroyed with LinkedList_destroyStatic
-         * below, never Deep. */
-        LinkedList lnDynTargets = LinkedList_create();
-        LinkedList scanElement = LinkedList_getNext(handle->targets);
-        while (scanElement) {
-            ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(scanElement);
-            if (!t->datasetReference && t->lnReference && strcmp(t->lnReference, lnTarget->lnReference) == 0) {
-                LinkedList_add(lnDynTargets, t);
-            }
-            scanElement = LinkedList_getNext(scanElement);
-        }
-
-        LinkedList leafRefs = IedModel_getReportableAttributeReferencesForLogicalNode(handle->iedModel,
-                lnTarget->lnReference);
-        int leafCount = leafRefs ? LinkedList_size(leafRefs) : 0;
-
-        if (leafCount <= maxAttributes) {
-            /* Fits under the cap - no chunking needed, falls through to the
-             * pre-existing LN-wide dedup path untouched. */
-            if (leafRefs) LinkedList_destroyDeep(leafRefs, free);
-            LinkedList_destroyStatic(lnDynTargets);
-            continue;
-        }
-
-        char** leafArray = calloc((size_t) leafCount, sizeof(char*));
-        if (!leafArray) {
-            LinkedList_destroyDeep(leafRefs, free);
-            LinkedList_destroyStatic(lnDynTargets);
-            continue;
-        }
-        int idx = 0;
-        for (LinkedList el = LinkedList_getNext(leafRefs); el; el = LinkedList_getNext(el)) {
-            leafArray[idx++] = (char*) LinkedList_getData(el);
-        }
-
-        LinkedList chunkLists = MmsReportClientUseCases_chunkReferencesByDoGroup(
-                (const char* const*) leafArray, leafCount, maxAttributes);
-        free(leafArray);
-        LinkedList_destroyDeep(leafRefs, free);
-
-        int totalChunks = LinkedList_size(chunkLists);
-        int dynTargetCount = LinkedList_size(lnDynTargets);
-        int assignedChunks = 0;
-
-        LinkedList chunkElement = LinkedList_getNext(chunkLists);
-        LinkedList dynTargetElement = LinkedList_getNext(lnDynTargets);
-        while (chunkElement) {
-            if (!dynTargetElement) {
-                fprintf(stderr, "[mms_report_client] LN '%s' needs %d dataset chunk(s) (maxAttributes=%d) "
-                        "but only has %d RCB instance(s) with no SCL-assigned dataset - %d chunk(s) will "
-                        "not be reported\n", lnTarget->lnReference, totalChunks, maxAttributes, dynTargetCount,
-                        totalChunks - assignedChunks);
-                break;
-            }
-
-            LinkedList chunkMembers = (LinkedList) LinkedList_getData(chunkElement);
-            ReportControlBlockTarget* assignedTarget = (ReportControlBlockTarget*) LinkedList_getData(dynTargetElement);
-
-            int memberCount = LinkedList_size(chunkMembers);
-            char** memberArray = calloc((size_t) memberCount, sizeof(char*));
-            if (memberArray) {
-                int m = 0;
-                for (LinkedList mEl = LinkedList_getNext(chunkMembers); mEl; mEl = LinkedList_getNext(mEl)) {
-                    memberArray[m++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(mEl));
-                }
-
-                DynamicDatasetChunkAssignment* assignment = malloc(sizeof(DynamicDatasetChunkAssignment));
-                if (assignment) {
-                    assignment->rcbReference = MmsReportClientUtils_safeStringDup(assignedTarget->objectReference);
-                    assignment->memberReferences = memberArray;
-                    assignment->memberCount = memberCount;
-                    LinkedList_add(plan, assignment);
-                } else {
-                    for (int f = 0; f < memberCount; f++) free(memberArray[f]);
-                    free(memberArray);
-                }
-            }
-
-            assignedChunks++;
-            chunkElement = LinkedList_getNext(chunkElement);
-            dynTargetElement = LinkedList_getNext(dynTargetElement);
-        }
-
-        LinkedList chunkCleanup = LinkedList_getNext(chunkLists);
-        while (chunkCleanup) {
-            LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkCleanup), free);
-            chunkCleanup = LinkedList_getNext(chunkCleanup);
-        }
-        LinkedList_destroyStatic(chunkLists);
-        LinkedList_destroyStatic(lnDynTargets);
+    /* Slot pool: every Dyn target on the WHOLE device, in handle->targets'
+     * own existing order - a list of BORROWED ReportControlBlockTarget*
+     * (owned by handle->targets itself), destroyed with
+     * LinkedList_destroyStatic below, never Deep. Unlike the old per-LN
+     * chunk plan, this is not filtered/grouped by LN at all - every Dyn
+     * target anywhere on the device is one fungible slot in one combined
+     * pool. */
+    LinkedList slots = LinkedList_create();
+    LinkedList slotScan = LinkedList_getNext(handle->targets);
+    while (slotScan) {
+        ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotScan);
+        if (!t->datasetReference) LinkedList_add(slots, t);
+        slotScan = LinkedList_getNext(slotScan);
+    }
+    if (LinkedList_size(slots) == 0) {
+        LinkedList_destroyStatic(slots);
+        return plan;
     }
 
-    LinkedList_destroyDeep(processedLns, free);
+    LinkedList wholeDeviceLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(handle->iedModel);
+    int leafCount = wholeDeviceLeaves ? LinkedList_size(wholeDeviceLeaves) : 0;
+    if (leafCount == 0) {
+        if (wholeDeviceLeaves) LinkedList_destroyDeep(wholeDeviceLeaves, free);
+        LinkedList_destroyStatic(slots);
+        return plan;
+    }
+
+    char** leafArray = calloc((size_t) leafCount, sizeof(char*));
+    if (!leafArray) {
+        LinkedList_destroyDeep(wholeDeviceLeaves, free);
+        LinkedList_destroyStatic(slots);
+        return plan;
+    }
+    int leafIdx = 0;
+    for (LinkedList el = LinkedList_getNext(wholeDeviceLeaves); el; el = LinkedList_getNext(el)) {
+        leafArray[leafIdx++] = (char*) LinkedList_getData(el);
+    }
+
+    int maxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
+    LinkedList clusterLists = (maxAttributes > 0)
+            ? MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(
+                    (const char* const*) leafArray, leafCount, maxAttributes)
+            : MmsReportClientUseCases_groupReferencesByLn((const char* const*) leafArray, leafCount);
+    free(leafArray);
+    LinkedList_destroyDeep(wholeDeviceLeaves, free);
+
+    int totalClusters = LinkedList_size(clusterLists);
+    int slotCount = LinkedList_size(slots);
+    int assignedClusters = 0;
+
+    LinkedList clusterElement = LinkedList_getNext(clusterLists);
+    LinkedList slotElement = LinkedList_getNext(slots);
+    while (clusterElement) {
+        if (!slotElement) {
+            fprintf(stderr, "[mms_report_client] whole-device clustering produced %d dataset(s) but this "
+                    "device only has %d RCB instance(s) with no SCL-assigned dataset - %d cluster(s) "
+                    "(part of the device's data) will not be reported this cycle\n",
+                    totalClusters, slotCount, totalClusters - assignedClusters);
+            break;
+        }
+
+        LinkedList clusterMembers = (LinkedList) LinkedList_getData(clusterElement);
+        ReportControlBlockTarget* assignedTarget = (ReportControlBlockTarget*) LinkedList_getData(slotElement);
+
+        int memberCount = LinkedList_size(clusterMembers);
+        char** memberArray = calloc((size_t) memberCount, sizeof(char*));
+        if (memberArray) {
+            int m = 0;
+            for (LinkedList mEl = LinkedList_getNext(clusterMembers); mEl; mEl = LinkedList_getNext(mEl)) {
+                memberArray[m++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(mEl));
+            }
+
+            DynamicDatasetChunkAssignment* assignment = malloc(sizeof(DynamicDatasetChunkAssignment));
+            if (assignment) {
+                assignment->rcbReference = MmsReportClientUtils_safeStringDup(assignedTarget->objectReference);
+                assignment->memberReferences = memberArray;
+                assignment->memberCount = memberCount;
+                LinkedList_add(plan, assignment);
+            } else {
+                for (int f = 0; f < memberCount; f++) free(memberArray[f]);
+                free(memberArray);
+            }
+        }
+
+        assignedClusters++;
+        clusterElement = LinkedList_getNext(clusterElement);
+        slotElement = LinkedList_getNext(slotElement);
+    }
+
+    if (!clusterElement && slotElement) {
+        fprintf(stderr, "[mms_report_client] whole-device clustering produced %d dataset(s) for %d "
+                "available RCB instance(s) - %d instance(s) have nothing left to report (the device's "
+                "own reportable data is already fully covered)\n",
+                totalClusters, slotCount, slotCount - totalClusters);
+    }
+
+    LinkedList clusterCleanup = LinkedList_getNext(clusterLists);
+    while (clusterCleanup) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(clusterCleanup), free);
+        clusterCleanup = LinkedList_getNext(clusterCleanup);
+    }
+    LinkedList_destroyStatic(clusterLists);
+    LinkedList_destroyStatic(slots);
+
     return plan;
 }
 
@@ -1185,17 +1437,109 @@ buildChunkPlan(MmsReportClientHandle handle) {
  * in-flight when the close lands still fails (inherent, unavoidable without
  * deeper library-level synchronization) - this only stops the cascade past
  * that point. */
+/* True if `datasetName` is the resolved dataset name of any entry already in
+ * `cache` - used by cleanupOrphanedDatasets to recognize a discovered
+ * existing dataset that a target already actively claimed/reused this
+ * cycle (via tier 4's own create-or-reuse-on-exists path), as distinct from
+ * one adoptUnclaimedDataset separately tracks in session->claimedDatasetNames. */
+static bool
+cacheContainsDatasetName(LinkedList cache, const char* datasetName) {
+    if (!cache || !datasetName) return false;
+    LinkedList element = LinkedList_getNext(cache);
+    while (element) {
+        DynamicDatasetCacheEntry* entry = (DynamicDatasetCacheEntry*) LinkedList_getData(element);
+        if (entry->datasetName && strcmp(entry->datasetName, datasetName) == 0) return true;
+        element = LinkedList_getNext(element);
+    }
+    return false;
+}
+
+/*
+ * Proactive orphan cleanup, called at the end of every enableAllTargets:
+ * reclaims budget from OUR OWN domain-scoped datasets sitting on the server
+ * but not needed by any target this cycle - the ungraceful-restart gap
+ * MmsReportClientConnection_stop's own cleanup-on-stop can't close on its
+ * own (a killed/crashed daemon never reaches that code path at all - the
+ * real-world scenario that motivated this whole discovery/reuse/cleanup
+ * pass), now closed proactively on every successful connect instead of only
+ * on a graceful one.
+ *
+ * STRICT, conservative safety bar: a discovered name is only ever deleted if
+ * it exactly reconstructs via buildDynamicDatasetName(target->objectReference,
+ * true) for some real buffered Dyn target in handle->targets right now -
+ * never a name that merely looks like it might be ours, and never anything
+ * that doesn't hit this exact bar. A foreign dataset, regardless of origin,
+ * is never deleted here - only ever adopted (see adoptUnclaimedDataset's own
+ * doc comment) - deletion is destructive and must stay limited to datasets
+ * this client can prove it created itself.
+ *
+ * "Not needed this cycle" means the name never got claimed (adopted, or
+ * found-unusable-and-skipped - either way tracked in
+ * session->claimedDatasetNames) and never ended up in session->cache for its
+ * own target's create-or-reuse resolution - i.e. genuinely idle leftover
+ * capacity, not something actively serving a report right now. Best-effort:
+ * a delete failure just leaves the dataset behind, logged, not fatal.
+ */
+static void
+cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* session) {
+    if (!session->existingServerDatasets || !handle->targets) return;
+
+    LinkedList element = LinkedList_getNext(session->existingServerDatasets);
+    while (element) {
+        char* candidate = (char*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+
+        if (stringListContains(session->claimedDatasetNames, candidate)) continue;
+        if (cacheContainsDatasetName(session->cache, candidate)) continue;
+
+        bool isOurs = false;
+        LinkedList targetElement = LinkedList_getNext(handle->targets);
+        while (targetElement) {
+            ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(targetElement);
+            targetElement = LinkedList_getNext(targetElement);
+            if (!target->buffered || !target->objectReference) continue;
+
+            char* expected = buildDynamicDatasetName(target->objectReference, true);
+            bool match = expected && strcmp(expected, candidate) == 0;
+            free(expected);
+            if (match) {
+                isOurs = true;
+                break;
+            }
+        }
+        if (!isOurs) continue;
+
+        IedClientError deleteErr = IED_ERROR_OK;
+        if (IedConnection_deleteDataSet(handle->connection, &deleteErr, candidate)) {
+            fprintf(stderr, "[mms_report_client] cleaned up orphaned dataset '%s' - not needed by any "
+                    "target this cycle, reclaiming budget\n", candidate);
+        } else {
+            fprintf(stderr, "[mms_report_client] could not clean up orphaned dataset '%s': error %d - "
+                    "left behind\n", candidate, deleteErr);
+        }
+    }
+}
+
 static void
 enableAllTargets(MmsReportClientHandle handle) {
     if (!handle->targets) return;
+
+    /* Discovery happens before the session is even built, since its result
+     * feeds the budget's own initial value - see discoverExistingServerDatasets'
+     * and MmsReportClientUseCases_computeInitialDynamicDatasetBudget's own doc
+     * comments. */
+    LinkedList existingServerDatasets = discoverExistingServerDatasets(handle);
 
     /* Fresh per connect cycle, never carried across reconnects - see
      * DynamicDatasetSession's own doc comment. */
     DynamicDatasetSession session = {
         .cache = LinkedList_create(),
-        .remainingBudget = IedModel_getDynDataSetMax(handle->iedModel),
+        .remainingBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(
+                IedModel_getDynDataSetMax(handle->iedModel), LinkedList_size(existingServerDatasets)),
         .budgetExhaustedLogged = false,
-        .chunkAssignments = buildChunkPlan(handle),
+        .chunkAssignments = buildWholeDeviceClusterPlan(handle),
+        .existingServerDatasets = existingServerDatasets,
+        .claimedDatasetNames = LinkedList_create(),
     };
 
     LinkedList element = LinkedList_getNext(handle->targets);
@@ -1204,8 +1548,12 @@ enableAllTargets(MmsReportClientHandle handle) {
         element = LinkedList_getNext(element);
     }
 
+    if (!handle->stopRequested) cleanupOrphanedDatasets(handle, &session);
+
     if (session.cache) LinkedList_destroyDeep(session.cache, destroyDynamicDatasetCacheEntry);
     if (session.chunkAssignments) LinkedList_destroyDeep(session.chunkAssignments, destroyDynamicDatasetChunkAssignment);
+    if (session.existingServerDatasets) LinkedList_destroyDeep(session.existingServerDatasets, free);
+    if (session.claimedDatasetNames) LinkedList_destroyDeep(session.claimedDatasetNames, free);
 }
 
 /* Sleeps in small chunks so MmsReportClientConnection_stop()'s bounded wait

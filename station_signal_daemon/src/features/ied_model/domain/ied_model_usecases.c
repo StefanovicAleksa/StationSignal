@@ -836,6 +836,57 @@ IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle h
     return result;
 }
 
+/* Whole-device counterpart of IedModelUseCases_getReportableAttributeReferencesForLogicalNode -
+ * same FC=ST/MX "every leaf" convention, same "LD/LN$FC$DO$DA" output format,
+ * but walks EVERY LN under EVERY LD in the model (mirrors IedModelUseCases_getReadTargets'
+ * own model.firstChild/sibling walk, ld.firstChild/sibling for LNs, rather than
+ * resolving one caller-supplied lnReference). Used by mms_report_client's
+ * whole-device dynamic-dataset clustering: a "Dyn" RCB's own parent LN does
+ * NOT restrict what a dataset assigned to it can report on (verified: neither
+ * IedConnection_createDataSet's wire format nor this codebase's own
+ * MmsReportClientUseCases_buildWireMemberReferences ties a dataset member to
+ * any particular LN - each member reference is independently addressed), so
+ * the daemon can cover the ENTIRE device's reportable data through however
+ * many spare RCB "slots" exist anywhere in the model, not just the slots that
+ * happen to be parented on the same LN as the data itself. Purely local,
+ * never touches the network. Caller owns the list and its elements
+ * (LinkedList_destroyDeep(list, free)). */
+LinkedList
+IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle handle) {
+    LinkedList result = LinkedList_create();
+    if (!handle || !handle->model) return result;
+
+    ModelNode* ldNode = (ModelNode*) handle->model->firstChild;
+    while (ldNode) {
+        ModelNode* lnNode = ldNode->firstChild;
+        while (lnNode) {
+            /* LogicalDevice.name is only the bare LD instance name (e.g.
+             * "LD1") - the externally-visible "LD/LN" reference needs the IED
+             * name prepended too (or the SCL-declared functional ldName, if
+             * present), which is exactly what ModelNode_getObjectReference
+             * already computes correctly - same call
+             * IedModelUseCases_getReportSubscriptionTargets/
+             * _getGooseSubscriptionTargets already use for a parent LN node,
+             * reused here rather than re-deriving the IED-name-prefixing rule
+             * by hand. */
+            char* lnRef = ModelNode_getObjectReference(lnNode, NULL);
+            if (lnRef) {
+                char* slash = strchr(lnRef, '/');
+                if (slash) {
+                    *slash = '\0';
+                    collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_ST, lnRef, slash + 1, result);
+                    collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_MX, lnRef, slash + 1, result);
+                }
+                free(lnRef);
+            }
+            lnNode = lnNode->sibling;
+        }
+        ldNode = ldNode->sibling;
+    }
+
+    return result;
+}
+
 int
 IedModelUseCases_getDynDataSetMax(IedModelHandle handle) {
     return handle ? handle->dynDataSetMax : -1;

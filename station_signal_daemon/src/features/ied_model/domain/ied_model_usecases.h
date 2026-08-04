@@ -66,6 +66,15 @@
  * NULL or doesn't resolve. Caller owns the list and its elements
  * (LinkedList_destroyDeep(list, free)).
  *
+ * getReportableAttributeReferencesForWholeDevice: same FC=ST/MX "every leaf"
+ * convention and output format as getReportableAttributeReferencesForLogicalNode,
+ * but walks every LN under every LD in the model instead of one caller-supplied
+ * LN - used by mms_report_client's whole-device dynamic-dataset clustering,
+ * since a "Dyn" RCB's own parent LN does not restrict what a dataset assigned
+ * to it can report on (a dataset's members are independently addressed, not
+ * tied to the RCB's LN). Purely local, never touches the network. Caller owns
+ * the list and its elements (LinkedList_destroyDeep(list, free)).
+ *
  * getDataSetMemberLeafWireTypes: index-aligned with
  * getDataSetMemberLeafReferences's own result list for the same
  * (datasetReference, memberIndex) - same decomposition rules, same
@@ -90,6 +99,7 @@ LinkedList IedModelUseCases_getDataSetMemberLeafWireTypes(IedModelHandle handle,
         int memberIndex);
 LinkedList IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle,
         const char* lnReference);
+LinkedList IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle handle);
 
 /* SCL's <Services><DynDataSet max="N" maxAttributes="M"/> for this IED. -1 if
  * not declared (see sIedModelHandle's own field doc comment); NULL handle
