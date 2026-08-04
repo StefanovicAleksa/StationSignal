@@ -131,19 +131,18 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
         /* record->entryCount > 0: survived this target's own per-position
          * value-diff filter. shouldForwardRecent is the second, independent
          * gate: even a frame that's genuinely new/changed AS FAR AS THIS
-         * TARGET IS CONCERNED can still be an exact duplicate (same content
-         * AND same wire timestamp) of something recently forwarded - either
-         * a DIFFERENT GoCB publishing the same underlying event, or this
-         * SAME target re-forwarding an already-delivered event - see
-         * GooseSubscriberRecentForwardCache's own doc comment. */
+         * TARGET IS CONCERNED can still be an exact content duplicate of
+         * something a DIFFERENT GoCB recently forwarded for the same
+         * underlying event - see GooseSubscriberRecentForwardCache's own
+         * doc comment. */
         if (record->entryCount > 0 && GooseSubscriberUseCases_shouldForwardRecent(
-                &handle->recentForwardCache, record->goCbRef, record->timestampMs,
+                &handle->recentForwardCache, record->goCbRef,
                 record->entries, record->entryCount)) {
             handle->recordCallback(handle->recordCallbackParam, record);
         } else {
             if (record->entryCount > 0) {
                 fprintf(stderr, "[goose_subscriber] report for '%s' (%d entr%s) dropped by recent-forward "
-                        "dedup - identical content+timestamp already forwarded\n",
+                        "dedup - identical content already forwarded from another GoCB\n",
                         record->goCbRef ? record->goCbRef : "?", record->entryCount,
                         record->entryCount == 1 ? "y" : "ies");
             }

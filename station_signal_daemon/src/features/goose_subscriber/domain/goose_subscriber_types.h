@@ -281,31 +281,34 @@ typedef struct {
 } GooseSubscriberDedupEntry;
 
 /*
- * Recent-forward duplicate-content suppression - originated as the GOOSE
- * equivalent of mms_report_client's MmsReportClientCrossRcbDedupCache (see
- * its own doc comment for that rationale), then widened past a single slot
- * for two reasons found in production:
+ * Cross-target duplicate-content suppression - the GOOSE equivalent of
+ * mms_report_client's MmsReportClientCrossRcbDedupCache (see its own doc
+ * comment for the full rationale: some real networks configure multiple
+ * GoCBs across independent LNs that publish the exact same underlying
+ * event, mirroring the MMS redundant-RCB pattern - each target's own
+ * per-position filter starts independent, so both frames would otherwise
+ * survive their own filter and reach the websocket as apparent duplicates).
+ * A candidate is a duplicate - and suppressed - only if its (reference,
+ * value) content exactly matches a slot in this history AND its goCbRef
+ * differs from the one that produced that slot; a repeat from the SAME
+ * goCbRef is left entirely to that target's own per-position filter, same
+ * as MMS leaves same-RCB repeats to its own per-RCB filter. Deliberately
+ * content-only, no timestamp involved (an earlier revision required an
+ * exact match on GOOSE's `t` field too, on the theory that independent
+ * GoCBs republishing "the same" event would carry the same `t` - real
+ * hardware disproved that: two independent publishers stamp their own `t`
+ * independently and can differ by more than 0ms even for the same
+ * underlying change, so requiring an exact match silently let real
+ * cross-GoCB duplicates back through).
  *
- * (1) Some real networks configure multiple GoCBs across independent LNs
- *     that publish the exact same underlying event (mirroring the MMS
- *     redundant-RCB pattern) - each target's own per-position filter starts
- *     independent, so both frames would otherwise survive their own filter
- *     and reach the websocket as apparent duplicates. A single "last
- *     forwarded, from any target" slot (the original design) catches this
- *     only when nothing else is forwarded in between - GOOSE, unlike MMS,
- *     typically has many GoCBs streaming concurrently on one IED, so an
- *     unrelated target's frame landing between the two duplicates routinely
- *     clobbers the one slot before the real duplicate arrives. This struct
- *     is instead a small bounded ring of the most recently forwarded
- *     records (any target), so a duplicate is still caught even with
- *     unrelated traffic interleaved.
- * (2) Defense-in-depth against an unreproducible bug where the SAME target
- *     appears to re-forward an already-delivered event. GOOSE's `t` field
- *     (timestampMs below) is always present and, per spec, only changes on
- *     a real dataset-member change - so requiring both content AND
- *     timestampMs to match (see GooseSubscriberUseCases_shouldForwardRecent)
- *     safely catches a same-target repeat of literally the same wire event,
- *     without needing to know *why* it repeated.
+ * A single "last forwarded, from any target" slot (the original design,
+ * mirroring MMS's) only catches this when nothing else is forwarded in
+ * between - GOOSE, unlike MMS, typically has many GoCBs streaming
+ * concurrently on one IED, so an unrelated target's frame landing between
+ * two duplicates routinely clobbers the one slot before the real duplicate
+ * arrives. This struct is instead a small bounded ring of the most
+ * recently forwarded records (any target), so a duplicate is still caught
+ * even with unrelated traffic interleaved.
  *
  * Not to be confused with GooseSubscriberMemberRefCache's per-target
  * value-diff cache, which only ever compares a frame against that SAME
@@ -313,7 +316,6 @@ typedef struct {
  */
 typedef struct {
     char* goCbRef;                        /* owned; NULL means an empty slot */
-    uint64_t timestampMs;                 /* this record's GOOSE `t` field */
     GooseSubscriberDedupEntry* entries;   /* owned array of entryCount owned entries */
     int entryCount;
 } GooseSubscriberRecentForwardRecord;

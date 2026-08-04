@@ -706,7 +706,6 @@ static void
 freeRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot) {
     free(slot->goCbRef);
     slot->goCbRef = NULL;
-    slot->timestampMs = 0;
 
     for (int i = 0; i < slot->entryCount; i++) {
         free(slot->entries[i].reference);
@@ -748,9 +747,8 @@ crossTargetEntriesEqual(const GooseSubscriberDedupEntry* cached, int cachedCount
 
 static void
 fillRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot,
-        const char* goCbRef, uint64_t timestampMs, const GooseSubscriberEntry* entries, int entryCount) {
+        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
     slot->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
-    slot->timestampMs = timestampMs;
     slot->entries = NULL;
     slot->entryCount = 0;
     if (entryCount <= 0) return;
@@ -768,12 +766,13 @@ fillRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot,
 
 bool
 GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
-        const char* goCbRef, uint64_t timestampMs, const GooseSubscriberEntry* entries, int entryCount) {
+        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
     if (!cache) return true;
 
     for (int i = 0; i < cache->count; i++) {
         GooseSubscriberRecentForwardRecord* slot = &cache->history[i];
-        if (slot->timestampMs == timestampMs
+        bool sameSource = slot->goCbRef && goCbRef && strcmp(slot->goCbRef, goCbRef) == 0;
+        if (!sameSource
                 && crossTargetEntriesEqual(slot->entries, slot->entryCount, entries, entryCount)) {
             return false;
         }
@@ -783,7 +782,7 @@ GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* c
     if (cache->count == GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) {
         freeRecentForwardSlot(writeSlot);
     }
-    fillRecentForwardSlot(writeSlot, goCbRef, timestampMs, entries, entryCount);
+    fillRecentForwardSlot(writeSlot, goCbRef, entries, entryCount);
 
     cache->nextSlot = (cache->nextSlot + 1) % GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY;
     if (cache->count < GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) cache->count++;

@@ -118,27 +118,25 @@ uint32_t
 GooseSubscriberUseCases_computeLivenessPollIntervalMs(uint32_t configuredMs, int32_t minTalMs);
 
 /*
- * Recent-forward duplicate-content suppression - see
+ * Cross-target duplicate-content suppression - see
  * GooseSubscriberRecentForwardCache's own doc comment for the full
- * rationale (independent GoCBs publishing the same underlying event, plus
- * same-target defense-in-depth). Compares (goCbRef, timestampMs,
- * entries[0..entryCount)) against every filled slot in cache's history: if
- * any slot's timestampMs matches exactly AND every (reference, value) pair
- * matches positionally, this is a duplicate - returns false (do not
- * forward), leaving the history untouched. Otherwise (nothing cached yet,
- * or genuinely different content/timestamp) returns true and appends this
- * call's (goCbRef, timestampMs, entries) to the ring (overwriting the
- * oldest slot once full) - so a suppressed duplicate never disturbs
- * established history, but every other case extends it. goCbRef is not
- * required to differ from the slot it matches - a same-target repeat with
- * identical content AND identical wire timestamp is exactly the
- * defense-in-depth case this now also catches. NULL-safe on cache (returns
- * true, i.e. always forward, if cache is NULL).
+ * rationale (independent GoCBs publishing the same underlying event).
+ * Compares (goCbRef, entries[0..entryCount)) against every filled slot in
+ * cache's history: if any slot's goCbRef differs from this call's AND every
+ * (reference, value) pair matches positionally, this is a duplicate -
+ * returns false (do not forward), leaving the history untouched. Otherwise
+ * (nothing cached yet, every match was from the SAME goCbRef, or genuinely
+ * different content) returns true and appends this call's (goCbRef,
+ * entries) to the ring (overwriting the oldest slot once full) - so a
+ * suppressed duplicate never disturbs established history, but every other
+ * case extends it. Deliberately content-only, no timestamp - see the cache
+ * struct's own doc comment for why an earlier timestamp-gated revision let
+ * real duplicates through. NULL-safe on cache (returns true, i.e. always
+ * forward, if cache is NULL).
  */
 bool
 GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
-        const char* goCbRef, uint64_t timestampMs,
-        const GooseSubscriberEntry* entries, int entryCount);
+        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount);
 
 /* Frees every filled slot's owned goCbRef/entries and resets the cache back
  * to empty ("nothing forwarded yet"). NULL-safe. Used both internally by

@@ -1102,3 +1102,29 @@ deferred — `reporter1.cid` is shared across several other suites (`mms_report_
 `scl_bootstrap`, `orchestration`, `control_dispatcher`, `device_manager`), so editing it carried
 more risk than the unit-level proof justified here; the existing 2-GoCB E2E case and the full
 `run_all_tests.sh` suite were both re-verified passing unchanged.
+
+**Follow-up, same day: the `timestampMs` requirement above was wrong and reverted.** Deployed
+against the same real device, the exact original symptom (two GoCBs, `Control_DataSet`/
+`Control_DataSet1`, both showing the same `stVal` change) was still reaching the frontend
+unsuppressed. Root cause: the fix above required a candidate's `timestampMs` to exactly match a
+history slot's before treating it as a duplicate, on the theory that two GoCBs republishing "the
+same" event would carry the same GOOSE `t`. Real hardware disproved that — two independent
+publishers evidently stamp their own `t` independently and can differ by more than 0ms even for
+the literal same underlying change, so the exact-match requirement let the real cross-GoCB
+duplicate straight through, defeating the whole point of the widened history. Reverted to
+content-only comparison (`crossTargetEntriesEqual`, no timestamp), restoring the original
+`goCbRef` must differ requirement mms_report_client's own `MmsReportClientCrossRcbDedupCache` has
+always used — i.e. `GooseSubscriberUseCases_shouldForwardRecent` is now a straight mirror of
+`MmsReportClientUseCases_shouldForwardAcrossRcb`'s semantics, just applied against a multi-slot
+history instead of MMS's single slot (still needed — GOOSE's much higher concurrent-GoCB traffic
+is what motivated widening past a single slot in the first place, and that part of the fix was
+never in question). `timestampMs` was removed from `GooseSubscriberRecentForwardRecord` and from
+`shouldForwardRecent`'s signature entirely, rather than left unused — the same-target
+defense-in-depth angle it was meant to buy (for the separate, still-unreproduced GOOSE "storm"
+report) goes with it; no working mechanism for that one exists as of this entry. Tests updated to
+match: `test_shouldForwardRecent_sameTargetIdenticalContent_isStillForwarded` (the timestamp
+variant of this case was removed, restoring the plain same-GoCB-always-forwarded assertion
+mms_report_client's own suite already makes) and
+`test_shouldForwardRecent_differentTargetIdenticalContent_isSuppressed` (timestamp arguments
+dropped) cover the corrected behavior; the interleaved-third-GoCB regression test from earlier
+today needed no behavioral change, only its call sites updated for the new signature.
