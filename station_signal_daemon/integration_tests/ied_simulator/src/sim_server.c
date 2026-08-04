@@ -207,6 +207,36 @@ buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal, D
             RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION | RPT_OPT_ENTRY_ID,
             0, 0);
 
+    /* Reproduces the real-device finding behind mms_report_client's own
+     * proactive TrgOps.dchg/qchg fix (mms_report_client_connection.c,
+     * enableOneTarget): a real device (via OMICRON IED Scout's "Simulate
+     * IED" feature) was found with an RCB's own TrgOps carrying ONLY General
+     * Interrogation - dchg/qchg/dupd/integrity all false - meaning it would
+     * NEVER generate a report on an actual data or quality change, only the
+     * one-time GI snapshot on enable (itself invisible to the frontend via
+     * this feature's own bootstrap-suppression). TrgOps here is
+     * DELIBERATELY just TRG_OPT_GI - proves the daemon now proactively ORs
+     * dchg/qchg in on enable rather than trusting the device's own (here,
+     * deliberately insufficient) configuration.
+     *
+     * datSet="ds3" deliberately does NOT exist yet at server startup - unlike
+     * ds1/ds2 (created once, always present, and therefore visible to EVERY
+     * test's own tier-3 adoption scan under this same LD - a real collision
+     * discovered when ds3 was first added directly here, silently stealing
+     * OTHER tests' expected tier-4 self-create slots). Only
+     * test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix creates
+     * ds3 itself, via its own side-channel connection, before ever starting
+     * the daemon client - so ds3 exists ONLY within that one test's own
+     * SimServer instance, never affecting any other test. Only
+     * mms_report_client's own fixture SCL (reporter1.cid) declares a
+     * matching <ReportControl>, so no other E2E test that links this same
+     * sim_server.c ever attempts to enable this RCB either - same convention
+     * as brcbDup/urcbDyn above. */
+    ReportControlBlock_create("urcbGiOnly", ln0, "urcbGiOnly", false, "ds3", 1,
+            TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
+            0, 0);
+
     /* GSEControlBlock over the same ds1 dataset - lets goose_subscriber's E2E
      * test observe the same GGIO1.Ind1.stVal flip that mms_report_client's
      * E2E test observes via reporting. minTime=10/maxTime=5000 mirror

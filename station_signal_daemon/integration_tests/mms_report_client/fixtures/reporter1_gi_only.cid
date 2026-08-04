@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="reporter1-gi-only-fixture" nameStructure="IEDName" />
+
+  <!-- Variant of reporter1.cid declaring "urcbGiOnly" - a STATIC (real
+       datSet, not Dyn) RCB whose live TrgOps (set server-side in
+       sim_server.c's own buildModel, not derivable from SCL) is
+       deliberately just TRG_OPT_GI, reproducing the real-device finding
+       behind mms_report_client's own proactive TrgOps.dchg/qchg fix
+       (mms_report_client_connection.c's enableOneTarget - see that block's
+       own doc comment): a real device (via OMICRON IED Scout's "Simulate
+       IED" feature) was found with an RCB configured to only ever send its
+       one-time GI snapshot, never a report on an actual data/quality
+       change, silently invisible end-to-end since nothing was even sent to
+       log. -->
+
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="Reporter1" apName="AP1">
+        <GSE ldInst="LD1" cbName="gcbInd">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-01</P>
+            <P type="APPID">1000</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <IED name="Reporter1">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="LD1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="ds3" desc="SPCSO1 stVal-only dataset">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="SPCSO1" daName="stVal" />
+            </DataSet>
+            <!-- TrgOps here is documentation only - mms_report_client never
+                 reads or relies on SCL-declared TrgOps (see this fixture's
+                 own header comment); the live server-side TrgOps that
+                 actually matters is set directly in sim_server.c's own
+                 ReportControlBlock_create call for urcbGiOnly (TRG_OPT_GI
+                 only), independent of what's written here. -->
+            <ReportControl name="urcbGiOnly" rptID="urcbGiOnly" datSet="ds3" confRev="1" buffered="false"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="false" qchg="false" gi="true" />
+              <OptFields seqNum="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+          </LN0>
+          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="">
+          </LN>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+      <DO name="Health" type="ENS1" />
+      <DO name="NamPlt" type="LPL1" />
+    </LNodeType>
+
+    <LNodeType id="GGIOType" lnClass="GGIO">
+      <DO name="Ind1" type="SPS1" />
+      <DO name="SPCSO1" type="SPC1" />
+    </LNodeType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="Enum" type="HealthKind" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="LPL1" cdc="LPL">
+      <DA name="vendor" bType="VisString255" fc="DC" />
+      <DA name="swRev" bType="VisString255" fc="DC" />
+    </DOType>
+
+    <DOType id="SPS1" cdc="SPS">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="SPC1" cdc="SPC">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="Oper" bType="Struct" type="OperSPS" fc="CO" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DAType id="OperSPS">
+      <BDA name="ctlVal" bType="BOOLEAN" />
+    </DAType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+
+    <EnumType id="HealthKind">
+      <EnumVal ord="1">Ok</EnumVal>
+      <EnumVal ord="2">Warning</EnumVal>
+      <EnumVal ord="3">Alarm</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

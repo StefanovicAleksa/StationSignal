@@ -1155,6 +1155,46 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         }
     }
 
+    /* Proactively OR in TrgOps.dchg/qchg/gi for every RCB, rather than
+     * relying on however the device happens to already be configured - a
+     * real device (via OMICRON IED Scout's "Simulate IED" feature, standing
+     * in for this device's real engineering export) was found with TrgOps
+     * carrying ONLY General Interrogation (dchg/qchg/dupd/integrity all
+     * false), meaning it would NEVER generate a report on an actual data or
+     * quality change - only the one-time GI snapshot on enable, which this
+     * feature's own bootstrap-suppression correctly never forwards anyway.
+     * Every subsequent value change on such an RCB was therefore silently
+     * invisible, with nothing to log on either side - the server genuinely
+     * never sends anything, so there is nothing for this feature's own
+     * reporting/filtering logic to even see, let alone drop.
+     *
+     * ORs TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI into
+     * whatever TrgOps bits the device already has configured (read via
+     * ClientReportControlBlock_getTrgOps, which reflects the device's own
+     * current config since `rcb` was just populated from a real
+     * IedConnection_getRCBValues call above) - never clobbers the rest, same
+     * minimal-footprint posture as OptFlds.EntryID above. GI is included
+     * here too since this feature's own GI request (RCB_ELEMENT_GI below)
+     * depends on TrgOps.gi being enabled server-side to be honored at all,
+     * per IEC 61850 - without it, even the bootstrap snapshot this feature
+     * already relies on could be silently ignored by a spec-compliant
+     * server. Deliberately does NOT touch TRG_OPT_DATA_UPDATE or
+     * TRG_OPT_INTEGRITY: integrity is a periodic/timer-based trigger, and
+     * this feature is deliberately, strictly event-driven (see
+     * CHANGELOG.md) - enabling it would reintroduce exactly the kind of
+     * "periodic traffic that looks like an event" problem the value-diff
+     * cache exists to filter out, not something worth manufacturing on
+     * purpose. Only writes it back (and only then adds RCB_ELEMENT_TRG_OPS
+     * to the mask) if at least one of these bits isn't already set, to
+     * avoid touching this attribute on every single reconnect once the
+     * device has accepted it once - same reasoning as OptFlds.EntryID. */
+    int currentTrgOps = ClientReportControlBlock_getTrgOps(rcb);
+    int neededTrgOps = TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI;
+    if ((currentTrgOps & neededTrgOps) != neededTrgOps) {
+        ClientReportControlBlock_setTrgOps(rcb, currentTrgOps | neededTrgOps);
+        mask |= RCB_ELEMENT_TRG_OPS;
+    }
+
     /* DatSet must be (re-)set explicitly on enable - relying on a
      * server-side default dataset (configured only via ReportControlBlock_create's
      * dataSetName at server build time) is fragile: libiec61850's own
@@ -1317,9 +1357,10 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * snapshot lands against the still-all-NULL cache and is silently
      * bootstrap-seeded (see shouldForwardAndUpdateCache's own doc comment).
      * `reason` is still never trusted for filtering (see
-     * shouldForwardAndUpdateCache's own doc comment). TRG_OPS/BUF_TM/
-     * INTG_PD/CONF_REV are still never touched - those stay exactly as the
-     * IED's own SCL config already has them. */
+     * shouldForwardAndUpdateCache's own doc comment). TrgOps.dchg/qchg/gi are
+     * now proactively OR'd in above (see that block's own doc comment) -
+     * BUF_TM/INTG_PD/CONF_REV, and TrgOps.dupd/integrity specifically, are
+     * still never touched, staying exactly as the IED's own config has them. */
     bool requestGi = MmsReportClientUseCases_shouldRequestGiOnEnable(target->buffered, hasResumableEntryId);
     if (requestGi) {
         ClientReportControlBlock_setGI(rcb, true);

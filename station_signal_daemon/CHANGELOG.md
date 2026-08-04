@@ -846,6 +846,59 @@ so the test's "genuinely unclaimed leftover gets cleaned up" scenario now needs 
 via a *different*, live-preassigned dataset (tier 2) first, so its own leftover is never even
 looked at and stays genuinely orphaned.
 
+## RCBs with a device-configured `TrgOps` of "GI only" never generated a report at all
+
+A follow-on user report against the same device (via OMICRON IED Scout's "Simulate IED" feature)
+showed a value change producing absolutely nothing — no report, no forward, not even a log line on
+either side. Every fix in the section above assumed a dataset was correctly assigned and the RCB
+was enabled and receiving reports that just weren't being *forwarded* correctly; this was a
+different failure entirely, one level further back: the RCB was never generating a report to
+receive in the first place.
+
+This feature's own documented policy — never write `TrgOps`, trust whatever the device/SCL already
+has configured — was found to fail exactly for the RCB slots whole-device clustering exists to
+repurpose (spare/reserved instances that were never originally engineered for change-reporting).
+Checked directly in IED Scout: the live RCB's `TrgOps` carried `General Interrogation` only,
+`Data Change`/`Quality Change`/`Data Update`/`Integrity` all false. A device configured this way
+will *never* volunteer a report on a value change — GI only fires once, on explicit client request
+at enable time, and that one snapshot is exactly the "first observation" bootstrap-suppression
+already hides from the frontend. Since this feature never touched `TrgOps`, no amount of dataset/
+value-diff-cache correctness downstream could ever matter — there was nothing arriving to filter.
+
+Fixed by reversing the "never write `TrgOps`" policy, narrowly: `enableOneTarget`
+(`mms_report_client_connection.c`) now proactively ORs `TRG_OPT_DATA_CHANGED |
+TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI` into whatever `TrgOps` bits the device already has configured
+(read via `ClientReportControlBlock_getTrgOps`, since `rcb` was just populated from a real
+`getRCBValues` call), never clearing anything already set — mirrors the exact minimal-footprint,
+read-modify-write-only-if-needed pattern the `OptFlds.EntryID` OR already uses just above it in the
+same function (only writes back, and only adds `RCB_ELEMENT_TRG_OPS` to the mask, if at least one
+needed bit is missing — avoids touching this attribute on every reconnect once a device has
+accepted it once). `GI` is included in the OR specifically because this feature's own GI request
+(`RCB_ELEMENT_GI`, set unconditionally or conditionally per `MmsReportClientUseCases_shouldRequestGiOnEnable`)
+depends on `TrgOps.gi` being enabled server-side to be honored at all, per IEC 61850 — without it,
+even the bootstrap snapshot this feature already relies on could be silently ignored by a
+spec-compliant server. Deliberately does **not** OR in `TRG_OPT_DATA_UPDATE` or `TRG_OPT_INTEGRITY`:
+integrity is a periodic/timer-based trigger, and this feature is deliberately, strictly
+event-driven (see the "Both reporting workers were made strictly event-driven" entry above) —
+enabling it on the client's own initiative would manufacture exactly the "periodic traffic that
+looks like an event" problem the value-diff cache exists to filter out, not fix anything.
+
+Proven end-to-end in `integration_tests/mms_report_client/`: a new RCB, `urcbGiOnly`
+(`sim_server.c`, inert everywhere except its own dedicated fixture,
+`fixtures/reporter1_gi_only.cid` — same "only a fixture that declares it client-side ever enables
+it" convention as `brcbDyn2`), is configured server-side with `TrgOps = TRG_OPT_GI` only, over a
+dataset (`ds3`) created by the test itself via a side-channel connection rather than baked into the
+shared model — an earlier version of this fix baked `ds3` directly into the always-on shared
+`buildModel()`, which silently broke three unrelated tests by handing their own Dyn RCBs an
+unexpected, already-existing, adoptable dataset via tier 3 instead of the whole-LN dataset they
+expected to self-create; scoping `ds3`'s creation to only the one test that needs it (mirroring
+`test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched`'s own side-channel
+pattern) fixed this without touching any other test.
+(`test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`) proves a value flip on this
+GI-only-configured RCB now reaches the callback with a real `previousValue` — confirmed by
+reverting the fix and observing this exact assertion fail, then restoring it and observing it pass
+again, with every other test in the suite unaffected either way.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

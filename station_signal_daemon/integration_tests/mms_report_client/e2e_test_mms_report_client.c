@@ -66,8 +66,10 @@
 #define TEST_PORT_BUFFERED_DYNAMIC_DATASET 10217
 #define TEST_PORT_ORPHAN_CLEANUP 10218
 #define TEST_PORT_SIBLING_BUFFERED 10219
+#define TEST_PORT_GI_ONLY 10220
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
+#define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
 
@@ -1016,6 +1018,102 @@ test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset(
 }
 
 /*
+ * Regression test for mms_report_client's proactive TrgOps.dchg/qchg/gi fix
+ * (mms_report_client_connection.c's enableOneTarget) - confirmed by actually
+ * reverting the fix (restoring the plain getRCBValues-only enable, no
+ * TrgOps write) and observing this exact assertion fail (report never
+ * arrives at all), then restoring the fix and observing it pass again.
+ *
+ * urcbGiOnly's live TrgOps (set server-side in sim_server.c's own
+ * ReportControlBlock_create call, NOT derivable from SCL) is deliberately
+ * just TRG_OPT_GI - reproducing the real-device finding (via OMICRON IED
+ * Scout's "Simulate IED" feature) that motivated this fix: an RCB configured
+ * this way will send its one-time GI snapshot on enable (correctly
+ * bootstrap-suppressed, same as every other RCB in this suite) and then
+ * NEVER send anything else, no matter what changes - not a client-side
+ * filtering problem, the server genuinely never generates the report at
+ * all, so previously there was nothing for this feature's own reporting/
+ * logging to even see.
+ *
+ * Pre-fix, enableOneTarget only ever read the RCB's own current TrgOps to
+ * decide nothing - it never wrote TrgOps back, so urcbGiOnly's server-side
+ * dchg/qchg would stay off forever, and a flip after enable would never
+ * produce a report. Post-fix, enableOneTarget ORs TRG_OPT_DATA_CHANGED |
+ * TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI into whatever TrgOps the device
+ * already has (never clearing anything already on) and writes it back if
+ * any bit was missing - so this same RCB now genuinely reports the flip.
+ */
+void
+test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_GI_ONLY);
+
+    /* urcbGiOnly's datSet="ds3" deliberately doesn't exist on a fresh
+     * SimServer instance (see sim_server.c's own comment on why ds3 isn't
+     * created in buildModel itself) - create it here, scoped to this test's
+     * own SimServer instance only, before the daemon's own client ever
+     * connects. */
+    IedConnection sideConn = IedConnection_create();
+    IedClientError sideErr = IED_ERROR_OK;
+    IedConnection_connect(sideConn, &sideErr, "127.0.0.1", TEST_PORT_GI_ONLY);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, sideErr, "expected the side-channel connection to associate");
+
+    LinkedList ds3Members = LinkedList_create();
+    LinkedList_add(ds3Members, (void*) "Reporter1LD1/GGIO1.SPCSO1.stVal[ST]");
+    IedConnection_createDataSet(sideConn, &sideErr, "Reporter1LD1/LLN0$ds3", ds3Members);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, sideErr, "expected ds3 to be created");
+    LinkedList_destroyStatic(ds3Members);
+
+    IedConnection_close(sideConn);
+    IedConnection_destroy(sideConn);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH_GI_ONLY, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_gi_only.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_GI_ONLY,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled), "expected urcbGiOnly to enable successfully");
+
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "urcbGiOnly's GI snapshot must never reach the callback - it silently seeds the cache instead");
+
+    /* The actual end-user-visible symptom this fix addresses: a real value
+     * change must reach the callback even though the server's own TrgOps
+     * was configured with only GI - if the daemon never proactively OR'd in
+     * dchg/qchg, this flip would never even be sent by the server, let alone
+     * reach this callback. */
+    SimServer_setSpcso1Indication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
+            "expected a report after flipping SPCSO1.stVal on a GI-only-configured RCB - if the daemon "
+            "never proactively enabled TrgOps.dchg/qchg (the fixed bug), the server would never generate "
+            "this report at all, exactly like the originally reported symptom");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0.RP.urcbGiOnly", lastRcbReference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$stVal", lastEntry0Reference);
+    TEST_ASSERT_TRUE_MESSAGE(lastEntry0HasPreviousValue, "expected a real previousValue on this ordinary change");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
  * Proves tier 2 of the three-tier static -> pull live -> self-create dataset
  * resolution order (mms_report_client_connection.c's enableOneTarget/
  * pullLiveDataset): a dataset already assigned to urcbDyn's DatSet attribute
@@ -1831,6 +1929,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect);
     RUN_TEST(test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched);
     RUN_TEST(test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset);
+    RUN_TEST(test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix);
     RUN_TEST(test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);

@@ -198,9 +198,24 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   **Enable behavior**: every enable sets `RptEna`, `DatSet` (always explicitly re-asserted, never
   a server-side default), and (with one exception, next paragraph) `GI` purely to force a
   deterministic snapshot — never trusted/forwarded on its own merits, it lands on the same
-  bootstrap-suppression path any first observation would. `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are
-  left untouched. A buffered RCB also gets `RPT_OPT_ENTRY_ID` OR'd into its OptFlds if not already
-  set (for EntryID resumption below).
+  bootstrap-suppression path any first observation would. `BufTm`/`IntgPd`/`ConfRev` are left
+  untouched. A buffered RCB also gets `RPT_OPT_ENTRY_ID` OR'd into its OptFlds if not already set
+  (for EntryID resumption below).
+  **`TrgOps.dchg`/`qchg`/`gi` are proactively OR'd into every RCB's own current TrgOps on every
+  enable** (never clearing anything already set) — a real device (via OMICRON IED Scout's
+  "Simulate IED" feature) was found with an RCB's live TrgOps carrying ONLY General Interrogation,
+  meaning it would never generate a report on an actual data/quality change, only the one-time GI
+  snapshot on enable (itself invisible to the frontend via bootstrap-suppression) — every
+  subsequent value change on such an RCB was silently invisible end-to-end, with nothing to log on
+  either side, since the server genuinely never sends anything to see. GI is included in the OR
+  because this feature's own GI request below depends on it being enabled server-side to be honored
+  at all, per IEC 61850. Deliberately does **not** touch `TrgOps.dupd`/`integrity` — integrity is a
+  periodic/timer-based trigger, and this feature is deliberately, strictly event-driven; enabling it
+  would reintroduce exactly the "periodic traffic that looks like an event" problem the value-diff
+  cache exists to filter out. Only written back if at least one needed bit is missing, to avoid
+  touching this attribute on every single reconnect once a device has accepted it once — same
+  minimal-footprint posture as the OptFlds.EntryID OR below. `BufTm`/`IntgPd`/`ConfRev` are still
+  left untouched.
   **GI is skipped on a buffered RCB's (re)enable whenever it has a valid EntryID to resume from**
   (`MmsReportClientUseCases_shouldRequestGiOnEnable`) — a real device was found enqueuing its own
   GI response as a brand-new entry in that RCB's buffered backlog (fresh, ever-increasing EntryID,
