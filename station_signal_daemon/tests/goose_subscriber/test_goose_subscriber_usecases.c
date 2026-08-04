@@ -1093,10 +1093,10 @@ test_isDuplicateValue_typeMismatch_isNotDuplicate(void) {
     MmsValue_delete(newValue);
 }
 
-/* ---- shouldForwardAcrossTarget (cross-target duplicate-content suppression) ---- */
+/* ---- shouldForwardRecent (recent-forward duplicate-content suppression) ---- */
 
 static GooseSubscriberEntry*
-makeCrossTargetDedupEntries(const char* ref0, bool val0, const char* ref1, bool val1) {
+makeRecentForwardEntries(const char* ref0, bool val0, const char* ref1, bool val1) {
     GooseSubscriberEntry* entries = calloc(2, sizeof(GooseSubscriberEntry));
     entries[0].reference = strdup(ref0);
     entries[0].value = MmsValue_newBoolean(val0);
@@ -1106,7 +1106,7 @@ makeCrossTargetDedupEntries(const char* ref0, bool val0, const char* ref1, bool 
 }
 
 static void
-freeCrossTargetDedupEntries(GooseSubscriberEntry* entries, int count) {
+freeRecentForwardEntries(GooseSubscriberEntry* entries, int count) {
     for (int i = 0; i < count; i++) {
         free(entries[i].reference);
         if (entries[i].value) MmsValue_delete(entries[i].value);
@@ -1115,116 +1115,175 @@ freeCrossTargetDedupEntries(GooseSubscriberEntry* entries, int count) {
 }
 
 void
-test_shouldForwardAcrossTarget_firstEverContent_isForwarded_andSeedsCache(void) {
-    GooseSubscriberCrossTargetDedupCache cache = { 0 };
-    GooseSubscriberEntry* entries = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_firstEverContent_isForwarded_andSeedsCache(void) {
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entries = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
 
-    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries, 2);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries, 2);
 
     TEST_ASSERT_TRUE_MESSAGE(result, "nothing cached yet - must always forward");
-    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbA", cache.goCbRef);
-    TEST_ASSERT_EQUAL_INT(2, cache.entryCount);
+    TEST_ASSERT_EQUAL_INT(1, cache.count);
+    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbA", cache.history[0].goCbRef);
+    TEST_ASSERT_EQUAL_UINT64(1000, cache.history[0].timestampMs);
+    TEST_ASSERT_EQUAL_INT(2, cache.history[0].entryCount);
 
-    freeCrossTargetDedupEntries(entries, 2);
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+    freeRecentForwardEntries(entries, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_shouldForwardAcrossTarget_sameTargetIdenticalContent_isStillForwarded(void) {
-    /* A repeat from the SAME GoCB is this stage's non-concern - that
-     * target's own per-position filter already decided to forward it. */
-    GooseSubscriberCrossTargetDedupCache cache = { 0 };
-    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_sameTargetSameContentDifferentTimestamp_isStillForwarded(void) {
+    /* A genuinely later real event (different wire `t`) from the SAME GoCB,
+     * even with identical content, must still be forwarded - only an exact
+     * (content, timestamp) match is a duplicate. */
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries1, 2));
 
-    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+    GooseSubscriberEntry* entries2 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries2, 2);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 2000, entries2, 2);
 
     TEST_ASSERT_TRUE(result);
 
-    freeCrossTargetDedupEntries(entries1, 2);
-    freeCrossTargetDedupEntries(entries2, 2);
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+    freeRecentForwardEntries(entries1, 2);
+    freeRecentForwardEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_shouldForwardAcrossTarget_differentTargetIdenticalContent_isSuppressed(void) {
-    GooseSubscriberCrossTargetDedupCache cache = { 0 };
-    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_sameTargetIdenticalContentAndTimestamp_isSuppressed(void) {
+    /* Defense-in-depth: a same-GoCB re-forward of literally the same wire
+     * event (same content AND same `t`) is now caught here too, regardless
+     * of why it recurred. */
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries1, 2));
 
-    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+    GooseSubscriberEntry* entries2 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entries2, 2);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries2, 2);
 
     TEST_ASSERT_FALSE_MESSAGE(result,
-            "a different GoCB reporting byte-identical content must be suppressed as a duplicate");
+            "identical content AND identical timestamp from the SAME GoCB must be suppressed");
 
-    freeCrossTargetDedupEntries(entries1, 2);
-    freeCrossTargetDedupEntries(entries2, 2);
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+    freeRecentForwardEntries(entries1, 2);
+    freeRecentForwardEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_shouldForwardAcrossTarget_differentTargetDifferentContent_isForwarded(void) {
-    GooseSubscriberCrossTargetDedupCache cache = { 0 };
-    GooseSubscriberEntry* entries1 = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_differentTargetIdenticalContentAndTimestamp_isSuppressed(void) {
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entries1, 2));
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries1, 2));
 
-    GooseSubscriberEntry* entries2 = makeCrossTargetDedupEntries(
+    GooseSubscriberEntry* entries2 = makeRecentForwardEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbB", 1000, entries2, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result,
+            "a different GoCB reporting byte-identical content at the same wire timestamp must be suppressed");
+
+    freeRecentForwardEntries(entries1, 2);
+    freeRecentForwardEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
+}
+
+void
+test_shouldForwardRecent_differentTargetDifferentContent_isForwarded(void) {
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entries1 = makeRecentForwardEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entries1, 2));
+
+    GooseSubscriberEntry* entries2 = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", false, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entries2, 2);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbB", 1000, entries2, 2);
 
     TEST_ASSERT_TRUE_MESSAGE(result, "genuinely different content from a different GoCB must be forwarded");
-    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbB", cache.goCbRef);
+    TEST_ASSERT_EQUAL_INT(2, cache.count);
+    TEST_ASSERT_EQUAL_STRING("LD/LLN0$GO$gcbB", cache.history[1].goCbRef);
 
-    freeCrossTargetDedupEntries(entries1, 2);
-    freeCrossTargetDedupEntries(entries2, 2);
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+    freeRecentForwardEntries(entries1, 2);
+    freeRecentForwardEntries(entries2, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_shouldForwardAcrossTarget_suppressionDoesNotDisturbEstablishedBaseline(void) {
-    GooseSubscriberCrossTargetDedupCache cache = { 0 };
-    GooseSubscriberEntry* entriesA = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_suppressionDoesNotDisturbEstablishedHistory(void) {
+    GooseSubscriberRecentForwardCache cache = { 0 };
+    GooseSubscriberEntry* entriesA = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbA", entriesA, 2));
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entriesA, 2));
 
-    GooseSubscriberEntry* entriesB = makeCrossTargetDedupEntries(
+    GooseSubscriberEntry* entriesB = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_FALSE(GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbB", entriesB, 2));
+    TEST_ASSERT_FALSE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbB", 1000, entriesB, 2));
 
-    GooseSubscriberEntry* entriesC = makeCrossTargetDedupEntries(
+    GooseSubscriberEntry* entriesC = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    bool result = GooseSubscriberUseCases_shouldForwardAcrossTarget(&cache, "LD/LLN0$GO$gcbC", entriesC, 2);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbC", 1000, entriesC, 2);
 
     TEST_ASSERT_FALSE_MESSAGE(result, "C must still be recognized as a duplicate of A's original content, "
             "even though B's suppressed record never touched the cache");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("LD/LLN0$GO$gcbA", cache.goCbRef,
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, cache.count,
+            "the cache must still hold only A's entry, the only one actually forwarded");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("LD/LLN0$GO$gcbA", cache.history[0].goCbRef,
             "the cache must still reflect A, the only one actually forwarded");
 
-    freeCrossTargetDedupEntries(entriesA, 2);
-    freeCrossTargetDedupEntries(entriesB, 2);
-    freeCrossTargetDedupEntries(entriesC, 2);
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(&cache);
+    freeRecentForwardEntries(entriesA, 2);
+    freeRecentForwardEntries(entriesB, 2);
+    freeRecentForwardEntries(entriesC, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_shouldForwardAcrossTarget_isNoOp_whenCacheIsNull(void) {
-    GooseSubscriberEntry* entries = makeCrossTargetDedupEntries(
+test_shouldForwardRecent_interleavedUnrelatedGoCb_stillCatchesDuplicate(void) {
+    /* Reproduces the real-world bug: gcbA and gcbB publish the same
+     * underlying event, but gcbC's own, unrelated, genuinely different
+     * frame lands in between - the old single-slot cache would have been
+     * clobbered by gcbC and missed the gcbA/gcbB duplicate entirely. */
+    GooseSubscriberRecentForwardCache cache = { 0 };
+
+    GooseSubscriberEntry* entriesA = makeRecentForwardEntries(
             "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
-    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardAcrossTarget(NULL, "LD/LLN0$GO$gcbA", entries, 2));
-    freeCrossTargetDedupEntries(entries, 2);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbA", 1000, entriesA, 2));
+
+    GooseSubscriberEntry* entriesC = makeRecentForwardEntries(
+            "LD/GGIO2$ST$SPCSO1$stVal", false, "LD/GGIO2$ST$SPCSO2$stVal", true);
+    TEST_ASSERT_TRUE_MESSAGE(GooseSubscriberUseCases_shouldForwardRecent(
+            &cache, "LD/LLN0$GO$gcbC", 1500, entriesC, 2),
+            "gcbC's genuinely unrelated content must be forwarded normally");
+
+    GooseSubscriberEntry* entriesB = makeRecentForwardEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    bool result = GooseSubscriberUseCases_shouldForwardRecent(&cache, "LD/LLN0$GO$gcbB", 1000, entriesB, 2);
+
+    TEST_ASSERT_FALSE_MESSAGE(result,
+            "gcbB's duplicate of gcbA's event must still be caught even with gcbC's frame interleaved");
+
+    freeRecentForwardEntries(entriesA, 2);
+    freeRecentForwardEntries(entriesB, 2);
+    freeRecentForwardEntries(entriesC, 2);
+    GooseSubscriberUseCases_destroyRecentForwardCache(&cache);
 }
 
 void
-test_destroyCrossTargetDedupCache_doesNotCrash_onNull(void) {
-    GooseSubscriberUseCases_destroyCrossTargetDedupCache(NULL);
+test_shouldForwardRecent_isNoOp_whenCacheIsNull(void) {
+    GooseSubscriberEntry* entries = makeRecentForwardEntries(
+            "LD/GGIO1$ST$SPCSO4$stVal", true, "LD/GGIO1$ST$SPCSO5$stVal", true);
+    TEST_ASSERT_TRUE(GooseSubscriberUseCases_shouldForwardRecent(NULL, "LD/LLN0$GO$gcbA", 1000, entries, 2));
+    freeRecentForwardEntries(entries, 2);
+}
+
+void
+test_destroyRecentForwardCache_doesNotCrash_onNull(void) {
+    GooseSubscriberUseCases_destroyRecentForwardCache(NULL);
 }
 
 /* ---- detectStatusTransition ---- */
@@ -1337,13 +1396,15 @@ main(void) {
     RUN_TEST(test_isDuplicateValue_bitString_sameDecodedIntegerDifferentSize_isNotDuplicate);
     RUN_TEST(test_isDuplicateValue_typeMismatch_isNotDuplicate);
 
-    RUN_TEST(test_shouldForwardAcrossTarget_firstEverContent_isForwarded_andSeedsCache);
-    RUN_TEST(test_shouldForwardAcrossTarget_sameTargetIdenticalContent_isStillForwarded);
-    RUN_TEST(test_shouldForwardAcrossTarget_differentTargetIdenticalContent_isSuppressed);
-    RUN_TEST(test_shouldForwardAcrossTarget_differentTargetDifferentContent_isForwarded);
-    RUN_TEST(test_shouldForwardAcrossTarget_suppressionDoesNotDisturbEstablishedBaseline);
-    RUN_TEST(test_shouldForwardAcrossTarget_isNoOp_whenCacheIsNull);
-    RUN_TEST(test_destroyCrossTargetDedupCache_doesNotCrash_onNull);
+    RUN_TEST(test_shouldForwardRecent_firstEverContent_isForwarded_andSeedsCache);
+    RUN_TEST(test_shouldForwardRecent_sameTargetSameContentDifferentTimestamp_isStillForwarded);
+    RUN_TEST(test_shouldForwardRecent_sameTargetIdenticalContentAndTimestamp_isSuppressed);
+    RUN_TEST(test_shouldForwardRecent_differentTargetIdenticalContentAndTimestamp_isSuppressed);
+    RUN_TEST(test_shouldForwardRecent_differentTargetDifferentContent_isForwarded);
+    RUN_TEST(test_shouldForwardRecent_suppressionDoesNotDisturbEstablishedHistory);
+    RUN_TEST(test_shouldForwardRecent_interleavedUnrelatedGoCb_stillCatchesDuplicate);
+    RUN_TEST(test_shouldForwardRecent_isNoOp_whenCacheIsNull);
+    RUN_TEST(test_destroyRecentForwardCache_doesNotCrash_onNull);
 
     RUN_TEST(test_detectStatusTransition_validToInvalid_reportsStale);
     RUN_TEST(test_detectStatusTransition_invalidToValid_reportsValid);

@@ -703,23 +703,28 @@ GooseSubscriberUseCases_isDuplicateStNum(bool hasForwardedStNum, uint32_t lastFo
 }
 
 static void
-freeCrossTargetDedupContent(GooseSubscriberCrossTargetDedupCache* cache) {
-    free(cache->goCbRef);
-    cache->goCbRef = NULL;
+freeRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot) {
+    free(slot->goCbRef);
+    slot->goCbRef = NULL;
+    slot->timestampMs = 0;
 
-    for (int i = 0; i < cache->entryCount; i++) {
-        free(cache->entries[i].reference);
-        if (cache->entries[i].value) MmsValue_delete(cache->entries[i].value);
+    for (int i = 0; i < slot->entryCount; i++) {
+        free(slot->entries[i].reference);
+        if (slot->entries[i].value) MmsValue_delete(slot->entries[i].value);
     }
-    free(cache->entries);
-    cache->entries = NULL;
-    cache->entryCount = 0;
+    free(slot->entries);
+    slot->entries = NULL;
+    slot->entryCount = 0;
 }
 
 void
-GooseSubscriberUseCases_destroyCrossTargetDedupCache(GooseSubscriberCrossTargetDedupCache* cache) {
+GooseSubscriberUseCases_destroyRecentForwardCache(GooseSubscriberRecentForwardCache* cache) {
     if (!cache) return;
-    freeCrossTargetDedupContent(cache);
+    for (int i = 0; i < cache->count; i++) {
+        freeRecentForwardSlot(&cache->history[i]);
+    }
+    cache->count = 0;
+    cache->nextSlot = 0;
 }
 
 static bool
@@ -742,11 +747,12 @@ crossTargetEntriesEqual(const GooseSubscriberDedupEntry* cached, int cachedCount
 }
 
 static void
-replaceCrossTargetDedupContent(GooseSubscriberCrossTargetDedupCache* cache,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
-    freeCrossTargetDedupContent(cache);
-
-    cache->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
+fillRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot,
+        const char* goCbRef, uint64_t timestampMs, const GooseSubscriberEntry* entries, int entryCount) {
+    slot->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
+    slot->timestampMs = timestampMs;
+    slot->entries = NULL;
+    slot->entryCount = 0;
     if (entryCount <= 0) return;
 
     GooseSubscriberDedupEntry* copy = calloc((size_t) entryCount, sizeof(GooseSubscriberDedupEntry));
@@ -756,21 +762,31 @@ replaceCrossTargetDedupContent(GooseSubscriberCrossTargetDedupCache* cache,
         copy[i].reference = entries[i].reference ? GooseSubscriberUtils_safeStringDup(entries[i].reference) : NULL;
         copy[i].value = entries[i].value ? MmsValue_clone(entries[i].value) : NULL;
     }
-    cache->entries = copy;
-    cache->entryCount = entryCount;
+    slot->entries = copy;
+    slot->entryCount = entryCount;
 }
 
 bool
-GooseSubscriberUseCases_shouldForwardAcrossTarget(GooseSubscriberCrossTargetDedupCache* cache,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
+GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
+        const char* goCbRef, uint64_t timestampMs, const GooseSubscriberEntry* entries, int entryCount) {
     if (!cache) return true;
 
-    bool isDuplicate = cache->goCbRef && goCbRef
-            && strcmp(cache->goCbRef, goCbRef) != 0
-            && crossTargetEntriesEqual(cache->entries, cache->entryCount, entries, entryCount);
-
-    if (!isDuplicate) {
-        replaceCrossTargetDedupContent(cache, goCbRef, entries, entryCount);
+    for (int i = 0; i < cache->count; i++) {
+        GooseSubscriberRecentForwardRecord* slot = &cache->history[i];
+        if (slot->timestampMs == timestampMs
+                && crossTargetEntriesEqual(slot->entries, slot->entryCount, entries, entryCount)) {
+            return false;
+        }
     }
-    return !isDuplicate;
+
+    GooseSubscriberRecentForwardRecord* writeSlot = &cache->history[cache->nextSlot];
+    if (cache->count == GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) {
+        freeRecentForwardSlot(writeSlot);
+    }
+    fillRecentForwardSlot(writeSlot, goCbRef, timestampMs, entries, entryCount);
+
+    cache->nextSlot = (cache->nextSlot + 1) % GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY;
+    if (cache->count < GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) cache->count++;
+
+    return true;
 }

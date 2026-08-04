@@ -272,7 +272,7 @@ typedef struct {
 } GooseSubscriberTargetEntry;
 
 /*
- * One (reference, value) pair kept by GooseSubscriberCrossTargetDedupCache -
+ * One (reference, value) pair kept by GooseSubscriberRecentForwardCache -
  * mirrors mms_report_client's MmsReportClientDedupEntry exactly. Both owned.
  */
 typedef struct {
@@ -281,29 +281,56 @@ typedef struct {
 } GooseSubscriberDedupEntry;
 
 /*
- * Cross-target duplicate-content suppression - the GOOSE equivalent of
- * mms_report_client's MmsReportClientCrossRcbDedupCache (see its own doc
- * comment for the full rationale). A deep copy of the last record this
- * subscriber actually forwarded to recordCallback, from ANY target - not to
- * be confused with GooseSubscriberMemberRefCache's per-target value-diff
- * cache, which only ever compares a frame against that SAME target's own
- * history. Some real networks configure multiple GoCBs across independent
- * LNs that publish the exact same underlying event (mirroring the MMS
- * redundant-RCB pattern) - each target's own per-position filter starts
- * independent, so both frames would otherwise survive their own filter and
- * reach the websocket as apparent duplicates.
- * GooseSubscriberUseCases_shouldForwardAcrossTarget is the single decision
- * point: a record whose (reference, value) content exactly matches this
- * cache AND whose goCbRef differs from the one that produced it is
- * suppressed; anything else (first-ever content, a genuine change, or a
- * repeat from the SAME goCbRef - already that target's own filter's
- * concern) updates this cache and is forwarded.
+ * Recent-forward duplicate-content suppression - originated as the GOOSE
+ * equivalent of mms_report_client's MmsReportClientCrossRcbDedupCache (see
+ * its own doc comment for that rationale), then widened past a single slot
+ * for two reasons found in production:
+ *
+ * (1) Some real networks configure multiple GoCBs across independent LNs
+ *     that publish the exact same underlying event (mirroring the MMS
+ *     redundant-RCB pattern) - each target's own per-position filter starts
+ *     independent, so both frames would otherwise survive their own filter
+ *     and reach the websocket as apparent duplicates. A single "last
+ *     forwarded, from any target" slot (the original design) catches this
+ *     only when nothing else is forwarded in between - GOOSE, unlike MMS,
+ *     typically has many GoCBs streaming concurrently on one IED, so an
+ *     unrelated target's frame landing between the two duplicates routinely
+ *     clobbers the one slot before the real duplicate arrives. This struct
+ *     is instead a small bounded ring of the most recently forwarded
+ *     records (any target), so a duplicate is still caught even with
+ *     unrelated traffic interleaved.
+ * (2) Defense-in-depth against an unreproducible bug where the SAME target
+ *     appears to re-forward an already-delivered event. GOOSE's `t` field
+ *     (timestampMs below) is always present and, per spec, only changes on
+ *     a real dataset-member change - so requiring both content AND
+ *     timestampMs to match (see GooseSubscriberUseCases_shouldForwardRecent)
+ *     safely catches a same-target repeat of literally the same wire event,
+ *     without needing to know *why* it repeated.
+ *
+ * Not to be confused with GooseSubscriberMemberRefCache's per-target
+ * value-diff cache, which only ever compares a frame against that SAME
+ * target's own history and knows nothing about content across targets.
  */
 typedef struct {
-    char* goCbRef;                        /* owned; NULL means nothing forwarded yet */
+    char* goCbRef;                        /* owned; NULL means an empty slot */
+    uint64_t timestampMs;                 /* this record's GOOSE `t` field */
     GooseSubscriberDedupEntry* entries;   /* owned array of entryCount owned entries */
     int entryCount;
-} GooseSubscriberCrossTargetDedupCache;
+} GooseSubscriberRecentForwardRecord;
+
+/* Ring capacity: sized generously above the concurrent-GoCB counts observed
+ * on real IEDs (single devices seen streaming 8-10+ concurrent LN datasets)
+ * so an interleaved burst of unrelated GOOSE traffic doesn't evict the
+ * record a later duplicate needs to match against. Correctness of the dedup
+ * decision doesn't depend on this size - the required exact timestampMs
+ * match is what prevents false-positive suppression, not ring depth. */
+#define GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY 32
+
+typedef struct {
+    GooseSubscriberRecentForwardRecord history[GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY];
+    int count;     /* valid slots filled so far, caps at capacity */
+    int nextSlot;  /* ring write cursor - wraps and overwrites the oldest slot once full */
+} GooseSubscriberRecentForwardCache;
 
 /*
  * Internal representation. Defined here (rather than hidden behind an
@@ -321,8 +348,8 @@ struct sGooseSubscriberHandle {
     GooseReceiver receiver;                     /* owned */
     GooseSubscriberTargetEntry* targetEntries;  /* owned array */
     int targetCount;
-    GooseSubscriberCrossTargetDedupCache crossTargetDedupCache; /* zero-initialized by
-                                   calloc in GooseSubscription_create (NULL goCbRef means
+    GooseSubscriberRecentForwardCache recentForwardCache; /* zero-initialized by
+                                   calloc in GooseSubscription_create (count == 0 means
                                    "nothing forwarded yet") - see its own doc comment above */
 
     GooseSubscriberCallback recordCallback;

@@ -118,30 +118,34 @@ uint32_t
 GooseSubscriberUseCases_computeLivenessPollIntervalMs(uint32_t configuredMs, int32_t minTalMs);
 
 /*
- * Cross-target duplicate-content suppression - see
- * GooseSubscriberCrossTargetDedupCache's own doc comment for the full
- * rationale (independent GoCBs publishing the same underlying event).
- * Compares (goCbRef, entries[0..entryCount)) against cache's own
- * last-forwarded content: if cache has prior content, goCbRef differs from
- * the one that produced it, AND every (reference, value) pair matches
- * positionally, this is a duplicate - returns false (do not forward),
- * leaving cache untouched. Otherwise (nothing cached yet, same goCbRef as
- * before, or genuinely different content) returns true and replaces cache's
- * content with this call's (goCbRef, entries) - so a suppressed duplicate
- * never disturbs the established baseline, but every other case refreshes
- * it. NULL-safe on cache (returns true, i.e. always forward, if cache is
- * NULL).
+ * Recent-forward duplicate-content suppression - see
+ * GooseSubscriberRecentForwardCache's own doc comment for the full
+ * rationale (independent GoCBs publishing the same underlying event, plus
+ * same-target defense-in-depth). Compares (goCbRef, timestampMs,
+ * entries[0..entryCount)) against every filled slot in cache's history: if
+ * any slot's timestampMs matches exactly AND every (reference, value) pair
+ * matches positionally, this is a duplicate - returns false (do not
+ * forward), leaving the history untouched. Otherwise (nothing cached yet,
+ * or genuinely different content/timestamp) returns true and appends this
+ * call's (goCbRef, timestampMs, entries) to the ring (overwriting the
+ * oldest slot once full) - so a suppressed duplicate never disturbs
+ * established history, but every other case extends it. goCbRef is not
+ * required to differ from the slot it matches - a same-target repeat with
+ * identical content AND identical wire timestamp is exactly the
+ * defense-in-depth case this now also catches. NULL-safe on cache (returns
+ * true, i.e. always forward, if cache is NULL).
  */
 bool
-GooseSubscriberUseCases_shouldForwardAcrossTarget(GooseSubscriberCrossTargetDedupCache* cache,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount);
+GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
+        const char* goCbRef, uint64_t timestampMs,
+        const GooseSubscriberEntry* entries, int entryCount);
 
-/* Frees cache's owned goCbRef/entries and resets it back to empty ("nothing
- * forwarded yet"). NULL-safe. Used both internally by
- * GooseSubscriberUseCases_shouldForwardAcrossTarget (to replace stale
- * content) and by GooseSubscription_destroy (final cleanup). */
+/* Frees every filled slot's owned goCbRef/entries and resets the cache back
+ * to empty ("nothing forwarded yet"). NULL-safe. Used both internally by
+ * GooseSubscriberUseCases_shouldForwardRecent (to evict the oldest slot on
+ * wraparound) and by GooseSubscription_destroy (final cleanup). */
 void
-GooseSubscriberUseCases_destroyCrossTargetDedupCache(GooseSubscriberCrossTargetDedupCache* cache);
+GooseSubscriberUseCases_destroyRecentForwardCache(GooseSubscriberRecentForwardCache* cache);
 
 /*
  * Pure GOOSE-heartbeat dedup check. A publisher retransmits at every

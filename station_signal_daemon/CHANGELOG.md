@@ -1046,3 +1046,59 @@ The multi-address selection itself is not unit-testable — it needs a real inte
 IPv4 addresses, which no hermetic test can conjure. `tests/ied_discovery/test_ied_discovery_netif.c`
 keeps its `lo` cases as the guard that the rewritten loop still resolves an ordinary
 single-address interface, and names the gap in a comment.
+
+## `goose_subscriber` cross-target dedup missed duplicates under real interleaved traffic
+
+**Symptom**: user report with logs and a frontend screenshot — a single object's value change
+(`C8_6MDCTRL/blkGGIO6$ST$SPCS01$stVal`) showed up three times in the reports view for one real
+transition: once via MMS (expected) and twice via GOOSE, from two different GoCBs
+(`Control_DataSet`/`Control_DataSet1`) whose datasets both happened to cover the same point.
+Separately, and never reproduced, the same user reported an intermittent "storm" of the same
+GOOSE report resent repeatedly.
+
+**Root cause**: `GooseSubscriberCrossTargetDedupCache` already existed for exactly this "two
+control blocks publish the same event" case — an explicit, deliberate mirror of
+`mms_report_client`'s `MmsReportClientCrossRcbDedupCache` (see the GI-reinstatement entry
+above), and MMS's own version was confirmed still working correctly in production. Both designs
+cache only the single most-recently-forwarded record and compare a new record against just that
+one slot. That's adequate for MMS, where redundant RCBs (`urcbA01`/`urcbB01`) are close to the
+only traffic sharing the cache, so the slot usually still holds the right comparison target when
+a duplicate report arrives. GOOSE is structurally different: a single IED streams many
+independent GoCBs concurrently — the reported logs show 8+ concurrent LN datasets on one
+device — so any unrelated GoCB's frame landing between the two duplicate-content frames
+overwrites the one cached slot before the real duplicate arrives. The guard was even exercised by
+`integration_tests/goose_subscriber/`'s own `test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback`,
+but that test never interleaves a third, unrelated GoCB's frame between the two duplicates, so it
+could never have caught this failure mode.
+
+**Fix**: widened the single slot into a bounded 32-entry ring
+(`GooseSubscriberRecentForwardCache`, renamed from `GooseSubscriberCrossTargetDedupCache`, in
+`domain/goose_subscriber_types.h`) of recently-forwarded `(goCbRef, timestampMs, entries)`
+records; `GooseSubscriberUseCases_shouldForwardRecent` (renamed from
+`_shouldForwardAcrossTarget`) now scans every filled slot instead of just one. Each slot also now
+carries the record's `timestampMs` — GOOSE's `t` field, always present on every frame, unlike
+MMS's report-level timestamp which is only present when the RCB's `OptFlds` enables
+`RPT_OPT_TIME_STAMP` — and a match now requires **both** content and timestamp to be identical.
+That also removed the old requirement that `goCbRef` differ between a candidate and its match,
+extending the guard to a same-target re-forward of an already-delivered event too — deliberate
+defense-in-depth for the separately-reported, unreproducible "storm" bug. The most plausible
+mechanism found for that one (not confirmed, no repro ever obtained) is a STALE→VALID
+liveness-recovery transition resetting `hasForwardedStNum` per-target and interacting with a real
+or flaky value read to produce a burst of legitimate-looking re-forwards; per spec, GOOSE's `t`
+only changes on a genuine dataset-member change, so requiring an exact `t` match catches a
+same-target repeat of literally the same wire event regardless of why it recurred, without
+needing to touch the liveness state machine on an unconfirmed hunch. A
+`[goose_subscriber] ... dropped by recent-forward dedup` log line was also added (there was none
+before, unlike `mms_report_client`'s own `dropped by cross-RCB dedup` line) so a recurrence of the
+storm leaves an actual diagnostic trail next time.
+
+New/updated unit tests in `tests/goose_subscriber/test_goose_subscriber_usecases.c` include a
+direct regression case for the interleaved-third-GoCB failure mode
+(`test_shouldForwardRecent_interleavedUnrelatedGoCb_stillCatchesDuplicate`: forward from `gcbA`,
+then an unrelated `gcbC`, then a duplicate of `gcbA` from `gcbB` — still caught) alongside updated
+cases for the now-required timestamp match. Extending the E2E `integration_tests/goose_subscriber/`
+fixture with a third, real GoCB to prove this under actual wire traffic was considered and
+deferred — `reporter1.cid` is shared across several other suites (`mms_report_client`,
+`scl_bootstrap`, `orchestration`, `control_dispatcher`, `device_manager`), so editing it carried
+more risk than the unit-level proof justified here; the existing 2-GoCB E2E case and the full
+`run_all_tests.sh` suite were both re-verified passing unchanged.
