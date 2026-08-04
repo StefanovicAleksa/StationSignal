@@ -63,6 +63,22 @@
               <OptFields seqNum="true" dataSet="true" reasonCode="true" />
               <RptEnabled max="1" />
             </ReportControl>
+            <!-- Buffered counterpart of urcbDyn - same "no datSet, parented
+                 under GGIO1" shape, but buffered="true". An association-scoped
+                 ("@"-prefixed) self-created dataset is invalid for a buffered
+                 RCB per IEC 61850 (it doesn't survive the disconnect a
+                 buffered RCB exists to buffer through) - a real device (and
+                 the vendored reference server) rejects assigning one with
+                 error 32 (IED_ERROR_OBJECT_VALUE_INVALID), confirmed against a
+                 real SIPROTEC 6MD device (see GAP3_DYNAMIC_DATASET_NOTES.md).
+                 Proves getOrCreateDynamicDataset builds a domain-scoped name
+                 for a buffered target instead. -->
+            <ReportControl name="brcbDyn" rptID="brcbDyn" confRev="1" buffered="true"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" dataSet="true" reasonCode="true" entryID="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
           </LN>
         </LDevice>
       </Server>

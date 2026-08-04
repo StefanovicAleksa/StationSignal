@@ -228,8 +228,22 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `$`-segments, not a last-`$` strip) does — value drags quality along and vice versa; a `NULL`
   value is excluded from being dragged in. `IpcDispatcherUseCases_pairQuality` mirrors this.
   **Dynamic dataset creation**: for an RCB with no SCL `datSet`, `getOrCreateDynamicDataset`
-  synthesizes an association-scoped dataset covering every FC=ST/MX leaf under the RCB's LN,
-  respecting the device's own declared caps when SCL provides them
+  synthesizes a dataset covering every FC=ST/MX leaf under the RCB's LN — **association-scoped**
+  (`@`-prefixed, auto-destroyed on disconnect, no cleanup needed) for an unbuffered target, but
+  **domain/VMD-scoped** (`"$"`-joined, no `@` prefix, persists past the connection) for a buffered
+  one: an association-scoped dataset is destroyed the instant the connection closes, which a real
+  device (and the vendored reference server) rejects assigning to a buffered RCB outright
+  (`IED_ERROR_OBJECT_VALUE_INVALID`/error 32 — confirmed against a real SIPROTEC 6MD device,
+  see `CHANGELOG.md`), since that's incompatible with a buffered RCB's whole purpose of surviving
+  one. Because a domain-scoped name persists independently of any one connection, a later
+  `createDataSet` attempt for the same (deterministic) name legitimately fails with
+  `IED_ERROR_OBJECT_EXISTS` — treated as a successful reuse, not an error. Every such name is
+  tracked for the client's whole lifetime in `handle->domainScopedDynamicDatasetNames` (unlike the
+  per-connect-cycle dedup cache below) so `MmsReportClientConnection_stop` can explicitly
+  `IedConnection_deleteDataSet` each one before closing the connection — otherwise repeated
+  start/stop cycles would slowly leak into the device's own dataset-count budget, since these
+  aren't auto-cleaned by the server the way the association-scoped ones are.
+  Respects the device's own declared caps when SCL provides them
   (`<Services><DynDataSet max="N" maxAttributes="M"/>`, parsed by `ied_model` and exposed via
   `IedModel_getDynDataSetMax`/`_getDynDataSetMaxAttributes` — `-1` if not declared, e.g. no
   `<Services>` at all or a dynamically-built online-discovered model). A `DynamicDatasetSession`

@@ -681,6 +681,42 @@ stakeholder-specific scope questions rather than guessing. Proven end-to-end aga
 `ied_simulator` IED in `integration_tests/mms_report_client/` (a fixture RCB parented under a
 non-`LLN0` LN, no `datSet` at all, mirroring `E13_6MD`'s real shape).
 
+**Buffered RCBs (BRCB) couldn't use the association-scoped self-created dataset at all** — every
+`A_BRCB*` instance on a real SIPROTEC 6MD device (`192.168.1.43`, `C05_A201Application/LLN0`,
+online-discovered, no SCL file service) failed `setRCBValues` with `IED_ERROR_OBJECT_VALUE_INVALID`
+(error 32), while every sibling unbuffered `A_URCB*` instance on the identical LN succeeded using
+the exact same dataset name. Root-caused directly against the vendored reference server
+(`third_party_src/libiec61850/src/iec61850/server/mms_mapping/reporting.c`'s
+`updateReportDataset`): an `@`-prefixed dataset name is association-scoped, destroyed the instant
+the creating connection closes — semantically incompatible with a buffered RCB, whose entire
+purpose is to keep reporting through a disconnect, so the server rejects the assignment outright.
+`buildDynamicDatasetName` generated this `@`-prefixed form unconditionally, blind to
+`target->buffered`. This was flagged as a leading theory (but left unimplemented) in an earlier
+session's `GAP3_DYNAMIC_DATASET_NOTES.md`, and is a distinct bug from the
+count/`maxAttributes`-cap work in the preceding paragraph — dataset caps never even entered into
+it here, the buffered target never got past the association-scope rejection to hit any cap. Fixed
+by branching `buildDynamicDatasetName`/`getOrCreateDynamicDataset` on `target->buffered`: an
+unbuffered target keeps the pre-existing `@`-prefixed scheme unchanged; a buffered target now gets
+a **domain/VMD-scoped** name instead (`"<lnReference>$dyn"`, no `@` prefix — same `"$"`-joined
+convention `ied_model` already uses for an SCL-declared `datasetReference`), which persists on the
+server past the current connection, matching what a buffered RCB actually needs. This introduces a
+lifecycle a purely association-scoped dataset never needed: `createAndCacheDynamicDataset` now
+treats `IED_ERROR_OBJECT_EXISTS` on a buffered target's `createDataSet` attempt as a successful
+reuse (not a failure) — the naming is deterministic per LN, so a reconnect, or a prior daemon run
+that never got to clean up, legitimately finds its own already-created dataset still present —
+and a new handle-level list, `domainScopedDynamicDatasetNames`
+(`mms_report_client_types.h`), tracks every such name for the client's whole lifetime (unlike the
+existing per-connect-cycle dedup cache) so `MmsReportClientConnection_stop` can explicitly
+`IedConnection_deleteDataSet` each one, while the connection is still open, before closing it —
+without this, a device's total dataset-count budget (the same `DynDataSet max="N"` SCL cap tracked
+above) would slowly leak one entry per start/stop cycle, since a domain-scoped dataset (unlike the
+`@`-scoped ones) is never auto-cleaned by the server on disconnect. Proven end-to-end against a
+real `ied_simulator` IED in `integration_tests/mms_report_client/` — a new fixture RCB (`brcbDyn`,
+buffered, no SCL `datSet`, parented under the same LN as the existing `urcbDyn` fixture RCB)
+enables successfully where it previously failed with error 32, and a forced reconnect (server
+restart on the same port) proves the domain-scoped dataset survives and is gracefully reused via
+the `IED_ERROR_OBJECT_EXISTS` path rather than erroring a second time.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

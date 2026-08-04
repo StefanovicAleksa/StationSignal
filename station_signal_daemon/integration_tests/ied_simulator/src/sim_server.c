@@ -128,6 +128,23 @@ buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal) {
             RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
             0, 0);
 
+    /* Buffered counterpart of urcbDyn - proves mms_report_client's dynamic
+     * dataset creation for a BUFFERED RCB, which needs a domain-scoped (not
+     * "@"-prefixed association-scoped) self-created dataset -
+     * getOrCreateDynamicDataset's own doc comment
+     * (mms_report_client_connection.c) and GAP3_DYNAMIC_DATASET_NOTES.md
+     * explain why: an association-scoped dataset doesn't survive the
+     * disconnect a buffered RCB exists to buffer through, and the reference
+     * server (and a real SIPROTEC 6MD device) reject assigning one to a
+     * buffered RCB outright. Only mms_report_client's own fixture SCL
+     * (reporter1.cid) declares a matching <ReportControl>, so no other E2E
+     * test that links this same sim_server.c ever attempts to enable it -
+     * same convention as brcbDup/urcbDyn above. */
+    ReportControlBlock_create("brcbDyn", ggio1, "brcbDyn", true, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION | RPT_OPT_ENTRY_ID,
+            0, 0);
+
     /* A second Dyn (no datSet) RCB on the same LN (GGIO1) as urcbDyn -
      * exists purely so an E2E test can prove mms_report_client's dynamic-
      * dataset chunking (buildChunkPlan/getOrCreateDynamicDataset,

@@ -49,8 +49,16 @@ onStateChanged(void* parameter, IedConnection connection, IedConnectionState new
  * reconnect either - see MmsReportClientConnection_create's own comment on
  * the connection object's own reuse for the parallel reasoning). */
 typedef struct {
-    char* lnReference;  /* owned copy, matches ReportControlBlockTarget.lnReference */
-    char* datasetName;  /* owned copy, e.g. "@dyn_E13_6MD_PTOC1" */
+    char* lnReference;  /* owned copy, matches ReportControlBlockTarget.lnReference
+                            (LN-wide path) or ->objectReference (chunked path) */
+    char* datasetName;  /* owned copy, e.g. "@dyn_E13_6MD_PTOC1" (unbuffered) or
+                            "E13_6MD/PTOC1$dyn" (buffered) */
+    bool buffered;      /* part of the lookup key alongside lnReference - an LN with
+                            both buffered and unbuffered Dyn RCB instances needs two
+                            different cached names (different scheme/lifetime, see
+                            buildDynamicDatasetName), not one shared entry. Not needed
+                            on the chunked path (objectReference is already unique per
+                            target), but harmless there too. */
 } DynamicDatasetCacheEntry;
 
 static void
@@ -63,13 +71,16 @@ destroyDynamicDatasetCacheEntry(void* entry) {
 }
 
 static const char*
-lookupDynamicDatasetName(LinkedList cache, const char* lnReference) {
+lookupDynamicDatasetName(LinkedList cache, const char* lnReference, bool buffered) {
     if (!cache || !lnReference) return NULL;
 
     LinkedList element = LinkedList_getNext(cache);
     while (element) {
         DynamicDatasetCacheEntry* entry = (DynamicDatasetCacheEntry*) LinkedList_getData(element);
-        if (entry->lnReference && strcmp(entry->lnReference, lnReference) == 0) return entry->datasetName;
+        if (entry->lnReference && entry->buffered == buffered
+                && strcmp(entry->lnReference, lnReference) == 0) {
+            return entry->datasetName;
+        }
         element = LinkedList_getNext(element);
     }
     return NULL;
@@ -165,14 +176,50 @@ lookupMemberRefCacheByRcb(MmsReportClientHandle handle, const char* rcbReference
     return NULL;
 }
 
-/* "@"-prefixed => association-scoped (destroyed automatically when this
- * connection closes - see IedConnection_createDataSet's own doc comment) -
- * no explicit delete needed, no risk of leaking the device's dataset budget
- * across reconnects/restarts. lnReference is sanitized ('/' -> '_') purely so
- * the generated name reads sensibly in logs; createDataSet doesn't require
- * any particular naming beyond the leading "@". */
+/* Two distinct naming schemes depending on `buffered`:
+ *
+ *   - UNBUFFERED (the pre-existing scheme, unchanged): "@"-prefixed =>
+ *     association-scoped (destroyed automatically when this connection
+ *     closes - see IedConnection_createDataSet's own doc comment) - no
+ *     explicit delete needed, no risk of leaking the device's dataset budget
+ *     across reconnects/restarts. lnReference is sanitized ('/' -> '_')
+ *     purely so the generated name reads sensibly in logs; createDataSet
+ *     doesn't require any particular naming beyond the leading "@".
+ *
+ *   - BUFFERED: an association-scoped dataset is destroyed the instant this
+ *     connection closes - semantically incompatible with a buffered RCB,
+ *     whose whole purpose is to keep reporting through a disconnect.
+ *     Confirmed directly against the vendored reference server
+ *     (mms_mapping/reporting.c's updateReportDataset: an "@"-prefixed
+ *     dataSetName is rejected outright when rc->buffered is true, surfacing
+ *     to the client as IED_ERROR_OBJECT_VALUE_INVALID/32) and against a real
+ *     SIPROTEC 6MD device (see GAP3_DYNAMIC_DATASET_NOTES.md). Instead builds
+ *     a domain/VMD-scoped name - "$"-joined, no "@" prefix, same convention
+ *     ied_model already uses for an SCL-declared datasetReference
+ *     (IedModelUseCases_getReportSubscriptionTargets) - which persists on the
+ *     server past this connection, exactly what a buffered RCB needs.
+ *     lnReference already has the required "LDName/LNodeName" shape
+ *     (IedConnection_createDataSet's own doc comment: "LDName/LNodeName.dataSetName
+ *     for permanent domain or VMD scope data sets" - the client library
+ *     splits on the first '/' for the domain, then converts any '.' in the
+ *     remainder to '$' for the wire form, so a "$"-joined suffix here reaches
+ *     the server identically without relying on that internal conversion).
+ *     Deterministic and stable across reconnects/restarts by construction -
+ *     required so a later connect recognizes and reuses its own
+ *     already-created dataset (see createAndCacheDynamicDataset's
+ *     IED_ERROR_OBJECT_EXISTS handling) instead of erroring or duplicating,
+ *     and so MmsReportClientConnection_stop's explicit cleanup can find it
+ *     again by name. */
 static char*
-buildDynamicDatasetName(const char* lnReference) {
+buildDynamicDatasetName(const char* lnReference, bool buffered) {
+    if (buffered) {
+        size_t len = strlen(lnReference) + strlen("$dyn") + 1;
+        char* name = malloc(len);
+        if (!name) return NULL;
+        snprintf(name, len, "%s$dyn", lnReference);
+        return name;
+    }
+
     size_t len = strlen("@dyn_") + strlen(lnReference) + 1;
     char* name = malloc(len);
     if (!name) return NULL;
@@ -181,6 +228,28 @@ buildDynamicDatasetName(const char* lnReference) {
         if (*p == '/') *p = '_';
     }
     return name;
+}
+
+/* Dedup-inserting append to handle->domainScopedDynamicDatasetNames (see that
+ * field's own doc comment) - called only for buffered/domain-scoped names,
+ * never for "@"-scoped ones (those need no cleanup tracking at all). Cheap
+ * linear scan: this list holds at most one entry per LN needing a buffered
+ * self-created dataset, realistically single digits to tens of entries even
+ * on a large IED. */
+static void
+rememberDomainScopedDatasetName(MmsReportClientHandle handle, const char* datasetName) {
+    if (!handle->domainScopedDynamicDatasetNames) {
+        handle->domainScopedDynamicDatasetNames = LinkedList_create();
+        if (!handle->domainScopedDynamicDatasetNames) return;
+    }
+
+    LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
+    while (element) {
+        if (strcmp((char*) LinkedList_getData(element), datasetName) == 0) return;
+        element = LinkedList_getNext(element);
+    }
+
+    LinkedList_add(handle->domainScopedDynamicDatasetNames, MmsReportClientUtils_safeStringDup(datasetName));
 }
 
 /*
@@ -196,7 +265,7 @@ buildDynamicDatasetName(const char* lnReference) {
 static const char*
 createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
-        int memberCount) {
+        int memberCount, bool buffered) {
     LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
     if (!wireRefs || LinkedList_size(wireRefs) == 0) {
         fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' - "
@@ -205,7 +274,7 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
         return NULL;
     }
 
-    char* datasetName = buildDynamicDatasetName(cacheKey);
+    char* datasetName = buildDynamicDatasetName(cacheKey, buffered);
     if (!datasetName) {
         LinkedList_destroyDeep(wireRefs, free);
         return NULL;
@@ -224,16 +293,37 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
     IedConnection_createDataSet(handle->connection, &err, datasetName, wireRefs);
     LinkedList_destroyDeep(wireRefs, free);
 
-    if (err != IED_ERROR_OK) {
+    /* Domain-scoped names are deterministic and persist past a connection
+     * (unlike the "@"-scoped ones), so a reconnect - or a prior daemon run
+     * that never got to clean up - can legitimately find this exact name
+     * already on the server. Treat that as a successful reuse, not a
+     * failure: the member list is derived the same deterministic way every
+     * time (every FC=ST/MX leaf under this LN, or this target's own chunk),
+     * so an existing dataset by this name is presumed to already have the
+     * right shape. */
+    bool reusedExisting = false;
+    if (err == IED_ERROR_OBJECT_EXISTS && buffered) {
+        fprintf(stderr, "[mms_report_client] dynamic dataset '%s' for LN '%s' already exists on the server - "
+                "reusing it\n", datasetName, logLnReference);
+        reusedExisting = true;
+    } else if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
                 "'%s' will not report\n", logLnReference, err, logRcbReference);
         free(datasetName);
         return NULL;
     }
 
-    fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName, logLnReference);
+    if (!reusedExisting) {
+        fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName, logLnReference);
+        /* Only a genuinely NEW dataset counts against this cycle's budget -
+         * a reused pre-existing one was never new against the device's own
+         * count this cycle (see DynamicDatasetSession's own doc comment on
+         * why cache hits stay free; this is the same reasoning applied to a
+         * dataset the SERVER already knew about before this cycle started). */
+        if (session->remainingBudget > 0) session->remainingBudget--;
+    }
 
-    if (session->remainingBudget > 0) session->remainingBudget--;
+    if (buffered) rememberDomainScopedDatasetName(handle, datasetName);
 
     DynamicDatasetCacheEntry* cacheNode = malloc(sizeof(DynamicDatasetCacheEntry));
     if (!cacheNode) {
@@ -241,12 +331,15 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
          * the name for reuse this cycle - association-scoped, so it's
          * cleaned up automatically when this connection eventually closes;
          * just missing a reuse opportunity for the rest of this cycle, not a
-         * leak. */
+         * leak. Domain-scoped (buffered) names are still safe too - already
+         * captured in handle->domainScopedDynamicDatasetNames above for
+         * eventual cleanup regardless of this cache node's fate. */
         free(datasetName);
         return NULL;
     }
     cacheNode->lnReference = MmsReportClientUtils_safeStringDup(cacheKey);
     cacheNode->datasetName = datasetName;
+    cacheNode->buffered = buffered;
     LinkedList_add(session->cache, cacheNode);
 
     return cacheNode->datasetName;
@@ -291,7 +384,7 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
             lookupChunkAssignment(session->chunkAssignments, target->objectReference);
     const char* cacheKey = chunk ? target->objectReference : target->lnReference;
 
-    const char* existing = lookupDynamicDatasetName(session->cache, cacheKey);
+    const char* existing = lookupDynamicDatasetName(session->cache, cacheKey, target->buffered);
     if (existing) return existing;
 
     /* Cache hits above stay free (zero wire cost, always allowed) - only a
@@ -309,7 +402,8 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
 
     if (chunk) {
         return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
-                target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount);
+                target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
+                target->buffered);
     }
 
     MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
@@ -321,7 +415,8 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
     }
 
     return createAndCacheDynamicDataset(handle, session, target->lnReference, target->lnReference,
-            target->objectReference, (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount);
+            target->objectReference, (const char* const*) cacheEntry->memberReferences, cacheEntry->memberCount,
+            target->buffered);
 }
 
 /* Cheap, purely-local skip: true if datasetRef looks like a name
@@ -338,27 +433,32 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
  * way (a dangling reference would fail to resolve there too).
  *
  * Checks both naming schemes getOrCreateDynamicDataset can produce for this
- * target: the LN-wide name (buildDynamicDatasetName(lnReference), used when
- * this LN's leaf set fits under maxAttributes / maxAttributes is unknown) and
- * the per-target chunked name (buildDynamicDatasetName(objectReference), used
- * when this target was assigned a chunk - see DynamicDatasetChunkAssignment).
- * Checked unconditionally, not gated on whether this target actually has a
- * chunk assignment THIS cycle - it may have been chunked on a prior cycle
- * whose association-scoped dataset is now dangling from this cycle's point of
- * view. */
+ * target: the LN-wide name (buildDynamicDatasetName(lnReference, ...), used
+ * when this LN's leaf set fits under maxAttributes / maxAttributes is
+ * unknown) and the per-target chunked name
+ * (buildDynamicDatasetName(objectReference, ...), used when this target was
+ * assigned a chunk - see DynamicDatasetChunkAssignment). Both built with
+ * target->buffered - a fixed, model-level property of this specific RCB, so
+ * whichever scheme this target would itself produce is the only one relevant
+ * here; no ambiguity between the "@"-scoped and domain-scoped forms for a
+ * single target. Checked unconditionally, not gated on whether this target
+ * actually has a chunk assignment THIS cycle - it may have been chunked on a
+ * prior cycle whose dataset (association-scoped and gone, or a domain-scoped
+ * one this same client already owns and would otherwise re-detect as "live")
+ * is now dangling/stale from this cycle's point of view. */
 static bool
 looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlockTarget* target) {
     if (!datasetRef || !target) return false;
 
     if (target->lnReference) {
-        char* expectedLnWide = buildDynamicDatasetName(target->lnReference);
+        char* expectedLnWide = buildDynamicDatasetName(target->lnReference, target->buffered);
         bool match = expectedLnWide && strcmp(datasetRef, expectedLnWide) == 0;
         free(expectedLnWide);
         if (match) return true;
     }
 
     if (target->objectReference) {
-        char* expectedChunked = buildDynamicDatasetName(target->objectReference);
+        char* expectedChunked = buildDynamicDatasetName(target->objectReference, target->buffered);
         bool match = expectedChunked && strcmp(datasetRef, expectedChunked) == 0;
         free(expectedChunked);
         if (match) return true;
@@ -721,11 +821,22 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      *      start time - refreshPulledMemberRefCache reconciles that.
      *   3. SELF-CREATE - only if both above are absent/unusable,
      *      getOrCreateDynamicDataset synthesizes one covering every
-     *      reportable (FC=ST/MX) attribute of the RCB's own LN,
+     *      reportable (FC=ST/MX) attribute of the RCB's own LN. Unbuffered:
      *      association-scoped so it needs no explicit cleanup - UNCHANGED
-     *      from this feature's original dynamic-dataset-creation behavior;
-     *      this tier's own mechanism/lifetime is not touched by tiers 1-2
-     *      existing above it, only the priority order is new.
+     *      from this feature's original dynamic-dataset-creation behavior.
+     *      Buffered: domain/VMD-scoped instead (buildDynamicDatasetName) -
+     *      an association-scoped dataset is destroyed the instant this
+     *      connection closes, which a real device rejects assigning to a
+     *      buffered RCB outright (IED_ERROR_OBJECT_VALUE_INVALID/32 -
+     *      confirmed against both the vendored reference server and a real
+     *      SIPROTEC 6MD device, see GAP3_DYNAMIC_DATASET_NOTES.md); a
+     *      domain-scoped one persists past this connection, which is what a
+     *      buffered RCB needs, at the cost of needing explicit lifecycle
+     *      management - see handle->domainScopedDynamicDatasetNames' own doc
+     *      comment (mms_report_client_types.h) for reuse-on-reconnect and
+     *      cleanup-on-stop. This tier's own mechanism/lifetime is not
+     *      otherwise touched by tiers 1-2 existing above it, only the
+     *      priority order is new.
      * If even tier 3 fails (no reportable attributes, or the device rejects
      * creation - cap exceeded, etc.), DATSET is left unset and setRCBValues
      * below fails with IED_ERROR_OBJECT_VALUE_INVALID, same as before this
@@ -1255,6 +1366,33 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
 
     handle->stopRequested = true;
 
+    /* Buffered RCBs' self-created datasets are domain/VMD-scoped (see
+     * getOrCreateDynamicDataset's own doc comment), so unlike the
+     * association-scoped ones an unbuffered RCB gets, the server does NOT
+     * clean these up automatically when this connection closes - this is the
+     * only place that ever explicitly deletes them, and it must run BEFORE
+     * IedConnection_close below (deleteDataSet needs a live association).
+     * Without this, every start/stop cycle against the same device leaks one
+     * more dataset into its own total dataset-count budget
+     * (<Services><DynDataSet max="N"/>) until nothing is left for anything
+     * else. Best-effort: a delete failure (already gone, device rejects
+     * delete, connection already lost) just leaves a server-side dataset
+     * behind - logged, not fatal to stopping. */
+    if (handle->connection && handle->domainScopedDynamicDatasetNames) {
+        LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
+        while (element) {
+            char* datasetName = (char*) LinkedList_getData(element);
+            IedClientError deleteErr = IED_ERROR_OK;
+            if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
+                fprintf(stderr, "[mms_report_client] could not delete dynamic dataset '%s' on stop: "
+                        "error %d - left behind on the device\n", datasetName, deleteErr);
+            }
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyDeep(handle->domainScopedDynamicDatasetNames, free);
+        handle->domainScopedDynamicDatasetNames = NULL;
+    }
+
     if (handle->connection) IedConnection_close(handle->connection);
     if (handle->wakeSignal) Semaphore_post(handle->wakeSignal);
 
@@ -1277,6 +1415,18 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
 void
 MmsReportClientConnection_destroy(MmsReportClientHandle handle) {
     if (!handle) return;
+
+    /* Ordinarily already NULL - MmsReportClientConnection_stop (always
+     * called first by MmsReportClient_destroy) already deleted every entry
+     * server-side and freed this list. Defensive-only fallback for a
+     * hypothetical future caller that destroys without stopping first: still
+     * frees the local list (no local leak either way), just without the
+     * server-side IedConnection_deleteDataSet calls - the connection may
+     * already be gone by the time destroy runs. */
+    if (handle->domainScopedDynamicDatasetNames) {
+        LinkedList_destroyDeep(handle->domainScopedDynamicDatasetNames, free);
+        handle->domainScopedDynamicDatasetNames = NULL;
+    }
 
     if (handle->supervisorThread) {
         Thread_destroy(handle->supervisorThread);

@@ -396,6 +396,27 @@ struct sMmsReportClientHandle {
                                    MmsReportClient_create (NULL rcbReference means "nothing
                                    forwarded yet") - see its own doc comment above */
 
+    /* Owned: char* list of domain/VMD-scoped ("$"-joined, no "@" prefix)
+     * dynamic dataset names self-created for buffered RCBs whose SCL declared
+     * no datSet - see getOrCreateDynamicDataset's own doc comment
+     * (mms_report_client_connection.c) for why a buffered RCB can't use the
+     * ordinary association-scoped ("@"-prefixed) self-created dataset an
+     * unbuffered RCB gets: an association-scoped dataset is destroyed the
+     * instant this connection closes, which is incompatible with a buffered
+     * RCB's whole purpose of surviving one. Unlike that "@"-scoped scheme,
+     * these names are NOT auto-cleaned by the server on disconnect, so
+     * MmsReportClientConnection_stop explicitly IedConnection_deleteDataSet's
+     * every name here before closing the connection, to avoid leaking into
+     * the device's own total dataset-count budget across repeated
+     * start/stop cycles. Deliberately persists across reconnects (unlike
+     * DynamicDatasetSession's own per-connect-cycle cache in
+     * mms_report_client_connection.c) precisely so stop can find every name
+     * ever created for this client's whole lifetime, not just the current
+     * cycle's - deduped on insert, since naming is deterministic per LN and a
+     * reconnect's getOrCreateDynamicDataset re-derives the same name rather
+     * than a new one. */
+    LinkedList domainScopedDynamicDatasetNames;
+
     MmsReportClientCallback reportCallback;
     void* reportCallbackParam;
     MmsReportClientConnStateCallback connStateCallback;

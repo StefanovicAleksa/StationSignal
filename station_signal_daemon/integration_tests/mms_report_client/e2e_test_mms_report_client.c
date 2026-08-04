@@ -63,6 +63,7 @@
 #define TEST_PORT_PULLED_DATASET 10214
 #define TEST_PORT_CHUNKING 10215
 #define TEST_PORT_BUDGET 10216
+#define TEST_PORT_BUFFERED_DYNAMIC_DATASET 10217
 #define TEST_PASSWORD "secret123"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
@@ -91,6 +92,13 @@ static bool lastEntry0PreviousValue;
 static char interestedRcbReference[256];
 static volatile bool dynamicRcbEnabled;
 static volatile bool dynamicRcbFailed;
+
+/* brcbDyn's own enable-outcome trackers - the buffered counterpart of
+ * urcbDyn (see fixtures/reporter1.cid and sim_server.c's own comments on
+ * that RCB), for test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect
+ * below to distinguish its outcome from urcbDyn's/brcbMain's own. */
+static volatile bool dynamicBufferedRcbEnabled;
+static volatile bool dynamicBufferedRcbFailed;
 
 /* urcbDyn2's own enable-outcome trackers - the chunking/budget fixtures
  * (reporter1_chunking.cid / reporter1_budget.cid) declare a second Dyn RCB on
@@ -153,6 +161,11 @@ onRcbStatus(void* userParam, const char* rcbReference, bool enabled, IedClientEr
     if (rcbReference && strcmp(rcbReference, "Reporter1LD1/GGIO1.RP.urcbDyn2") == 0) {
         if (enabled) dynamicRcb2Enabled = true;
         else dynamicRcb2Failed = true;
+    }
+
+    if (rcbReference && strcmp(rcbReference, "Reporter1LD1/GGIO1.BR.brcbDyn") == 0) {
+        if (enabled) dynamicBufferedRcbEnabled = true;
+        else dynamicBufferedRcbFailed = true;
     }
 }
 
@@ -261,6 +274,8 @@ setUp(void) {
     dynamicRcbFailed = false;
     dynamicRcb2Enabled = false;
     dynamicRcb2Failed = false;
+    dynamicBufferedRcbEnabled = false;
+    dynamicBufferedRcbFailed = false;
     urcbDynGotReport = false;
     urcbDyn2GotReport = false;
     urcbDynEntryCount = 0;
@@ -559,6 +574,110 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
             "the GI snapshot's value must surface as this entry's previousValue");
     TEST_ASSERT_FALSE_MESSAGE(lastEntry0PreviousValue,
             "previousValue must be the GI-seeded live default (false), not the flipped-to value");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves the fix for the buffered-RCB dynamic-dataset bug confirmed against a
+ * real SIPROTEC 6MD device and documented in GAP3_DYNAMIC_DATASET_NOTES.md:
+ * the fixture's "brcbDyn" (parented under GGIO1, buffered="true", no datSet
+ * attribute at all - datSet="Dyn" in SCL terms) used to fail setRCBValues
+ * with IED_ERROR_OBJECT_VALUE_INVALID/32, exactly like urcbDyn once did,
+ * because getOrCreateDynamicDataset generated an association-scoped
+ * ("@"-prefixed) name regardless of buffered-ness. Both the vendored
+ * reference server (mms_mapping/reporting.c's updateReportDataset) and a real
+ * device reject assigning an association-scoped dataset to a buffered RCB
+ * outright - that dataset is destroyed the instant this connection closes,
+ * defeating the entire point of a buffered RCB surviving one.
+ * getOrCreateDynamicDataset now builds a domain/VMD-scoped name for a
+ * buffered target instead (buildDynamicDatasetName), which persists past
+ * this connection.
+ *
+ * Also proves the resulting dataset is correctly reused across a reconnect:
+ * since the name is domain-scoped (not auto-destroyed on disconnect like the
+ * "@"-scoped ones) and deterministic, the SECOND connect's own
+ * getOrCreateDynamicDataset call reaches IedConnection_createDataSet again
+ * for the exact same name, which the server now answers with
+ * IED_ERROR_OBJECT_EXISTS - createAndCacheDynamicDataset's own reuse branch
+ * must treat that as success, not fail brcbDyn's re-enable.
+ *
+ * Deliberately does NOT assert a flipped value reaches the report callback
+ * (unlike test_dynamicDataset_createdOnEnable_andReportsRealChange above):
+ * brcbDyn and urcbDyn are both Dyn RCBs on the very same LN (GGIO1), so they
+ * always cover the identical leaf set and always report byte-identical
+ * content for the same underlying change - MmsReportClientUseCases_shouldForwardAcrossRcb's
+ * cross-RCB dedup (proven separately in
+ * test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback)
+ * correctly drops brcbDyn's own copy as a duplicate of urcbDyn's, since
+ * urcbDyn's own GI-then-flip cycle always reaches the callback first. That's
+ * correct, expected behavior, not something this test should fight - proving
+ * per-report delivery for a Dyn dataset is already this suite's other test's
+ * job; this test's job is proving the dataset itself can be created,
+ * assigned, and reused for a BUFFERED target at all.
+ */
+void
+test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_BUFFERED_DYNAMIC_DATASET);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1",
+            TEST_PORT_BUFFERED_DYNAMIC_DATASET, &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    strncpy(interestedRcbReference, "Reporter1LD1/GGIO1.BR.brcbDyn", sizeof(interestedRcbReference) - 1);
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+    MmsReportClient_setConnectionStateCallback(client, onConnState, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected brcbDyn (buffered, no SCL-declared datSet) to get a domain-scoped "
+            "dynamically-created dataset and enable successfully");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
+            "brcbDyn must not fail with error 32 (OBJECT_VALUE_INVALID) - an association-scoped "
+            "dataset must never be attempted for a buffered RCB");
+
+    /* brcbDyn's GI-triggered snapshot seeds the cache and must never itself
+     * reach the callback - same bootstrap-suppression rule as every other
+     * RCB in this suite. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "brcbDyn's GI snapshot must never reach the callback - it silently seeds the cache "
+            "instead");
+
+    dynamicBufferedRcbEnabled = false;
+
+    /* Reconnect: the domain-scoped dataset created during the first connect
+     * is still sitting on the server (unlike an "@"-scoped one, it was NOT
+     * auto-destroyed when that first association closed - SimServer_stop
+     * only stops listening, it doesn't destroy the underlying IedServer/model,
+     * matching a real device across a client-side disconnect/reconnect). The
+     * second connect's own getOrCreateDynamicDataset call must gracefully
+     * reuse it (IED_ERROR_OBJECT_EXISTS) rather than failing. */
+    SimServer_stop(sim);
+    SimServer_start(sim, TEST_PORT_BUFFERED_DYNAMIC_DATASET);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected the reconnect to re-enable brcbDyn by reusing its already-existing "
+            "domain-scoped dataset, not fail trying to recreate it");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
+            "brcbDyn's reconnect must not fail - IED_ERROR_OBJECT_EXISTS must be treated as a "
+            "successful reuse, not an error");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1364,6 +1483,7 @@ main(void) {
     RUN_TEST(test_authRequired_wrongPassword_neverConnects);
     RUN_TEST(test_authRequired_wrongPassword_firesConnectionRejectedCallback);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
+    RUN_TEST(test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect);
     RUN_TEST(test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
     RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
