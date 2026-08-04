@@ -782,6 +782,70 @@ LLN0's own data too), new `SimServer_setModStVal`/`_setBehStVal` helpers, and a 
 proving a genuinely-orphaned own-named dataset gets deleted while a foreign, non-matching one is
 left completely untouched (`test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched`).
 
+## Whole-device clustering's tier 2/3 left a buffered target's own dataset exposed to
+   reconnect-time corruption
+
+A user report (real Raspberry Pi deployment log against a simulated substation IED) showed every
+single report, on every RCB, being filtered out forever as "bootstrap-seed or unchanged" — no
+report ever reached the frontend even after changing values in the simulator. Tracing the
+dataset-resolution tiers the whole-device clustering redesign above introduced (tier 2
+`pullLiveDataset` / tier 3 `adoptUnclaimedDataset`, `mms_report_client_connection.c`) found two
+related bugs, both confirmed by reverting each fix independently and observing a dedicated
+regression test fail, then pass again once restored:
+
+- **`looksLikeOurOwnDynamicDatasetName` rejected a BUFFERED target's own live dataset
+  unconditionally.** Its "dangling reference to a prior connection's own destroyed
+  association-scoped dataset" rationale only ever holds for an *unbuffered* (`@`-prefixed) name —
+  a buffered target's domain/VMD-scoped dataset genuinely persists past a connection close (the
+  whole point of the buffered-naming fix earlier in this section). Rejecting it anyway forced
+  every buffered Dyn RCB's reconnect through tier 3 instead of the cheap, targeted tier-2 reuse
+  tier 2 exists for. Fixed with a one-line early return (`if (target->buffered) return false;`).
+- **Tier 2 never registered the dataset name it reused into `session->claimedDatasetNames`** (the
+  same claim-tracking tier 3/4 already self-register into before returning) — so
+  `cleanupOrphanedDatasets`, running at the end of the same `enableAllTargets` cycle, could delete
+  a buffered target's own dataset out from under it while tier 2 was actively reusing it that very
+  cycle. Fixed by threading a `DynamicDatasetSession*` into `pullLiveDataset` and registering the
+  reused name before returning, mirroring tier 3/4's own self-registration. (Verified empirically
+  that the vendored reference server refuses to delete a dataset actively assigned to an *enabled*
+  RCB with `IED_ERROR_OBJECT_CONSTRAINT_CONFLICT` — so this specific failure mode isn't
+  reproducible against this simulator, but an RCB's `DatSet` is just a loosely-coupled string
+  reference to a dataset object, and a real device is not guaranteed to enforce the same
+  constraint; the fix closes the structural gap regardless.)
+
+A third, related gap in the same tier-3 fallback: `adoptUnclaimedDataset` claimed the *first*
+unclaimed candidate under a target's own LD in server enumeration order (empirically
+ASCII-lexicographic by full dataset name for this vendored server), with no preference for a
+candidate matching the target's *own* deterministic name. Two buffered Dyn targets sharing one LD,
+each with a pre-existing leftover dataset matching its own naming convention (e.g. from an earlier
+ungracefully-terminated run), could cross-adopt **each other's** leftover whenever enumeration
+order and target-processing order (SCL declaration order) disagreed about which name came first —
+each RCB then actively reported on the wrong dataset, covering the wrong attributes entirely, which
+is exactly the "real value change never reaches the frontend" symptom. Fixed by giving
+`adoptUnclaimedDataset` a first pass (buffered targets only) that specifically looks for
+`buildDynamicDatasetName(target->objectReference, true)` among this cycle's discovered candidates
+before falling through to the general scan.
+
+Also fixed, found while verifying the above: `ensureLnFallbackMemberRefCache`/
+`refreshPulledMemberRefCache`'s shape-rebuild path (a deliberate, narrow exception to "the
+value-diff cache is never reset," triggered whenever a target's resolved dataset identity changes
+between connects) had **no log line at all** — a real reset was completely silent, which is
+exactly why this failure mode wouldn't have shown up in the user's own log capture even if it was
+happening. Both functions now log the RCB reference and the old/new dataset identity whenever a
+reset actually fires.
+
+Regression coverage required a genuine second buffered Dyn RCB sharing an LD — `sim_server.c`
+gained an inert `brcbDyn2` (mirroring the existing `brcbDyn`/`urcbDyn2` convention: only a
+fixture that declares it client-side ever enables it), and a new dedicated fixture,
+`fixtures/reporter1_sibling_buffered.cid`, declares `brcbDyn`/`brcbDyn2` in the deliberately
+"wrong" order relative to their alphabetical dataset-name order so enumeration order and
+processing order disagree on purpose
+(`test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset`). The existing
+`test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched` needed a matching
+update: `brcbDyn` now adopts its own exact-name leftover immediately via the new preference pass,
+so the test's "genuinely unclaimed leftover gets cleaned up" scenario now needs `brcbDyn` satisfied
+via a *different*, live-preassigned dataset (tier 2) first, so its own leftover is never even
+looked at and stays genuinely orphaned.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

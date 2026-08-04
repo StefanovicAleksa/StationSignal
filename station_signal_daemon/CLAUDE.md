@@ -222,7 +222,14 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   forwarded. **The cache is never reset**, on either this feature or `goose_subscriber` —
   populated once per position, preserved for the client's whole lifetime — so a reconnect's fresh
   `GI` snapshot diffs against the real preserved last-known value: a genuine change made while
-  disconnected forwards with a real `previousValue`.
+  disconnected forwards with a real `previousValue`. **One deliberate, narrow exception**: if a
+  target's resolved dataset *identity* itself changes between connects (`resolvedDatasetReference`
+  mismatch — a genuine shape change, not the everyday case), the cache is rebuilt from scratch back
+  to bootstrap, since old slot indices no longer mean the same wire position under the new shape —
+  logged explicitly (`ensureLnFallbackMemberRefCache`/`refreshPulledMemberRefCache`) whenever it
+  actually fires, precisely so a dataset-identity churn silently swallowing real changes (see
+  `CHANGELOG.md`) is diagnosable from a log capture instead of looking identical to "nothing ever
+  changed."
   **Quality pairing**: a candidate that didn't individually qualify still forwards if any other
   candidate resolving to the same "anchor" (nearest structural ancestor, an ancestor walk over
   `$`-segments, not a last-`$` strip) does — value drags quality along and vice versa; a `NULL`
@@ -239,12 +246,24 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   LN's own tiny dataset) can instead cover the entire device's reportable data — including LDs/LNs
   that have zero RCBs of their own.
   Four-tier resolution order per target (`enableOneTarget`): **1. STATIC** (SCL `datSet`,
-  unchanged) → **2. PULL LIVE** (already assigned to *this* RCB, unchanged) → **3. ADOPT** — an
+  unchanged) → **2. PULL LIVE** (already assigned to *this* RCB, unchanged) — `looksLikeOurOwnDynamicDatasetName`'s
+  "dangling reference to a prior connection's own destroyed dataset" rejection only ever applies
+  to an *unbuffered* target (an association-scoped name is what's actually destroyed on
+  disconnect); a buffered target's own domain/VMD-scoped dataset genuinely persists past a
+  connection close, so its own live value here is the expected, common reconnect case, not a
+  dangling one — see `CHANGELOG.md` for the real bug this used to be. On success, the reused name
+  is registered into this cycle's claim-tracking so proactive orphan cleanup (below) never deletes
+  it out from under the RCB actively reusing it that same cycle → **3. ADOPT** — an
   existing, not-yet-claimed dataset already on the server under this target's own LD
   (`discoverExistingServerDatasets`, `adoptUnclaimedDataset`) is reused outright, no `createDataSet`
   call at all — "primarily use existing/foreign datasets, create our own only via necessity," per
   explicit product direction; assignment is non-destructive/shareable, so this applies to *any*
-  existing dataset regardless of who created it, not just this client's own — **4. SELF-CREATE** —
+  existing dataset regardless of who created it, not just this client's own. A buffered target
+  first checks specifically for a candidate matching its *own* deterministic name
+  (`buildDynamicDatasetName(target->objectReference, true)`) before the general LD-wide scan —
+  without this, two buffered targets sharing an LD, each with their own pre-existing leftover
+  dataset, could cross-adopt each other's leftover depending on server enumeration order (see
+  `CHANGELOG.md`) — **4. SELF-CREATE** —
   only if nothing above worked, `getOrCreateDynamicDataset` resolves this target's own
   whole-device cluster (`buildWholeDeviceClusterPlan`, computed once per connect cycle):
   `IedModel_getReportableAttributeReferencesForWholeDevice` walks every LD/LN in the model, then

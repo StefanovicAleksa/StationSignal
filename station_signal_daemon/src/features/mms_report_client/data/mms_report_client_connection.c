@@ -446,6 +446,23 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
  * handling below, which falls through to getOrCreateDynamicDataset either
  * way (a dangling reference would fail to resolve there too).
  *
+ * ONLY MEANINGFUL FOR UNBUFFERED TARGETS: this whole "dangling" rationale
+ * rests on the association-scoped ("@"-prefixed) name being destroyed the
+ * instant the prior connection closed. A buffered target's own dataset is
+ * domain/VMD-scoped instead and genuinely PERSISTS past a connection close -
+ * that persistence is the entire reason buildDynamicDatasetName gives
+ * buffered targets a different naming scheme in the first place (see
+ * enableOneTarget's tier-4 doc bullet). So a buffered target's own name
+ * showing up as its RCB's live DatSet on reconnect is not dangling at all -
+ * it's the expected, persistent, reusable case, and rejecting it here was a
+ * real bug: it forced every buffered Dyn RCB's reconnect through tier 3
+ * (adoptUnclaimedDataset) instead of the cheap, correct tier-2 reuse path,
+ * and (compounded by adoptUnclaimedDataset having no preference for a
+ * target's own name - see that function's own doc comment) could cause
+ * sibling RCBs under the same LD to cross-adopt each other's datasets on
+ * every reconnect, spuriously resetting their value-diff caches back to
+ * bootstrap and permanently suppressing real reports.
+ *
  * Checks the one naming scheme getOrCreateDynamicDataset can produce for
  * this target: buildDynamicDatasetName(objectReference, target->buffered) -
  * every Dyn target is keyed/named by its own objectReference now (whole-
@@ -461,6 +478,7 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
 static bool
 looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlockTarget* target) {
     if (!datasetRef || !target) return false;
+    if (target->buffered) return false;
 
     if (target->objectReference) {
         char* expectedChunked = buildDynamicDatasetName(target->objectReference, target->buffered);
@@ -479,7 +497,11 @@ looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlo
  * realistically, by a commissioning/engineering tool (e.g. Siemens DIGSI)
  * during substation engineering, independent of whatever client connects
  * later; whoever set it and whether they're still associated is irrelevant,
- * the live RCB value is the only signal consulted.
+ * the live RCB value is the only signal consulted. This is also the common
+ * reconnect-time path for a BUFFERED target reusing its own domain-scoped
+ * dataset from a prior connect cycle, now that looksLikeOurOwnDynamicDatasetName
+ * no longer rejects it (see that function's own doc comment) - the cheap,
+ * correct "nothing to do" case this tier exists to serve.
  * ClientReportControlBlock_getDataSetReference(rcb) is free here - `rcb` is
  * already fetched by enableOneTarget's own IedConnection_getRCBValues call,
  * no extra wire round-trip for the read itself.
@@ -498,18 +520,27 @@ looksLikeOurOwnDynamicDatasetName(const char* datasetRef, const ReportControlBlo
  * MmsReportClientMemberRefCacheEntry.resolvedDatasetReference's own
  * fingerprint check in refreshPulledMemberRefCache below.
  *
+ * On success, registers `liveDataset` into session->claimedDatasetNames -
+ * the same claim-tracking tier 3/4 already self-register into before
+ * returning. Without this, cleanupOrphanedDatasets (end of this same
+ * enableAllTargets cycle) would see this name as unclaimed and delete it out
+ * from under the RCB that is, at that very moment, actively reporting
+ * through it - a real bug this closes: a reused live dataset is just as
+ * "needed this cycle" as an adopted or self-created one, it was simply
+ * invisible to that bookkeeping before.
+ *
  * Returns true and fills *outMemberRefs (LinkedList of owned "$"-joined,
  * LD-prefixed member-reference char*, this feature's own memberReferences[]
  * convention) on success. Returns false (*outMemberRefs left untouched) if no
  * DatSet is currently assigned, it looks like our own dangling name (see
- * looksLikeOurOwnDynamicDatasetName), or the live fetch itself fails or
- * yields zero wire-convertible members - the caller falls through to
- * getOrCreateDynamicDataset unchanged in every one of these cases, exactly as
- * if this tier didn't exist.
+ * looksLikeOurOwnDynamicDatasetName - unbuffered targets only), or the live
+ * fetch itself fails or yields zero wire-convertible members - the caller
+ * falls through to getOrCreateDynamicDataset unchanged in every one of these
+ * cases, exactly as if this tier didn't exist.
  */
 static bool
 pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, ClientReportControlBlock rcb,
-        LinkedList* outMemberRefs) {
+        DynamicDatasetSession* session, LinkedList* outMemberRefs) {
     const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
     if (!liveDataset || liveDataset[0] == '\0') return false;
     if (looksLikeOurOwnDynamicDatasetName(liveDataset, target)) return false;
@@ -553,6 +584,10 @@ pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
 
     fprintf(stderr, "[mms_report_client] reusing live-assigned dataset '%s' for '%s' (%d member(s))\n",
             liveDataset, target->objectReference, LinkedList_size(wireRefs));
+
+    if (session) {
+        LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(liveDataset));
+    }
 
     *outMemberRefs = wireRefs;
     return true;
@@ -606,14 +641,22 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
 
     Semaphore_wait(handle->memberRefCacheLock);
     bool needsRebuild = !entry->resolvedDatasetReference || strcmp(entry->resolvedDatasetReference, liveDataset) != 0;
+    char* previousDatasetReference = (needsRebuild && entry->resolvedDatasetReference)
+            ? MmsReportClientUtils_safeStringDup(entry->resolvedDatasetReference) : NULL;
     Semaphore_post(handle->memberRefCacheLock);
     if (!needsRebuild) return;
 
     int count = memberRefs ? LinkedList_size(memberRefs) : 0;
-    if (count <= 0) return;
+    if (count <= 0) {
+        free(previousDatasetReference);
+        return;
+    }
 
     char** array = calloc((size_t) count, sizeof(char*));
-    if (!array) return;
+    if (!array) {
+        free(previousDatasetReference);
+        return;
+    }
     int i = 0;
     for (LinkedList el = LinkedList_getNext(memberRefs); el; el = LinkedList_getNext(el)) {
         array[i++] = MmsReportClientUtils_safeStringDup((char*) LinkedList_getData(el));
@@ -621,11 +664,23 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
 
     MmsReportClientMemberRefCacheEntry* fresh = MmsReportClientUseCases_buildMemberRefCacheEntry(
             handle->iedModel, target->objectReference, array, count, liveDataset);
-    if (!fresh) return;
+    if (!fresh) {
+        free(previousDatasetReference);
+        return;
+    }
 
     Semaphore_wait(handle->memberRefCacheLock);
     MmsReportClientUseCases_swapMemberRefCacheEntryShape(entry, fresh);
     Semaphore_post(handle->memberRefCacheLock);
+
+    /* Deliberately logged - see this function's own doc comment on why a
+     * shape rebuild resets the value-diff cache back to bootstrap. Without
+     * this line, that reset was completely silent, making it indistinguishable
+     * in a log capture from every report simply always being "unchanged." */
+    fprintf(stderr, "[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
+            "value-diff cache reset to bootstrap\n", target->objectReference,
+            previousDatasetReference ? previousDatasetReference : "(none)", liveDataset);
+    free(previousDatasetReference);
 }
 
 /* Small owned-string-list membership check - used by discoverExistingServerDatasets
@@ -772,6 +827,63 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
 }
 
 /*
+ * Resolves one candidate dataset name for adoption: fetches its real member
+ * list (IedConnection_getDataSetDirectory) and converts it to this feature's
+ * wire-reference form. Either way - adopted or found unusable - `candidate`
+ * is claimed into session->claimedDatasetNames so it isn't re-probed via a
+ * wasted wire round-trip for every remaining target this cycle (an unusable
+ * candidate is claimed-and-skipped, not retried). Returns true (and fills
+ * *outMemberRefs) only if `candidate` was actually adopted for `target`.
+ * Factored out of adoptUnclaimedDataset so both its "prefer this target's own
+ * name" pass and its general LD-wide scan can share this resolve/claim logic
+ * without duplicating it.
+ */
+static bool
+tryAdoptCandidate(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session,
+        const char* candidate, LinkedList* outMemberRefs) {
+    IedClientError err = IED_ERROR_OK;
+    bool isDeletable = false;
+    LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, candidate, &isDeletable);
+    if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
+        fprintf(stderr, "[mms_report_client] discovered dataset '%s' could not be resolved (error %d) - "
+                "skipping as an adoption candidate\n", candidate, err);
+        if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
+        LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+        return false;
+    }
+
+    LinkedList wireRefs = LinkedList_create();
+    if (!wireRefs) {
+        LinkedList_destroyDeep(acsiMembers, free);
+        return false;
+    }
+
+    LinkedList acsiElement = LinkedList_getNext(acsiMembers);
+    while (acsiElement) {
+        char* acsiRef = (char*) LinkedList_getData(acsiElement);
+        char* memberRef = MmsReportClientUseCases_convertAcsiRefToMemberReference(acsiRef);
+        if (memberRef) LinkedList_add(wireRefs, memberRef);
+        acsiElement = LinkedList_getNext(acsiElement);
+    }
+    LinkedList_destroyDeep(acsiMembers, free);
+
+    if (LinkedList_size(wireRefs) == 0) {
+        fprintf(stderr, "[mms_report_client] discovered dataset '%s' had no wire-convertible members - "
+                "skipping as an adoption candidate\n", candidate);
+        LinkedList_destroyDeep(wireRefs, free);
+        LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+        return false;
+    }
+
+    fprintf(stderr, "[mms_report_client] adopting existing dataset '%s' for '%s' (%d member(s)) - "
+            "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs));
+
+    LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
+    *outMemberRefs = wireRefs;
+    return true;
+}
+
+/*
  * Tier "adopt" of the dataset resolution order (see enableOneTarget's own
  * doc comment): before self-creating a NEW dataset for a Dyn target's own
  * whole-device cluster, check whether an existing, not-yet-claimed dataset
@@ -784,6 +896,21 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
  * is entirely unaffected - unlike deletion, which stays strictly limited to
  * datasets this client can prove it created itself (see the orphan-cleanup
  * pass), adoption applies to ANY existing dataset regardless of origin.
+ *
+ * PREFERS THIS EXACT TARGET'S OWN PREVIOUSLY-ASSIGNED NAME FIRST (buffered
+ * targets only - buildDynamicDatasetName's domain-scoped naming is the only
+ * scheme that can persist/be rediscovered across cycles at all): if
+ * buildDynamicDatasetName(target->objectReference, true) is among this
+ * cycle's discovered candidates and still unclaimed, it's tried before the
+ * general LD-wide scan below. This is secondary hardening, independent of
+ * pullLiveDataset (tier 2) already being the primary path for a buffered
+ * target reclaiming its own dataset - without it, this target's own name
+ * could otherwise be claimed by a DIFFERENT sibling RCB under the same LD
+ * during the general scan below (which has no such preference), forcing
+ * THIS target to self-create instead of reusing a dataset it already owns,
+ * and - the real risk - mismatching the SIBLING's own resolvedDatasetReference
+ * fingerprint, spuriously resetting the sibling's value-diff cache back to
+ * bootstrap.
  *
  * Each adopted dataset is claimed by exactly ONE target this cycle (tracked
  * in session->claimedDatasetNames, checked before considering a candidate)
@@ -821,6 +948,25 @@ adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* ta
     if (!slash) return NULL;
     size_t ldLen = (size_t) (slash - target->lnReference);
 
+    if (target->buffered && target->objectReference) {
+        char* ownName = buildDynamicDatasetName(target->objectReference, true);
+        if (ownName) {
+            LinkedList element = LinkedList_getNext(session->existingServerDatasets);
+            while (element) {
+                char* candidate = (char*) LinkedList_getData(element);
+                element = LinkedList_getNext(element);
+                if (strcmp(candidate, ownName) != 0) continue;
+                if (!stringListContains(session->claimedDatasetNames, candidate)
+                        && tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) {
+                    free(ownName);
+                    return candidate;
+                }
+                break;
+            }
+            free(ownName);
+        }
+    }
+
     LinkedList element = LinkedList_getNext(session->existingServerDatasets);
     while (element) {
         char* candidate = (char*) LinkedList_getData(element);
@@ -829,46 +975,7 @@ adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* ta
         if (strncmp(candidate, target->lnReference, ldLen) != 0 || candidate[ldLen] != '/') continue;
         if (stringListContains(session->claimedDatasetNames, candidate)) continue;
 
-        IedClientError err = IED_ERROR_OK;
-        bool isDeletable = false;
-        LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, candidate, &isDeletable);
-        if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
-            fprintf(stderr, "[mms_report_client] discovered dataset '%s' could not be resolved (error %d) - "
-                    "skipping as an adoption candidate\n", candidate, err);
-            if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
-            LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
-            continue;
-        }
-
-        LinkedList wireRefs = LinkedList_create();
-        if (!wireRefs) {
-            LinkedList_destroyDeep(acsiMembers, free);
-            return NULL;
-        }
-
-        LinkedList acsiElement = LinkedList_getNext(acsiMembers);
-        while (acsiElement) {
-            char* acsiRef = (char*) LinkedList_getData(acsiElement);
-            char* memberRef = MmsReportClientUseCases_convertAcsiRefToMemberReference(acsiRef);
-            if (memberRef) LinkedList_add(wireRefs, memberRef);
-            acsiElement = LinkedList_getNext(acsiElement);
-        }
-        LinkedList_destroyDeep(acsiMembers, free);
-
-        if (LinkedList_size(wireRefs) == 0) {
-            fprintf(stderr, "[mms_report_client] discovered dataset '%s' had no wire-convertible members - "
-                    "skipping as an adoption candidate\n", candidate);
-            LinkedList_destroyDeep(wireRefs, free);
-            LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
-            continue;
-        }
-
-        fprintf(stderr, "[mms_report_client] adopting existing dataset '%s' for '%s' (%d member(s)) - "
-                "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs));
-
-        LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
-        *outMemberRefs = wireRefs;
-        return candidate;
+        if (tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) return candidate;
     }
 
     return NULL;
@@ -916,6 +1023,8 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     Semaphore_wait(handle->memberRefCacheLock);
     bool needsRebuild = !entry->resolvedDatasetReference
             || strcmp(entry->resolvedDatasetReference, effectiveDatasetReference) != 0;
+    char* previousDatasetReference = (needsRebuild && entry->resolvedDatasetReference)
+            ? MmsReportClientUtils_safeStringDup(entry->resolvedDatasetReference) : NULL;
     if (!needsRebuild) {
         Semaphore_post(handle->memberRefCacheLock);
         return;
@@ -923,13 +1032,19 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     Semaphore_post(handle->memberRefCacheLock);
 
     DynamicDatasetChunkAssignment* chunk = lookupChunkAssignment(session->chunkAssignments, target->objectReference);
-    if (!chunk) return;
+    if (!chunk) {
+        free(previousDatasetReference);
+        return;
+    }
 
     int count = chunk->memberCount;
     char** array = NULL;
     if (count > 0) {
         array = calloc((size_t) count, sizeof(char*));
-        if (!array) return;
+        if (!array) {
+            free(previousDatasetReference);
+            return;
+        }
         for (int i = 0; i < count; i++) {
             array[i] = MmsReportClientUtils_safeStringDup(chunk->memberReferences[i]);
         }
@@ -938,21 +1053,37 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     if (count <= 0) {
         /* Nothing reportable (mirrors getOrCreateDynamicDataset's own
          * "no reportable attributes" log-and-skip posture) - still stamp the
-         * fingerprint so this rebuild isn't retried on every single enable. */
+         * fingerprint so this rebuild isn't retried on every single enable.
+         * No actual cache reset happens here (no fresh entry is built/swapped
+         * below), so no reset log line - see the real swap path below. */
         Semaphore_wait(handle->memberRefCacheLock);
         free(entry->resolvedDatasetReference);
         entry->resolvedDatasetReference = MmsReportClientUtils_safeStringDup(effectiveDatasetReference);
         Semaphore_post(handle->memberRefCacheLock);
+        free(previousDatasetReference);
         return;
     }
 
     MmsReportClientMemberRefCacheEntry* fresh = MmsReportClientUseCases_buildMemberRefCacheEntry(
             handle->iedModel, target->objectReference, array, count, effectiveDatasetReference);
-    if (!fresh) return;
+    if (!fresh) {
+        free(previousDatasetReference);
+        return;
+    }
 
     Semaphore_wait(handle->memberRefCacheLock);
     MmsReportClientUseCases_swapMemberRefCacheEntryShape(entry, fresh);
     Semaphore_post(handle->memberRefCacheLock);
+
+    /* Deliberately logged - see refreshPulledMemberRefCache's own doc comment
+     * on why a shape rebuild resets the value-diff cache back to bootstrap.
+     * Without this line, that reset was completely silent, making it
+     * indistinguishable in a log capture from every report simply always
+     * being "unchanged." */
+    fprintf(stderr, "[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
+            "value-diff cache reset to bootstrap\n", target->objectReference,
+            previousDatasetReference ? previousDatasetReference : "(none)", effectiveDatasetReference);
+    free(previousDatasetReference);
 }
 
 static void
@@ -1047,7 +1178,14 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      *      pullLiveDataset's own doc comment). Reusing it means every report
      *      against this RCB must decode against ITS real member list, not the
      *      LN-wide fallback shape buildMemberRefCache provisionally seeded at
-     *      start time - refreshPulledMemberRefCache reconciles that.
+     *      start time - refreshPulledMemberRefCache reconciles that. Also the
+     *      genuine reconnect-time path for a BUFFERED target's own
+     *      domain-scoped dataset, which persists past a connection close and
+     *      is therefore correctly recognized here (not rejected as dangling -
+     *      see looksLikeOurOwnDynamicDatasetName's own doc comment) - a
+     *      buffered target's reconnect now reuses its persisted dataset via
+     *      this cheap tier (getDataSetDirectory only, no createDataSet call)
+     *      instead of always falling through to tier 3/4.
      *   3. ADOPT UNCLAIMED - if nothing is assigned to THIS RCB specifically,
      *      check whether an existing, not-yet-claimed dataset (ours from a
      *      prior run, or a completely foreign one from another tool)
@@ -1091,7 +1229,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     const char* datasetTier = effectiveDatasetReference ? "SCL" : NULL;
     if (!effectiveDatasetReference) {
         LinkedList pulledMemberRefs = NULL;
-        if (pullLiveDataset(handle, target, rcb, &pulledMemberRefs)) {
+        if (pullLiveDataset(handle, target, rcb, session, &pulledMemberRefs)) {
             const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
             refreshPulledMemberRefCache(handle, target, liveDataset, pulledMemberRefs);
             LinkedList_destroyDeep(pulledMemberRefs, free);

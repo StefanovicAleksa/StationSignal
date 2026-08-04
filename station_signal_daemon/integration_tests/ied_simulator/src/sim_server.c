@@ -191,6 +191,22 @@ buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal, D
             RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION,
             0, 0);
 
+    /* A second BUFFERED Dyn RCB on the same LN (GGIO1) as brcbDyn - exists
+     * purely so an E2E test can prove adoptUnclaimedDataset's preferred-
+     * own-name pass (mms_report_client_connection.c): two buffered Dyn
+     * targets sharing one LD, each with its own pre-existing leftover
+     * dataset on the server (standing in for datasets left behind by an
+     * earlier, ungracefully-terminated run), in an order that would cause
+     * them to be cross-adopted by EACH OTHER without that preference. Only
+     * fixtures/reporter1_sibling_buffered.cid declares a matching
+     * <ReportControl name="brcbDyn2">, so no other E2E test that links this
+     * same sim_server.c ever attempts to enable it - same convention as
+     * urcbDyn2/brcbDup above. */
+    ReportControlBlock_create("brcbDyn2", ggio1, "brcbDyn2", true, NULL, 1,
+            TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI,
+            RPT_OPT_SEQ_NUM | RPT_OPT_DATA_SET | RPT_OPT_REASON_FOR_INCLUSION | RPT_OPT_ENTRY_ID,
+            0, 0);
+
     /* GSEControlBlock over the same ds1 dataset - lets goose_subscriber's E2E
      * test observe the same GGIO1.Ind1.stVal flip that mms_report_client's
      * E2E test observes via reporting. minTime=10/maxTime=5000 mirror
