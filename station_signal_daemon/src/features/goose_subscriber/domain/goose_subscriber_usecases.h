@@ -121,27 +121,32 @@ GooseSubscriberUseCases_computeLivenessPollIntervalMs(uint32_t configuredMs, int
  * Cross-target duplicate-content suppression - see
  * GooseSubscriberRecentForwardCache's own doc comment for the full
  * rationale (independent GoCBs publishing the same underlying event).
- * Compares (goCbRef, entries[0..entryCount)) against every filled slot in
- * cache's history: if any slot's goCbRef differs from this call's AND every
- * (reference, value) pair matches positionally, this is a duplicate -
- * returns false (do not forward), leaving the history untouched. Otherwise
- * (nothing cached yet, every match was from the SAME goCbRef, or genuinely
- * different content) returns true and appends this call's (goCbRef,
- * entries) to the ring (overwriting the oldest slot once full) - so a
- * suppressed duplicate never disturbs established history, but every other
- * case extends it. Deliberately content-only, no timestamp - see the cache
- * struct's own doc comment for why an earlier timestamp-gated revision let
- * real duplicates through. NULL-safe on cache (returns true, i.e. always
- * forward, if cache is NULL).
+ *
+ * Filters entries IN PLACE, per individual entry rather than the whole
+ * record at once: any entry whose (reference, value) exactly matches a
+ * recently-forwarded entry from a DIFFERENT goCbRef is the same physical
+ * event already reported by another GoCB, and is dropped (its owned
+ * value/reference/previousValue freed) - unlike a whole-record comparison,
+ * this survives two GoCBs whose datasets differ in shape/order/count, since
+ * only the genuinely-shared reference needs to match, not the rest of each
+ * dataset. Surviving entries are compacted to the front of `entries` and
+ * recorded into the cache under this record's own goCbRef, so a later
+ * GoCB's matching entry is caught too - a suppressed duplicate never
+ * disturbs established history, but every surviving entry extends it.
+ * Deliberately content-only, no timestamp - see the cache struct's own doc
+ * comment for why an earlier timestamp-gated revision let real duplicates
+ * through. Returns the surviving entry count (0 means nothing left to
+ * forward from this record; unchanged from entryCount if cache is NULL).
  */
-bool
-GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount);
+int
+GooseSubscriberUseCases_filterRecentForwardDuplicates(GooseSubscriberRecentForwardCache* cache,
+        const char* goCbRef, GooseSubscriberEntry* entries, int entryCount);
 
-/* Frees every filled slot's owned goCbRef/entries and resets the cache back
- * to empty ("nothing forwarded yet"). NULL-safe. Used both internally by
- * GooseSubscriberUseCases_shouldForwardRecent (to evict the oldest slot on
- * wraparound) and by GooseSubscription_destroy (final cleanup). */
+/* Frees every filled slot's owned goCbRef/reference/value and resets the
+ * cache back to empty ("nothing forwarded yet"). NULL-safe. Used both
+ * internally by GooseSubscriberUseCases_filterRecentForwardDuplicates (to
+ * evict the oldest slot on wraparound) and by GooseSubscription_destroy
+ * (final cleanup). */
 void
 GooseSubscriberUseCases_destroyRecentForwardCache(GooseSubscriberRecentForwardCache* cache);
 

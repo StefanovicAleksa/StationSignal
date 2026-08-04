@@ -281,7 +281,7 @@ waitUntilAtLeast(volatile int* counter, int threshold) {
 }
 
 /*
- * Proves GooseSubscriberUseCases_shouldForwardRecent end-to-end:
+ * Proves GooseSubscriberUseCases_filterRecentForwardDuplicates end-to-end:
  * gcbInd and gcbDup (fixtures/reporter1.cid) are two independently-subscribed
  * GoCBs publishing the IDENTICAL ds1 dataset - reproducing a real network's
  * redundant-publisher pattern. Flipping GGIO1.Ind1.stVal changes both

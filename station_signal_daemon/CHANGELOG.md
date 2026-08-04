@@ -1128,3 +1128,53 @@ mms_report_client's own suite already makes) and
 `test_shouldForwardRecent_differentTargetIdenticalContent_isSuppressed` (timestamp arguments
 dropped) cover the corrected behavior; the interleaved-third-GoCB regression test from earlier
 today needed no behavioral change, only its call sites updated for the new signature.
+
+## `goose_subscriber` cross-target dedup still missed duplicates when two GoCBs' datasets weren't shape-identical
+
+**Symptom**: another user report with a frontend screenshot, same shape as the incident above —
+one MMS row (expected) plus two GOOSE rows for the same underlying `stVal` change, same second,
+from two different GoCBs (`Control_DataSet`/`Control_DataSet1`) — reaching the frontend even
+after both prior fixes to `GooseSubscriberRecentForwardCache` (the 32-entry ring, then the
+timestamp-requirement revert).
+
+**Root cause**: `GooseSubscriberUseCases_shouldForwardRecent`/`crossTargetEntriesEqual`
+compared **whole records** positionally — requiring `cachedCount == entryCount`, then comparing
+`entries[i]` to `entries[i]` index-for-index. Two GoCBs only got deduped if their entire
+forwarded entry sets were byte-identical in content, count, AND order. The reported case's two
+GoCBs' datasets weren't shape-identical (differing member count/order around the shared `stVal`
+— real SCL commonly configures redundant GoCBs this way, not as byte-for-byte clones of each
+other's dataset), so the whole-record comparison failed and both "changed" records reached the
+websocket, even though the one entry that mattered (`stVal`) was a byte-for-byte duplicate. This
+was a known, documented limitation, not a new discovery — `docs/features/goose_subscriber.md`
+already flagged "cross-target dedup assumes exact positional entry-order match" as a gap — but
+no test exercised it: the existing E2E case and
+`test_shouldForwardRecent_differentTargetIdenticalContent_isSuppressed` only used two GoCBs with
+literally identical dataset shapes.
+
+**Fix**: moved the recent-forward cache from whole-record equality to per-`(reference, value)`
+equality. `GooseSubscriberRecentForwardCache`'s ring now holds individual
+`GooseSubscriberRecentForwardEntry{goCbRef, reference, value}` slots (capacity raised from 32
+whole-record slots to 128 individual entries, to hold a comparable depth of history at the finer
+granularity) instead of whole `GooseSubscriberRecentForwardRecord`s.
+`GooseSubscriberUseCases_shouldForwardRecent` (boolean, forward-or-drop-the-whole-record) was
+replaced by `GooseSubscriberUseCases_filterRecentForwardDuplicates`, which filters a record's
+`entries` array IN PLACE and returns the surviving count: each entry is checked independently
+against the ring (same `(reference, value)` content, from a *different* `goCbRef` — the
+`goCbRef`-must-differ and content-only/no-timestamp invariants from the entry above are both
+unchanged), so a record that's only partially a cross-GoCB duplicate still forwards its
+genuinely-unique entries instead of the whole record surviving or dying together. The frame
+adapter (`data/goose_subscriber_frame_adapter.c`) now sets `record->entryCount` to the filtered
+count and only drops the record entirely (freeing it, logging) when nothing survives; a partial
+filter logs how many of how many entries were dropped, distinct from the full-drop case.
+
+Tests in `tests/goose_subscriber/test_goose_subscriber_usecases.c` ported to the new signature
+(assert on returned count instead of a bool) plus two new cases proving the actual bug is fixed:
+`test_filterRecentForwardDuplicates_partiallyOverlappingDatasets_onlySharedEntryDropped` (GoCB A
+forwards `[stVal]`, GoCB B forwards `[stVal, q]` where `q` is unique to B — only `stVal` is
+dropped, `q` survives) and
+`test_filterRecentForwardDuplicates_reorderedIdenticalDatasets_stillFullyDeduped` (same two
+entries, opposite order between the two GoCBs — now fully deduped, where the old positional
+compare would have wrongly forwarded it despite this being a simpler case than the
+partial-overlap one). `run_all_tests.sh`'s full suite (630 tests across unit + every E2E suite,
+including `integration_tests/goose_subscriber/`'s existing identical-dataset case) re-verified
+passing unchanged.

@@ -703,17 +703,13 @@ GooseSubscriberUseCases_isDuplicateStNum(bool hasForwardedStNum, uint32_t lastFo
 }
 
 static void
-freeRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot) {
+freeRecentForwardSlot(GooseSubscriberRecentForwardEntry* slot) {
     free(slot->goCbRef);
+    free(slot->reference);
+    if (slot->value) MmsValue_delete(slot->value);
     slot->goCbRef = NULL;
-
-    for (int i = 0; i < slot->entryCount; i++) {
-        free(slot->entries[i].reference);
-        if (slot->entries[i].value) MmsValue_delete(slot->entries[i].value);
-    }
-    free(slot->entries);
-    slot->entries = NULL;
-    slot->entryCount = 0;
+    slot->reference = NULL;
+    slot->value = NULL;
 }
 
 void
@@ -727,65 +723,62 @@ GooseSubscriberUseCases_destroyRecentForwardCache(GooseSubscriberRecentForwardCa
 }
 
 static bool
-crossTargetEntriesEqual(const GooseSubscriberDedupEntry* cached, int cachedCount,
-        const GooseSubscriberEntry* entries, int entryCount) {
-    if (cachedCount != entryCount) return false;
+recentForwardEntryMatches(const GooseSubscriberRecentForwardEntry* slot,
+        const char* goCbRef, const char* reference, MmsValue* value) {
+    if (!slot->goCbRef || !goCbRef || strcmp(slot->goCbRef, goCbRef) == 0) return false; /* same source - not this layer's concern */
 
-    for (int i = 0; i < entryCount; i++) {
-        const char* cachedRef = cached[i].reference;
-        const char* newRef = entries[i].reference;
-        if ((cachedRef == NULL) != (newRef == NULL)) return false;
-        if (cachedRef && strcmp(cachedRef, newRef) != 0) return false;
+    if ((slot->reference == NULL) != (reference == NULL)) return false;
+    if (slot->reference && strcmp(slot->reference, reference) != 0) return false;
 
-        MmsValue* cachedVal = cached[i].value;
-        MmsValue* newVal = entries[i].value;
-        if ((cachedVal == NULL) != (newVal == NULL)) return false;
-        if (cachedVal && !valuesAreSemanticallyEqual(cachedVal, newVal)) return false;
-    }
+    if ((slot->value == NULL) != (value == NULL)) return false;
+    if (slot->value && !valuesAreSemanticallyEqual(slot->value, value)) return false;
+
     return true;
 }
 
 static void
-fillRecentForwardSlot(GooseSubscriberRecentForwardRecord* slot,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
-    slot->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
-    slot->entries = NULL;
-    slot->entryCount = 0;
-    if (entryCount <= 0) return;
-
-    GooseSubscriberDedupEntry* copy = calloc((size_t) entryCount, sizeof(GooseSubscriberDedupEntry));
-    if (!copy) return;
-
-    for (int i = 0; i < entryCount; i++) {
-        copy[i].reference = entries[i].reference ? GooseSubscriberUtils_safeStringDup(entries[i].reference) : NULL;
-        copy[i].value = entries[i].value ? MmsValue_clone(entries[i].value) : NULL;
-    }
-    slot->entries = copy;
-    slot->entryCount = entryCount;
-}
-
-bool
-GooseSubscriberUseCases_shouldForwardRecent(GooseSubscriberRecentForwardCache* cache,
-        const char* goCbRef, const GooseSubscriberEntry* entries, int entryCount) {
-    if (!cache) return true;
-
-    for (int i = 0; i < cache->count; i++) {
-        GooseSubscriberRecentForwardRecord* slot = &cache->history[i];
-        bool sameSource = slot->goCbRef && goCbRef && strcmp(slot->goCbRef, goCbRef) == 0;
-        if (!sameSource
-                && crossTargetEntriesEqual(slot->entries, slot->entryCount, entries, entryCount)) {
-            return false;
-        }
-    }
-
-    GooseSubscriberRecentForwardRecord* writeSlot = &cache->history[cache->nextSlot];
+pushRecentForwardEntry(GooseSubscriberRecentForwardCache* cache,
+        const char* goCbRef, const char* reference, MmsValue* value) {
+    GooseSubscriberRecentForwardEntry* slot = &cache->history[cache->nextSlot];
     if (cache->count == GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) {
-        freeRecentForwardSlot(writeSlot);
+        freeRecentForwardSlot(slot);
     }
-    fillRecentForwardSlot(writeSlot, goCbRef, entries, entryCount);
+
+    slot->goCbRef = goCbRef ? GooseSubscriberUtils_safeStringDup(goCbRef) : NULL;
+    slot->reference = reference ? GooseSubscriberUtils_safeStringDup(reference) : NULL;
+    slot->value = value ? MmsValue_clone(value) : NULL;
 
     cache->nextSlot = (cache->nextSlot + 1) % GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY;
     if (cache->count < GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY) cache->count++;
+}
 
-    return true;
+int
+GooseSubscriberUseCases_filterRecentForwardDuplicates(GooseSubscriberRecentForwardCache* cache,
+        const char* goCbRef, GooseSubscriberEntry* entries, int entryCount) {
+    if (!cache) return entryCount;
+
+    int survivingCount = 0;
+    for (int i = 0; i < entryCount; i++) {
+        GooseSubscriberEntry* candidate = &entries[i];
+
+        bool isDuplicate = false;
+        for (int h = 0; h < cache->count; h++) {
+            if (recentForwardEntryMatches(&cache->history[h], goCbRef, candidate->reference, candidate->value)) {
+                isDuplicate = true;
+                break;
+            }
+        }
+
+        if (isDuplicate) {
+            if (candidate->value) MmsValue_delete(candidate->value);
+            free(candidate->reference);
+            if (candidate->previousValue) MmsValue_delete(candidate->previousValue);
+        } else {
+            pushRecentForwardEntry(cache, goCbRef, candidate->reference, candidate->value);
+            entries[survivingCount] = *candidate;
+            survivingCount++;
+        }
+    }
+
+    return survivingCount;
 }

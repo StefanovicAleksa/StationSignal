@@ -272,15 +272,6 @@ typedef struct {
 } GooseSubscriberTargetEntry;
 
 /*
- * One (reference, value) pair kept by GooseSubscriberRecentForwardCache -
- * mirrors mms_report_client's MmsReportClientDedupEntry exactly. Both owned.
- */
-typedef struct {
-    char* reference;
-    MmsValue* value;
-} GooseSubscriberDedupEntry;
-
-/*
  * Cross-target duplicate-content suppression - the GOOSE equivalent of
  * mms_report_client's MmsReportClientCrossRcbDedupCache (see its own doc
  * comment for the full rationale: some real networks configure multiple
@@ -288,7 +279,15 @@ typedef struct {
  * event, mirroring the MMS redundant-RCB pattern - each target's own
  * per-position filter starts independent, so both frames would otherwise
  * survive their own filter and reach the websocket as apparent duplicates).
- * A candidate is a duplicate - and suppressed - only if its (reference,
+ *
+ * Keyed per INDIVIDUAL ENTRY, not per whole record - an earlier revision
+ * compared two records' entire entry sets positionally (same count, same
+ * order), which only caught the case where two GoCBs' datasets were
+ * byte-identical in shape. Real SCL configures GoCBs whose datasets share
+ * one DA but otherwise differ in member count/order (e.g. one dataset
+ * carries a sibling `q` the other doesn't), which the positional compare
+ * let straight through as an apparent non-duplicate. A candidate entry is
+ * a duplicate - and dropped from its record - only if its (reference,
  * value) content exactly matches a slot in this history AND its goCbRef
  * differs from the one that produced that slot; a repeat from the SAME
  * goCbRef is left entirely to that target's own per-position filter, same
@@ -307,7 +306,7 @@ typedef struct {
  * concurrently on one IED, so an unrelated target's frame landing between
  * two duplicates routinely clobbers the one slot before the real duplicate
  * arrives. This struct is instead a small bounded ring of the most
- * recently forwarded records (any target), so a duplicate is still caught
+ * recently forwarded entries (any target), so a duplicate is still caught
  * even with unrelated traffic interleaved.
  *
  * Not to be confused with GooseSubscriberMemberRefCache's per-target
@@ -315,21 +314,24 @@ typedef struct {
  * target's own history and knows nothing about content across targets.
  */
 typedef struct {
-    char* goCbRef;                        /* owned; NULL means an empty slot */
-    GooseSubscriberDedupEntry* entries;   /* owned array of entryCount owned entries */
-    int entryCount;
-} GooseSubscriberRecentForwardRecord;
+    char* goCbRef;    /* owned; which GoCB forwarded this entry. NULL means an empty slot */
+    char* reference;  /* owned */
+    MmsValue* value;  /* owned clone */
+} GooseSubscriberRecentForwardEntry;
 
-/* Ring capacity: sized generously above the concurrent-GoCB counts observed
- * on real IEDs (single devices seen streaming 8-10+ concurrent LN datasets)
- * so an interleaved burst of unrelated GOOSE traffic doesn't evict the
- * record a later duplicate needs to match against. Correctness of the dedup
- * decision doesn't depend on this size - the required exact timestampMs
- * match is what prevents false-positive suppression, not ring depth. */
-#define GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY 32
+/* Ring capacity in individual entries (previously 32 whole-record slots,
+ * before the switch to per-entry granularity above) - sized generously
+ * above what several concurrent GoCBs' simultaneously-changing entries look
+ * like on a real IED (single devices seen streaming 8-10+ concurrent LN
+ * datasets) so an interleaved burst of unrelated GOOSE traffic doesn't
+ * evict the entry a later duplicate needs to match against. Correctness of
+ * the dedup decision doesn't depend on this size - the content-only
+ * (reference, value) match with a required differing goCbRef is what
+ * prevents false-positive suppression, not ring depth. */
+#define GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY 128
 
 typedef struct {
-    GooseSubscriberRecentForwardRecord history[GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY];
+    GooseSubscriberRecentForwardEntry history[GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY];
     int count;     /* valid slots filled so far, caps at capacity */
     int nextSlot;  /* ring write cursor - wraps and overwrites the oldest slot once full */
 } GooseSubscriberRecentForwardCache;
