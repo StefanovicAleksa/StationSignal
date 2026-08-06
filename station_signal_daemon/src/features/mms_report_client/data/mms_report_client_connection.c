@@ -407,7 +407,7 @@ logGranularCreateDataSetError(MmsReportClientHandle handle, const char* datasetN
 }
 
 static const char*
-createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
+createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
         int memberCount, bool buffered) {
     LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
@@ -488,6 +488,46 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
     LinkedList_add(session->cache, cacheNode);
 
     return cacheNode->datasetName;
+}
+
+/* Some real devices (confirmed against a real SIPROTEC 6MD: every
+ * association-specific create rejected with MMS reject-other, not a
+ * resource/quota-class ServiceError, independent of remaining budget - see
+ * CHANGELOG.md) reject association-specific ("@"-prefixed) dataset creation
+ * outright, structurally, regardless of capacity. A domain-scoped dataset
+ * assigned to an unbuffered RCB is otherwise perfectly valid IEC 61850 (this
+ * client already does exactly that via the ADOPT tier whenever an existing
+ * one is found) - only the CREATION form was ever the problem for such a
+ * device, not the assignment. So an unbuffered target whose real
+ * association-specific attempt fails gets one fallback attempt as a
+ * domain-scoped dataset instead, accepting the same lifecycle tradeoff a
+ * buffered target's dataset already has: it persists past this connection
+ * and won't be auto-cleaned by the server, so it's tracked via
+ * rememberDomainScopedDatasetName exactly like a buffered target's own
+ * (createAndCacheDynamicDatasetAttempt keys every naming/reuse/cleanup
+ * decision off its own `buffered` parameter, never off the target's real
+ * buffered-ness, so calling it a second time with buffered=true here "just
+ * works," including OBJECT_EXISTS-as-reuse on a later reconnect once this
+ * fallback dataset already exists on the server).
+ *
+ * A buffered target already always uses the domain-scoped path on its one
+ * and only attempt (see the four-tier resolution order's own comment in
+ * enableOneTarget) - `buffered` short-circuits below because there is no
+ * "more scoped" fallback left to try. */
+static const char*
+createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
+        const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
+        int memberCount, bool buffered) {
+    const char* result = createAndCacheDynamicDatasetAttempt(handle, session, cacheKey, logLnReference,
+            logRcbReference, memberReferences, memberCount, buffered);
+    if (result || buffered) return result;
+
+    fprintf(stderr, "[mms_report_client] association-specific dataset creation failed for LN '%s' - falling "
+            "back to a domain-scoped dataset instead (some real devices reject association-specific creation "
+            "outright, independent of quota - see CHANGELOG.md) - this dataset will NOT be cleaned up "
+            "automatically and permanently consumes device quota until a device-side reset\n", logLnReference);
+    return createAndCacheDynamicDatasetAttempt(handle, session, cacheKey, logLnReference, logRcbReference,
+            memberReferences, memberCount, true);
 }
 
 /*
