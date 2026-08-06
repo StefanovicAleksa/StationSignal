@@ -897,6 +897,16 @@ IedModelUseCases_getDynDataSetMaxAttributes(IedModelHandle handle) {
     return handle ? handle->dynDataSetMaxAttributes : -1;
 }
 
+int
+IedModelUseCases_getConfDataSetMax(IedModelHandle handle) {
+    return handle ? handle->confDataSetMax : -1;
+}
+
+int
+IedModelUseCases_getConfDataSetMaxAttributes(IedModelHandle handle) {
+    return handle ? handle->confDataSetMaxAttributes : -1;
+}
+
 LinkedList
 IedModelUseCases_getReadTargets(IedModelHandle handle) {
     LinkedList result = LinkedList_create();

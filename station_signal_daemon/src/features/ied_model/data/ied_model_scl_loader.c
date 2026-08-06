@@ -1003,10 +1003,13 @@ IedModelSclLoader_listIedNames(const char* path, IedModelLoadError* outError) {
 
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes) {
+        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
+        int* outConfDataSetMax, int* outConfDataSetMaxAttributes) {
     if (outDaSemantics) *outDaSemantics = NULL;
     if (outDynDataSetMax) *outDynDataSetMax = -1;
     if (outDynDataSetMaxAttributes) *outDynDataSetMaxAttributes = -1;
+    if (outConfDataSetMax) *outConfDataSetMax = -1;
+    if (outConfDataSetMaxAttributes) *outConfDataSetMaxAttributes = -1;
 
     mxml_node_t* tree;
     mxml_node_t* sclRoot = loadSclRoot(path, &tree, outError);
@@ -1027,6 +1030,13 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
         if (outDynDataSetMax) *outDynDataSetMax = IedModelUtils_attrInt(dynDataSetNode, "max", -1);
         if (outDynDataSetMaxAttributes)
             *outDynDataSetMaxAttributes = IedModelUtils_attrInt(dynDataSetNode, "maxAttributes", -1);
+    }
+
+    mxml_node_t* confDataSetNode = servicesNode ? findFirstChildElement(servicesNode, "ConfDataSet") : NULL;
+    if (confDataSetNode) {
+        if (outConfDataSetMax) *outConfDataSetMax = IedModelUtils_attrInt(confDataSetNode, "max", -1);
+        if (outConfDataSetMaxAttributes)
+            *outConfDataSetMaxAttributes = IedModelUtils_attrInt(confDataSetNode, "maxAttributes", -1);
     }
 
     /* May legitimately be NULL - individual type lookups then fail gracefully (warn +

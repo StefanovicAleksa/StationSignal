@@ -206,6 +206,15 @@ LinkedList IedModel_getReportableAttributeReferencesForWholeDevice(IedModelHandl
 int IedModel_getDynDataSetMax(IedModelHandle handle);
 int IedModel_getDynDataSetMaxAttributes(IedModelHandle handle);
 
+/* Same shape as above, for the sibling <ConfDataSet max="N" maxAttributes="M"/>
+ * - the domain-scoped ("Conf") dataset pool, distinct from DynDataSet's
+ * association-scoped ("Dyn") one. mms_report_client budgets/sizes its
+ * domain-scoped dynamic datasets (buffered targets always, unbuffered
+ * targets' fallback when association-specific creation is rejected) against
+ * this pool instead. */
+int IedModel_getConfDataSetMax(IedModelHandle handle);
+int IedModel_getConfDataSetMaxAttributes(IedModelHandle handle);
+
 /*
  * Member-reference-keyed counterparts of IedModel_getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberLeafSemantics, plus a

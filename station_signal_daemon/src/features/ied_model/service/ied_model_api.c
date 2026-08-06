@@ -47,8 +47,10 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     LinkedList daSemanticsList = NULL;
     int dynDataSetMax = -1;
     int dynDataSetMaxAttributes = -1;
+    int confDataSetMax = -1;
+    int confDataSetMaxAttributes = -1;
     IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList,
-            &dynDataSetMax, &dynDataSetMaxAttributes);
+            &dynDataSetMax, &dynDataSetMaxAttributes, &confDataSetMax, &confDataSetMaxAttributes);
 
     if (outError) *outError = localError;
     if (!model) {
@@ -70,6 +72,8 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     adoptDaSemantics(handle, daSemanticsList);
     handle->dynDataSetMax = dynDataSetMax;
     handle->dynDataSetMaxAttributes = dynDataSetMaxAttributes;
+    handle->confDataSetMax = confDataSetMax;
+    handle->confDataSetMaxAttributes = confDataSetMaxAttributes;
 
     return handle;
 }
@@ -98,6 +102,8 @@ IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode)
      * model - same "unknown" posture as daSemantics above. */
     handle->dynDataSetMax = -1;
     handle->dynDataSetMaxAttributes = -1;
+    handle->confDataSetMax = -1;
+    handle->confDataSetMaxAttributes = -1;
 
     return handle;
 }
@@ -169,6 +175,16 @@ IedModel_getDynDataSetMax(IedModelHandle handle) {
 int
 IedModel_getDynDataSetMaxAttributes(IedModelHandle handle) {
     return IedModelUseCases_getDynDataSetMaxAttributes(handle);
+}
+
+int
+IedModel_getConfDataSetMax(IedModelHandle handle) {
+    return IedModelUseCases_getConfDataSetMax(handle);
+}
+
+int
+IedModel_getConfDataSetMaxAttributes(IedModelHandle handle) {
+    return IedModelUseCases_getConfDataSetMaxAttributes(handle);
 }
 
 LinkedList

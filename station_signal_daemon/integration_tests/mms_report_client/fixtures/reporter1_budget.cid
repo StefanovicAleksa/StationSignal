@@ -30,7 +30,16 @@
          SimServer_createWithDatasetLimits, specifically so any failure here
          is provably ours, not the device's). -->
     <Services>
-      <DynDataSet max="1" maxAttributes="3" />
+      <!-- Both declared max="0" deliberately - see the test's own doc
+           comment (e2e_test_mms_report_client.c) for the full reasoning:
+           urcbDyn adopts a pre-existing dataset (free, touches neither
+           budget), so DynDataSet's budget is never actually spent by
+           anything in this fixture - it must already be zero for urcbDyn2's
+           own attempt to be gated at all. ConfDataSet must be zero too, or
+           the domain-scoped fallback (createAndCacheDynamicDataset) would
+           just succeed anyway once the primary attempt is gated. -->
+      <DynDataSet max="0" maxAttributes="3" />
+      <ConfDataSet max="0" maxAttributes="3" />
     </Services>
     <AccessPoint name="AP1">
       <Server>

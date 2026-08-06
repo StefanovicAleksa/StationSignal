@@ -107,6 +107,12 @@ LinkedList IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedMo
 int IedModelUseCases_getDynDataSetMax(IedModelHandle handle);
 int IedModelUseCases_getDynDataSetMaxAttributes(IedModelHandle handle);
 
+/* Same shape as above, for the sibling <ConfDataSet max="N" maxAttributes="M"/>
+ * - the domain-scoped ("Conf") dataset pool, distinct from DynDataSet's
+ * association-scoped ("Dyn") one. */
+int IedModelUseCases_getConfDataSetMax(IedModelHandle handle);
+int IedModelUseCases_getConfDataSetMaxAttributes(IedModelHandle handle);
+
 /*
  * Member-reference-keyed counterparts of getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberSemantics(one entry)/

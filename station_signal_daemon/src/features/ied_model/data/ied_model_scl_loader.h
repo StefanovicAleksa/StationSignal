@@ -32,10 +32,16 @@
  * missing from a <DynDataSet> that is present). 0 is a real, distinct value
  * (device declares zero capacity) - never conflated with -1. <Services> is a
  * direct child of <IED>, a sibling of <AccessPoint>.
+ *
+ * *outConfDataSetMax and *outConfDataSetMaxAttributes are the same shape,
+ * parsed from the sibling <ConfDataSet max="N" maxAttributes="M"/> element -
+ * the domain-scoped ("Conf") dataset pool, distinct from DynDataSet's
+ * association-scoped ("Dyn") one.
  */
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes);
+        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
+        int* outConfDataSetMax, int* outConfDataSetMaxAttributes);
 
 /*
  * Lists every direct-child <IED>'s name attribute at the SCL's top level

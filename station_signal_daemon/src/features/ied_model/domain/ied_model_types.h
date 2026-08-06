@@ -146,6 +146,16 @@ struct sIedModelHandle {
      * never conflated with -1. */
     int dynDataSetMax;
     int dynDataSetMaxAttributes;
+
+    /* Same shape as dynDataSetMax/dynDataSetMaxAttributes above, but for
+     * <Services><ConfDataSet max="N" maxAttributes="M"/> - the domain-scoped
+     * ("Conf") dataset pool, distinct from DynDataSet's association-scoped
+     * ("Dyn") one. mms_report_client budgets/sizes buffered-target self-created
+     * datasets (always Conf-class) and its own domain-scoped fallback for
+     * unbuffered targets (also Conf-class, when association-specific creation
+     * is rejected) against this pool instead of DynDataSet's. */
+    int confDataSetMax;
+    int confDataSetMaxAttributes;
 };
 
 typedef struct sIedModelHandle* IedModelHandle;

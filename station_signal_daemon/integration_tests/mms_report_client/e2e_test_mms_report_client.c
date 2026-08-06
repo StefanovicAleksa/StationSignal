@@ -67,6 +67,7 @@
 #define TEST_PORT_ORPHAN_CLEANUP 10218
 #define TEST_PORT_SIBLING_BUFFERED 10219
 #define TEST_PORT_GI_ONLY 10220
+#define TEST_PORT_DELETE_WHILE_ENABLED 10221
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
 #define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
@@ -1861,19 +1862,32 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
 }
 
 /*
- * Proves the per-connect-cycle dataset-count budget (DynamicDatasetSession,
- * mms_report_client_connection.c): fixtures/reporter1_budget.cid declares
- * <Services><DynDataSet max="1" maxAttributes="3"/></Services> - the same
- * maxAttributes=3 as reporter1_chunking.cid (forcing the same two-chunk
- * split), but max="1" means this connect cycle's own budget only allows ONE
- * new createDataSet: urcbDyn (the LN's first spare Dyn target) succeeds,
- * urcbDyn2 (the second) must fail cleanly via the budget short-circuit - no
- * DATSET gets set, setRCBValues fails, rcbStatusCallback fires false - while
+ * Proves the per-connect-cycle dataset-count budgets (DynamicDatasetSession,
+ * mms_report_client_connection.c) genuinely gate self-creation, on both
+ * pools, once exhausted: fixtures/reporter1_budget.cid declares
+ * <Services><DynDataSet max="0" maxAttributes="3"/><ConfDataSet max="0"
+ * maxAttributes="3"/></Services> - the same maxAttributes=3 as
+ * reporter1_chunking.cid (forcing the same two-chunk split), both pools
+ * declared already exhausted.
+ *
+ * urcbDyn (the LN's first spare Dyn target) still succeeds - the base
+ * simulator model always has a pre-existing "ds2" dataset available under
+ * this LD, so urcbDyn is satisfied via the ADOPT tier (adoptUnclaimedDataset)
+ * before it ever reaches tier-4 self-create at all, and adoption is free
+ * against either budget (see DynamicDatasetSession's own doc comment on why
+ * cache hits/adoptions never decrement anything). urcbDyn2 has no such
+ * candidate available, so it's the one real proof here: its own
+ * association-specific attempt is gated by the already-zero Dyn budget with
+ * no wire call even made, its domain-scoped fallback attempt
+ * (createAndCacheDynamicDataset) is gated the same way by the already-zero
+ * Conf budget - genuine, total exhaustion with nowhere left to fall back to,
+ * not just "the first attempt's own pool is capped." No DATSET gets set,
+ * setRCBValues never even attempted, rcbStatusCallback fires false - while
  * an unrelated SCL-static RCB (brcbMain, entirely untouched by dynamic-
  * dataset bookkeeping) keeps enabling normally, proving graceful degradation
  * rather than a cascade failure. The simulator's own device-side count cap
  * (SimServer_createWithDatasetLimits) is configured generously (10) so the
- * failure here is provably from OUR OWN SCL-declared budget, not an
+ * failure here is provably from OUR OWN SCL-declared budgets, not an
  * incidental device-side rejection.
  */
 void
@@ -1904,15 +1918,88 @@ test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly(void) {
             "expected brcbMain (SCL-static dataset, unrelated to dynamic-dataset budget bookkeeping) "
             "to enable normally regardless of urcbDyn2's budget failure");
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
-            "expected urcbDyn (the first chunk created this cycle) to succeed within the max=1 budget");
-    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn is the first chunk created this cycle - must succeed");
+            "expected urcbDyn to succeed via adopting the pre-existing 'ds2' dataset - unrelated to "
+            "either dynamic-dataset budget, both of which are declared already exhausted");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn adopts an existing dataset - must succeed");
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcb2Failed),
-            "expected urcbDyn2 (the second chunk) to fail cleanly once the max=1 budget is exhausted, "
-            "not silently hang or crash the daemon");
-    TEST_ASSERT_FALSE_MESSAGE(dynamicRcb2Enabled, "urcbDyn2 must not enable once this cycle's budget is exhausted");
+            "expected urcbDyn2 (no adoption candidate available) to fail cleanly once both the Dyn and "
+            "Conf budgets are exhausted, not silently hang or crash the daemon");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcb2Enabled, "urcbDyn2 must not enable once both budgets are exhausted");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Proves (and refines) the hypothesis MmsReportClientConnection_stop's
+ * disable-before-delete step is built on (found via manual IEDScout testing
+ * against a real device): a dataset still referenced by an ENABLED RCB's
+ * DatSet is refused for deletion, independent of any quota/pollution
+ * question - purely because it's still in use. Deliberately bypasses
+ * mms_report_client entirely (raw IedConnection calls only) - this is a
+ * question about the SERVER's own behavior, not about this client's logic.
+ *
+ * The vendored reference server DOES enforce this - confirmed empirically
+ * here. But disabling RptEna alone was NOT sufficient against it (still
+ * refused with IED_ERROR_OBJECT_CONSTRAINT_CONFLICT/35) - the RCB's own
+ * DatSet attribute continuing to point at the dataset is itself the
+ * constraint. Clearing DatSet (empty string) alongside disabling RptEna is
+ * what actually releases it, confirmed by the same delete then succeeding.
+ * MmsReportClientConnection_stop's cleanup step does both, matching this
+ * exact sequence.
+ */
+void
+test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_DELETE_WHILE_ENABLED);
+
+    IedConnection conn = IedConnection_create();
+    IedClientError err = IED_ERROR_OK;
+    IedConnection_connect(conn, &err, "127.0.0.1", TEST_PORT_DELETE_WHILE_ENABLED);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, err, "expected the connection to associate");
+
+    LinkedList members = LinkedList_create();
+    LinkedList_add(members, (void*) "Reporter1LD1/GGIO1.SPCSO1.stVal[ST]");
+    IedConnection_createDataSet(conn, &err, "Reporter1LD1/GGIO1$deleteTestDs", members);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, err, "expected the test dataset to be created");
+    LinkedList_destroyStatic(members);
+
+    ClientReportControlBlock rcb = IedConnection_getRCBValues(conn, &err, "Reporter1LD1/GGIO1.RP.urcbDyn", NULL);
+    TEST_ASSERT_NOT_NULL(rcb);
+    ClientReportControlBlock_setDataSetReference(rcb, "Reporter1LD1/GGIO1$deleteTestDs");
+    ClientReportControlBlock_setRptEna(rcb, true);
+    IedConnection_setRCBValues(conn, &err, rcb, RCB_ELEMENT_DATSET | RCB_ELEMENT_RPT_ENA, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, err, "expected enabling urcbDyn against the test dataset to succeed");
+
+    IedClientError deleteErr = IED_ERROR_OK;
+    bool deletedWhileEnabled = IedConnection_deleteDataSet(conn, &deleteErr, "Reporter1LD1/GGIO1$deleteTestDs");
+    TEST_ASSERT_FALSE_MESSAGE(deletedWhileEnabled,
+            "expected the reference server to refuse deleting a dataset still bound to an enabled RCB - if "
+            "this fails, the reference server does NOT enforce the same rule the real device apparently "
+            "does, and MmsReportClientConnection_stop's disable-and-unbind step doesn't change anything "
+            "against a device with that behavior either");
+
+    /* Disabling RptEna alone was tried first and was NOT enough - the
+     * reference server still refused with IED_ERROR_OBJECT_CONSTRAINT_CONFLICT
+     * (35). The RCB's own DatSet attribute still pointing at this dataset is
+     * itself the constraint - clearing it (empty string) alongside disabling
+     * is what actually releases it. This is the real mechanism
+     * MmsReportClientConnection_stop's cleanup step needs to replicate. */
+    ClientReportControlBlock_setRptEna(rcb, false);
+    ClientReportControlBlock_setDataSetReference(rcb, "");
+    IedConnection_setRCBValues(conn, &err, rcb, RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, err, "expected disabling and unbinding urcbDyn's DatSet to succeed");
+    ClientReportControlBlock_destroy(rcb);
+
+    deleteErr = IED_ERROR_OK;
+    bool deletedAfterDisable = IedConnection_deleteDataSet(conn, &deleteErr, "Reporter1LD1/GGIO1$deleteTestDs");
+    TEST_ASSERT_TRUE_MESSAGE(deletedAfterDisable,
+            "expected the delete to succeed once the RCB referencing it was disabled AND its DatSet cleared");
+
+    IedConnection_close(conn);
+    IedConnection_destroy(conn);
     SimServer_stop(sim);
     SimServer_destroy(sim);
 }
@@ -1937,6 +2024,7 @@ main(void) {
     RUN_TEST(test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog);
     RUN_TEST(test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances);
     RUN_TEST(test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly);
+    RUN_TEST(test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable);
 
     return UNITY_END();
 }

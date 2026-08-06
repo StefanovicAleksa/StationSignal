@@ -109,25 +109,43 @@ lookupDynamicDatasetName(LinkedList cache, const char* lnReference, bool buffere
 
 /*
  * Everything getOrCreateDynamicDataset/adoptUnclaimedDataset need for one
- * connect cycle: the existing LN-keyed dedup cache, plus a budget counter
- * seeded from SCL's own <Services><DynDataSet max="N"/> (IedModel_getDynDataSetMax)
- * CORRECTED for datasets already discovered on the server
- * (MmsReportClientUseCases_computeInitialDynamicDatasetBudget) at the top of
- * enableAllTargets - not just a blind copy of the declared max, which has no
- * awareness of what's already consuming the device's real budget (leftover
- * domain-scoped datasets from an earlier ungracefully-terminated run, other
- * clients'/tools' own datasets, etc. - a real device run showed exactly this
- * silently exhausting the real budget while this client's own naive counter
- * still believed most of it remained). remainingBudget models "how many MORE
- * of our own new createDataSet attempts this connect cycle may still make".
- * -1 (SCL never declared a cap) must never trigger the short-circuit - see
- * MmsReportClientUseCases_isDynamicDatasetBudgetExhausted. Decremented only
- * on a genuinely new successful createDataSet, never on a cache hit or an
- * adopted existing dataset (both are free). budgetExhaustedLogged
- * edge-triggers the "stopping" log so it fires once per cycle, not once per
- * remaining target - without this, a device with many RCBs past the budget
- * wall would print one near-identical line per remaining target instead of
- * one.
+ * connect cycle: the existing LN-keyed dedup cache, plus TWO budget counters
+ * seeded from SCL's own <Services> declarations - one per dataset pool a
+ * createDataSet attempt can actually draw from:
+ *
+ *   - remainingDynBudget: <DynDataSet max="N"/> (IedModel_getDynDataSetMax),
+ *     UNCORRECTED - nothing this client can see ahead of time pre-exists in
+ *     this pool (association-specific datasets live inside another
+ *     connection's own private association state, invisible to
+ *     discoverExistingServerDatasets' per-LD directory query - see that
+ *     function's own doc comment). Decremented only on a genuinely new
+ *     successful association-specific createDataSet.
+ *   - remainingConfBudget: <ConfDataSet max="N"/> (IedModel_getConfDataSetMax),
+ *     CORRECTED for datasets already discovered on the server
+ *     (MmsReportClientUseCases_computeInitialDynamicDatasetBudget) at the top
+ *     of enableAllTargets - not just a blind copy of the declared max, which
+ *     has no awareness of what's already consuming the device's real budget
+ *     (leftover domain-scoped datasets from an earlier ungracefully-terminated
+ *     run, other clients'/tools' own datasets, etc. - a real device run showed
+ *     exactly this silently exhausting the real budget while this client's own
+ *     naive counter still believed most of it remained). This is the ONLY pool
+ *     discovery can ever correct, since discovery can only ever see
+ *     domain-scoped (Conf-class) datasets in the first place. Decremented on
+ *     any genuinely new successful DOMAIN-SCOPED createDataSet - a buffered
+ *     target's own primary attempt (always domain-scoped) and an unbuffered
+ *     target's fallback attempt (createAndCacheDynamicDataset, once its real
+ *     association-specific attempt is rejected) both draw from this same pool.
+ *
+ * Both model "how many MORE of our own new createDataSet attempts this
+ * connect cycle may still make" in their own pool. -1 (SCL never declared a
+ * cap) must never trigger either short-circuit - see
+ * MmsReportClientUseCases_isDynamicDatasetBudgetExhausted. Neither is ever
+ * decremented on a cache hit or an adopted existing dataset (both are free,
+ * regardless of pool). dynBudgetExhaustedLogged/confBudgetExhaustedLogged
+ * edge-trigger their own "stopping" log so each fires once per cycle per
+ * pool, not once per remaining target - without this, a device with many
+ * RCBs past a budget wall would print one near-identical line per remaining
+ * target instead of one.
  *
  * Built fresh in enableAllTargets for every (re)connect, same lifetime as
  * DynamicDatasetCacheEntry's own cache - see that struct's doc comment for why
@@ -137,8 +155,10 @@ lookupDynamicDatasetName(LinkedList cache, const char* lnReference, bool buffere
  */
 typedef struct {
     LinkedList cache;
-    int remainingBudget;
-    bool budgetExhaustedLogged;
+    int remainingDynBudget;
+    bool dynBudgetExhaustedLogged;
+    int remainingConfBudget;
+    bool confBudgetExhaustedLogged;
     LinkedList chunkAssignments; /* DynamicDatasetChunkAssignment* list - see that struct's own doc
                                      comment and buildWholeDeviceClusterPlan. Empty (never NULL)
                                      only if the device has no Dyn RCB slots at all or no
@@ -410,6 +430,25 @@ static const char*
 createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
         int memberCount, bool buffered) {
+    /* Which pool this attempt draws from is exactly what `buffered` already
+     * means here - see DynamicDatasetSession's own doc comment. Checked
+     * before any wire work so an already-exhausted pool costs nothing beyond
+     * this one log line (edge-triggered, see that same doc comment). */
+    int* budget = buffered ? &session->remainingConfBudget : &session->remainingDynBudget;
+    bool* budgetExhaustedLogged = buffered ? &session->confBudgetExhaustedLogged : &session->dynBudgetExhaustedLogged;
+    if (MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(*budget)) {
+        if (!*budgetExhaustedLogged) {
+            int sclMax = buffered ? IedModel_getConfDataSetMax(handle->iedModel)
+                                   : IedModel_getDynDataSetMax(handle->iedModel);
+            fprintf(stderr, "[mms_report_client] %s budget (SCL %s max=%d) exhausted this connect cycle - no "
+                    "further createDataSet attempts will be made; remaining RCB(s) needing a %s dataset will "
+                    "not report\n", buffered ? "ConfDataSet" : "DynDataSet", buffered ? "ConfDataSet" : "DynDataSet",
+                    sclMax, buffered ? "domain-scoped" : "association-specific");
+            *budgetExhaustedLogged = true;
+        }
+        return NULL;
+    }
+
     LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
     if (!wireRefs || LinkedList_size(wireRefs) == 0) {
         fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' - "
@@ -465,7 +504,7 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
          * count this cycle (see DynamicDatasetSession's own doc comment on
          * why cache hits stay free; this is the same reasoning applied to a
          * dataset the SERVER already knew about before this cycle started). */
-        if (session->remainingBudget > 0) session->remainingBudget--;
+        if (*budget > 0) (*budget)--;
     }
 
     if (buffered) rememberDomainScopedDatasetName(handle, datasetName);
@@ -565,19 +604,12 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
     const char* existing = lookupDynamicDatasetName(session->cache, target->objectReference, target->buffered);
     if (existing) return existing;
 
-    /* Cache hits above stay free (zero wire cost, always allowed) - only a
-     * genuinely NEW createDataSet attempt is gated by the budget. */
-    if (MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(session->remainingBudget)) {
-        if (!session->budgetExhaustedLogged) {
-            fprintf(stderr, "[mms_report_client] dynamic dataset count budget (SCL DynDataSet max=%d) "
-                    "exhausted this connect cycle - no further createDataSet attempts will be made; "
-                    "remaining RCB(s) needing a dynamic dataset will not report\n",
-                    IedModel_getDynDataSetMax(handle->iedModel));
-            session->budgetExhaustedLogged = true;
-        }
-        return NULL;
-    }
-
+    /* Cache hits above stay free (zero wire cost, always allowed) - the
+     * budget check itself now lives in createAndCacheDynamicDatasetAttempt,
+     * keyed per-attempt on which pool that attempt actually draws from (see
+     * DynamicDatasetSession's own doc comment) - a single top-level check
+     * here couldn't distinguish an unbuffered target's Dyn-budget-gated real
+     * attempt from its own Conf-budget-gated fallback. */
     return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
             target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
             target->buffered);
@@ -1662,14 +1694,29 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
  * instances that used to all just duplicate the same tiny LLN0-only dataset).
  *
  * Two clustering strategies, chosen by whether SCL declared a real
- * maxAttributes cap (IedModel_getDynDataSetMaxAttributes):
+ * maxAttributes cap - preferring ConfDataSet's own declared cap
+ * (IedModel_getConfDataSetMaxAttributes) over DynDataSet's
+ * (IedModel_getDynDataSetMaxAttributes), falling back to Dyn's if Conf isn't
+ * declared: every buffered target's self-created dataset is always
+ * domain-scoped (Conf-class) regardless, and on a device that structurally
+ * rejects association-specific creation (confirmed against a real SIPROTEC
+ * 6MD - see CHANGELOG.md), so does every unbuffered target's dataset once it
+ * falls back (createAndCacheDynamicDataset). Sizing the ONE shared plan
+ * against the larger, more-often-relevant cap directly shrinks the total
+ * number of clusters needed for full-device coverage. The one accepted
+ * tradeoff: a target whose real association-specific attempt would have
+ * succeeded at Dyn's smaller cap, but is now sized above it, spends one
+ * extra doomed attempt before correctly falling back to Conf - not a
+ * correctness bug (the fallback already handles arbitrary Dyn failures),
+ * just a narrow case traded for fewer datasets overall on devices where Dyn
+ * creation never succeeds anyway.
  *   - KNOWN (>0): the whole device's leaf list is packed via
  *     MmsReportClientUseCases_chunkReferencesAcrossWholeDevice - a single
  *     resulting cluster may legitimately span several different (small) LNs'
  *     worth of leaves when they fit together, maximizing how much of the
  *     device fits within a tight total dataset-count budget.
- *   - UNKNOWN (-1 or 0, e.g. no <Services> at all, or a dynamically-built
- *     online-discovered model): MmsReportClientUseCases_groupReferencesByLn
+ *   - UNKNOWN (-1 or 0 on both caps, e.g. no <Services> at all, or a
+ *     dynamically-built online-discovered model): MmsReportClientUseCases_groupReferencesByLn
  *     packs one dataset per LN instead, unbounded size - the same per-LN
  *     granularity this feature always used before whole-device clustering
  *     existed, since combining multiple LNs into one dataset without a known
@@ -1733,7 +1780,13 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
         leafArray[leafIdx++] = (char*) LinkedList_getData(el);
     }
 
-    int maxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
+    /* Prefer ConfDataSet's own declared maxAttributes over DynDataSet's - see
+     * this function's own doc comment for why. Falls back to DynDataSet's
+     * (today's behavior) if Conf isn't declared, then to per-LN grouping
+     * (below) if neither is - same UNKNOWN posture as before this change. */
+    int confMaxAttributes = IedModel_getConfDataSetMaxAttributes(handle->iedModel);
+    int dynMaxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
+    int maxAttributes = confMaxAttributes > 0 ? confMaxAttributes : dynMaxAttributes;
     LinkedList clusterLists = (maxAttributes > 0)
             ? MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(
                     (const char* const*) leafArray, leafCount, maxAttributes)
@@ -1858,8 +1911,14 @@ cacheContainsDatasetName(LinkedList cache, const char* datasetName) {
  * found-unusable-and-skipped - either way tracked in
  * session->claimedDatasetNames) and never ended up in session->cache for its
  * own target's create-or-reuse resolution - i.e. genuinely idle leftover
- * capacity, not something actively serving a report right now. Best-effort:
- * a delete failure just leaves the dataset behind, logged, not fatal.
+ * capacity, not something actively serving a report right now. Before
+ * deleting, disables RptEna and clears DatSet on the matched target's RCB if
+ * (and only if) its live DatSet still is this candidate - same fix as
+ * MmsReportClientConnection_stop's own graceful cleanup, needed here too
+ * since a crashed daemon never reached that code path to do it itself, and
+ * a still-live RptEna/DatSet blocks deletion regardless of which code path
+ * eventually attempts it. Best-effort throughout: any failure just leaves
+ * the dataset behind, logged, not fatal.
  */
 static void
 cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* session, int* outLeakedCount) {
@@ -1874,6 +1933,7 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
         if (cacheContainsDatasetName(session->cache, candidate)) continue;
 
         bool isOurs = false;
+        ReportControlBlockTarget* matchedTarget = NULL;
         LinkedList targetElement = LinkedList_getNext(handle->targets);
         while (targetElement) {
             ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(targetElement);
@@ -1885,10 +1945,43 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
             free(expected);
             if (match) {
                 isOurs = true;
+                matchedTarget = target;
                 break;
             }
         }
         if (!isOurs) continue;
+
+        /* Same fix as MmsReportClientConnection_stop's own graceful cleanup:
+         * disabling RptEna alone is not enough to unblock deletion
+         * (confirmed against the reference server -
+         * IED_ERROR_OBJECT_CONSTRAINT_CONFLICT/35, see
+         * test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable) -
+         * the RCB's own DatSet attribute continuing to point at this orphan
+         * is itself the constraint. A crashed daemon never reached
+         * MmsReportClientConnection_stop's own disable+unbind at all, so
+         * matchedTarget's RptEna/DatSet may genuinely still be live
+         * server-side here exactly as if this were the graceful path - this
+         * proactive pass needs the identical two-step sequence before its
+         * own delete attempt below. Scoped the same way too: only touches
+         * matchedTarget's RCB if its CURRENT live DatSet actually is this
+         * candidate, never blind. */
+        IedClientError disableErr = IED_ERROR_OK;
+        ClientReportControlBlock orphanRcb = IedConnection_getRCBValues(handle->connection, &disableErr,
+                matchedTarget->objectReference, NULL);
+        if (orphanRcb) {
+            const char* liveDataSet = ClientReportControlBlock_getDataSetReference(orphanRcb);
+            if (liveDataSet && strcmp(liveDataSet, candidate) == 0) {
+                ClientReportControlBlock_setRptEna(orphanRcb, false);
+                ClientReportControlBlock_setDataSetReference(orphanRcb, "");
+                IedConnection_setRCBValues(handle->connection, &disableErr, orphanRcb,
+                        RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
+                if (disableErr != IED_ERROR_OK) {
+                    fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' before orphan "
+                            "cleanup: error %d\n", matchedTarget->objectReference, disableErr);
+                }
+            }
+            ClientReportControlBlock_destroy(orphanRcb);
+        }
 
         IedClientError deleteErr = IED_ERROR_OK;
         if (IedConnection_deleteDataSet(handle->connection, &deleteErr, candidate)) {
@@ -1913,18 +2006,22 @@ enableAllTargets(MmsReportClientHandle handle) {
     LinkedList existingServerDatasets = discoverExistingServerDatasets(handle);
 
     /* Fresh per connect cycle, never carried across reconnects - see
-     * DynamicDatasetSession's own doc comment. */
+     * DynamicDatasetSession's own doc comment. Two independent pools - see
+     * that same doc comment for why only Conf gets a discovery correction. */
     int sclDynMax = IedModel_getDynDataSetMax(handle->iedModel);
+    int sclConfMax = IedModel_getConfDataSetMax(handle->iedModel);
     int existingCount = LinkedList_size(existingServerDatasets);
     DynamicDatasetSession session = {
         .cache = LinkedList_create(),
-        .remainingBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclDynMax, existingCount),
-        .budgetExhaustedLogged = false,
+        .remainingDynBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclDynMax, 0),
+        .dynBudgetExhaustedLogged = false,
+        .remainingConfBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclConfMax, existingCount),
+        .confBudgetExhaustedLogged = false,
         .chunkAssignments = buildWholeDeviceClusterPlan(handle),
         .existingServerDatasets = existingServerDatasets,
         .claimedDatasetNames = LinkedList_create(),
     };
-    /* One-line, always-on summary of this cycle's real Dyn dataset budget -
+    /* One-line, always-on summary of this cycle's real dataset budgets -
      * previously only inferable indirectly, either from the one-shot "budget
      * exhausted" line (which never fires at all if targets simply run out of
      * chunk assignments before the budget itself runs out, see
@@ -1932,8 +2029,10 @@ enableAllTargets(MmsReportClientHandle handle) {
      * per-RCB "resolved via none"/error 99 lines across a whole log capture -
      * exactly the reconstruction this feature's own real-device
      * investigations have had to do by hand. */
-    fprintf(stderr, "[mms_report_client] DynDataSet budget this cycle: SCL declares max=%d, %d already exist "
-            "on server, starting budget=%d\n", sclDynMax, existingCount, session.remainingBudget);
+    fprintf(stderr, "[mms_report_client] DynDataSet budget this cycle: SCL declares max=%d, starting budget=%d "
+            "(uncorrected - not discoverable ahead of time)\n", sclDynMax, session.remainingDynBudget);
+    fprintf(stderr, "[mms_report_client] ConfDataSet budget this cycle: SCL declares max=%d, %d already exist "
+            "on server, starting budget=%d\n", sclConfMax, existingCount, session.remainingConfBudget);
 
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element && !handle->stopRequested) {
@@ -2112,6 +2211,50 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
     if (!handle || handle->stopRequested) return;
 
     handle->stopRequested = true;
+
+    /* Confirmed empirically (manual IEDScout testing against a real device,
+     * then proven end-to-end against the reference server too - see
+     * integration_tests/mms_report_client's test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable):
+     * a dataset still referenced by an RCB's DatSet is refused for deletion
+     * regardless of RptEna. Disabling RptEna alone is NOT enough - the
+     * reference server still refused with IED_ERROR_OBJECT_CONSTRAINT_CONFLICT
+     * (35) until DatSet itself was also cleared. Both together is what
+     * actually releases it.
+     *
+     * Scoped to exactly the targets whose CURRENT live DatSet matches one of
+     * ours (handle->domainScopedDynamicDatasetNames) - not blanket across
+     * every target. Unlike a plain RptEna disable, clearing DatSet is
+     * destructive to whatever that RCB was configured to report on, so this
+     * must never touch an SCL-static target's permanent engineering
+     * configuration, nor a foreign/adopted dataset another tool or client
+     * still relies on - only a dataset THIS client itself created and is
+     * about to try to delete below qualifies. Must run BEFORE the
+     * dataset-delete loop below and BEFORE IedConnection_close (both
+     * setRCBValues and deleteDataSet need a live association). */
+    if (handle->connection && handle->domainScopedDynamicDatasetNames && handle->targets) {
+        LinkedList element = LinkedList_getNext(handle->targets);
+        while (element) {
+            ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+            IedClientError err = IED_ERROR_OK;
+            ClientReportControlBlock rcb =
+                    IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
+            if (rcb) {
+                const char* liveDataSet = ClientReportControlBlock_getDataSetReference(rcb);
+                if (liveDataSet && stringListContains(handle->domainScopedDynamicDatasetNames, liveDataSet)) {
+                    ClientReportControlBlock_setRptEna(rcb, false);
+                    ClientReportControlBlock_setDataSetReference(rcb, "");
+                    IedConnection_setRCBValues(handle->connection, &err, rcb,
+                            RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
+                    if (err != IED_ERROR_OK) {
+                        fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' before dataset "
+                                "cleanup: error %d\n", target->objectReference, err);
+                    }
+                }
+                ClientReportControlBlock_destroy(rcb);
+            }
+            element = LinkedList_getNext(element);
+        }
+    }
 
     /* Buffered RCBs' self-created datasets are domain/VMD-scoped (see
      * getOrCreateDynamicDataset's own doc comment), so unlike the
