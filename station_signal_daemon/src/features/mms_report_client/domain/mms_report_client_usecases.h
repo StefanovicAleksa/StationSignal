@@ -191,6 +191,31 @@ MmsReportClientUseCases_swapMemberRefCacheEntryShape(MmsReportClientMemberRefCac
         MmsReportClientMemberRefCacheEntry* fresh);
 
 /*
+ * Resets entry's value-diff cache (lastForwardedValues, everPopulated) back to
+ * bootstrap, IN PLACE - unlike MmsReportClientUseCases_swapMemberRefCacheEntryShape,
+ * leaves the shape itself (memberReferences, leafSlotOffsets, totalLeafSlots,
+ * leafSemantics, resolvedDatasetReference) completely untouched, since this is
+ * for the case where the shape hasn't changed but the device's own report
+ * state has - a buffered RCB's EntryID getting rejected as
+ * IED_ERROR_OBJECT_DOES_NOT_EXIST on (re)enable is the definitive signal for
+ * this (mms_report_client_connection.c's enableOneTarget): the device's
+ * buffer/EntryID counter was reset (most commonly a real device reboot), so
+ * a subsequently recreated dataset - even one with the exact same
+ * deterministic name buildDynamicDatasetName always produces, which is why
+ * the name-based shape-rebuild check alone does NOT catch this case - holds
+ * genuinely fresh values that must not be diffed against stale pre-reset
+ * ones. Frees each lastForwardedValues[i] before NULLing it, same as
+ * freeMemberRefCacheEntryFields; NULL-safe (no-op if entry or its
+ * lastForwardedValues array is NULL).
+ *
+ * Caller MUST hold handle->memberRefCacheLock for the duration of this call -
+ * not taken internally here, same convention as
+ * MmsReportClientUseCases_swapMemberRefCacheEntryShape.
+ */
+void
+MmsReportClientUseCases_resetValueDiffCacheToBootstrap(MmsReportClientMemberRefCacheEntry* entry);
+
+/*
  * Cross-RCB duplicate-content suppression - see MmsReportClientCrossRcbDedupCache's
  * own doc comment for the full rationale (redundant RCB instances on the
  * same LN/dataset reporting the same event independently). Compares

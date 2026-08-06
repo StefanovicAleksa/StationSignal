@@ -7,11 +7,30 @@
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
 #include "hal_time.h"
+#include "mms_value.h"
+#include "mms_client_connection.h"
+#include "iec61850_common_internal.h"
 
 /* A connection must stay up at least this long before a subsequent loss
  * resets the exponential backoff back to the initial tier - see
  * supervisorLoop's own comment on why. */
 #define MMS_REPORT_CLIENT_STABLE_CONNECTION_MS 5000
+
+/* IED_ERROR_TEMPORARILY_UNAVAILABLE on setRCBValues is a legitimate MMS
+ * "try again shortly" signal, not a structural rejection - seen in practice
+ * right after a real device's own reboot, while its MMS/report stack was
+ * still finishing initialization. enableOneTarget gives it a few short,
+ * bounded retries before falling through to the same terminal failure
+ * handling as any other error (which would otherwise tear down a report
+ * handler that, per real-hardware logs, can already be actively receiving
+ * valid reports at that exact moment). */
+#define MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES 3
+#define MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS 500
+
+/* Defined further down in this file (used by supervisorLoop's own backoff
+ * wait) - forward-declared here so enableOneTarget can reuse it for the
+ * TEMPORARILY_UNAVAILABLE retry above without reordering the file. */
+static void interruptibleSleep(MmsReportClientHandle handle, uint32_t totalMs);
 
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
@@ -297,6 +316,96 @@ rememberDomainScopedDatasetName(MmsReportClientHandle handle, const char* datase
  * `logRcbReference` are for messages only. Caller has already confirmed the
  * budget isn't exhausted.
  */
+
+/* TEMPORARY DIAGNOSTIC - not for production, remove once error 99's real
+ * cause is understood (or before ever upgrading past this exact vendored
+ * libiec61850 version).
+ *
+ * IedConnection_createDataSet computes a granular MmsError internally
+ * (third_party/include/mms_common.h - decoded straight from the server's
+ * real ASN.1 ServiceError PDU, e.g. MMS_ERROR_RESOURCE_CAPABILITY_UNAVAILABLE
+ * vs MMS_ERROR_DEFINITION_OBJECT_ATTRIBUTE_INCONSISTENT vs dozens of other
+ * distinct reasons) but immediately collapses it to the coarse IedClientError
+ * before returning (confirmed against third_party_src/libiec61850's own
+ * ied_connection.c:IedConnection_createDataSet, which discards its own local
+ * `mmsError` right after computing `*error = iedConnection_mapMmsErrorToIedError(mmsError)`) -
+ * IED_ERROR_UNKNOWN/99 in particular is libiec61850's catch-all for whatever
+ * it can't map to a more specific IedClientError, so it alone tells us
+ * nothing beyond "the device said no."
+ *
+ * This re-issues the SAME create one level lower, via the same
+ * LIB61850_INTERNAL-but-statically-exported symbols
+ * IedConnection_createDataSet itself uses under the hood (confirmed present
+ * in the vendored archive: `nm third_party/lib/libiec61850.a | grep
+ * MmsMapping_ObjectReferenceToVariableAccessSpec` shows a defined, not
+ * undefined, symbol) - purely to log MmsError_toString's much more specific
+ * answer. Only called on a failure the real attempt already reported; never
+ * on the hot/success path.
+ *
+ * Safety: if this diagnostic call unexpectedly SUCCEEDS where the real one
+ * just failed (MMS_ERROR_NONE), the resulting dataset is immediately
+ * best-effort deleted rather than left as an untracked orphan on the device -
+ * this path must never leave server-side state the rest of this client
+ * doesn't know about, which is exactly the kind of leak the rest of this
+ * feature works hard to avoid. */
+static void
+logGranularCreateDataSetError(MmsReportClientHandle handle, const char* datasetName,
+        const char* const* memberReferences, int memberCount, bool buffered) {
+    MmsConnection mmsConnection = IedConnection_getMmsConnection(handle->connection);
+    if (!mmsConnection) return;
+
+    LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
+    if (!wireRefs) return;
+
+    LinkedList specs = LinkedList_create();
+    LinkedList element = LinkedList_getNext(wireRefs);
+    while (element) {
+        MmsVariableAccessSpecification* spec =
+                MmsMapping_ObjectReferenceToVariableAccessSpec((char*) LinkedList_getData(element));
+        if (spec) LinkedList_add(specs, spec);
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyDeep(wireRefs, free);
+
+    MmsError mmsError = MMS_ERROR_NONE;
+    bool attempted = false;
+
+    if (buffered) {
+        const char* slash = strchr(datasetName, '/');
+        if (slash) {
+            char domainId[65];
+            size_t domainLen = (size_t) (slash - datasetName);
+            if (domainLen < sizeof(domainId)) {
+                memcpy(domainId, datasetName, domainLen);
+                domainId[domainLen] = '\0';
+                MmsConnection_defineNamedVariableList(mmsConnection, &mmsError, domainId, slash + 1, specs);
+                attempted = true;
+            }
+        }
+    } else if (datasetName[0] == '@') {
+        MmsConnection_defineNamedVariableListAssociationSpecific(mmsConnection, &mmsError, datasetName + 1, specs);
+        attempted = true;
+    }
+
+    if (attempted) {
+        fprintf(stderr, "[mms_report_client] createDataSet diagnostic for '%s': raw MMS error = %s (%d)\n",
+                datasetName, MmsError_toString(mmsError), (int) mmsError);
+
+        if (mmsError == MMS_ERROR_NONE) {
+            fprintf(stderr, "[mms_report_client] createDataSet diagnostic for '%s' UNEXPECTEDLY SUCCEEDED where "
+                    "the real attempt just failed - deleting it now rather than leaving an untracked orphan on "
+                    "the device\n", datasetName);
+            IedClientError deleteErr = IED_ERROR_OK;
+            if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
+                fprintf(stderr, "[mms_report_client] could not delete diagnostic dataset '%s': error %d - left "
+                        "behind on the device\n", datasetName, deleteErr);
+            }
+        }
+    }
+
+    LinkedList_destroyDeep(specs, (LinkedListValueDeleteFunction) MmsVariableAccessSpecification_destroy);
+}
+
 static const char*
 createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
@@ -344,6 +453,7 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
     } else if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
                 "'%s' will not report\n", logLnReference, err, logRcbReference);
+        logGranularCreateDataSetError(handle, datasetName, memberReferences, memberCount, buffered);
         free(datasetName);
         return NULL;
     }
@@ -1423,6 +1533,17 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
          * reset is the one signal we actually have that the old baseline can
          * no longer be trusted, so it puts the guard back into its
          * fail-open, "nothing to compare against yet" bootstrap state. */
+        /* This same rejection is also the definitive signal the device's
+         * report state was reset (most commonly a real device reboot) - a
+         * subsequently recreated dataset holds genuinely fresh values even
+         * when it has the exact same deterministic name as before (the
+         * everyday reconnect case ensureLnFallbackMemberRefCache's own
+         * name-based check is built for), so the value-diff cache must be
+         * reset to bootstrap here too, not just lastEntryId - otherwise the
+         * next report diffs fresh post-reset values against stale
+         * pre-reset ones and nearly everything reads as "changed."
+         * MmsReportClientUseCases_resetValueDiffCacheToBootstrap's own doc
+         * comment has the full reasoning. */
         if (target->buffered) {
             MmsReportClientMemberRefCacheEntry* cacheEntry =
                     lookupMemberRefCacheByRcb(handle, target->objectReference);
@@ -1432,12 +1553,34 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
                     MmsValue_delete(cacheEntry->lastEntryId);
                     cacheEntry->lastEntryId = NULL;
                 }
+                MmsReportClientUseCases_resetValueDiffCacheToBootstrap(cacheEntry);
                 Semaphore_post(handle->memberRefCacheLock);
+                fprintf(stderr, "[mms_report_client] '%s' EntryID rejected as no-longer-existing - value-diff "
+                        "cache reset to bootstrap (device report state was reset)\n", target->objectReference);
             }
         }
 
         IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
     }
+
+    /* See this file's own MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES doc
+     * comment - a few short retries for a device that's still coming up
+     * after a restart, rather than immediately tearing down a report handler
+     * that may already be receiving valid reports. Reuses whatever rcb/mask
+     * state the EntryID-retry block above left behind (untouched if that
+     * block never ran). */
+    int tempUnavailableRetries = 0;
+    while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
+            && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
+            && !handle->stopRequested) {
+        tempUnavailableRetries++;
+        fprintf(stderr, "[mms_report_client] setRCBValues temporarily unavailable for '%s' (device likely still "
+                "initializing after a restart) - retry %d/%d\n", target->objectReference, tempUnavailableRetries,
+                MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
+        interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
+        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    }
+
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
                 target->objectReference, err);

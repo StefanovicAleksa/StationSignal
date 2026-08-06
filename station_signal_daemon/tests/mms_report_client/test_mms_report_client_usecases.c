@@ -2265,6 +2265,65 @@ test_buildMemberRefCacheEntry_null_onNullArray(void) {
     TEST_ASSERT_NULL(MmsReportClientUseCases_buildMemberRefCacheEntry(NULL, "rcb", NULL, 0, NULL));
 }
 
+/* ---- resetValueDiffCacheToBootstrap (a device reboot recreating a
+ * deterministically-named dataset must not let a fresh post-reboot report
+ * diff against stale pre-reboot cached values - see this function's own doc
+ * comment in mms_report_client_usecases.h for the full reasoning) ---- */
+
+void
+test_resetValueDiffCacheToBootstrap_clearsForwardedValues_leavesShapeIntact(void) {
+    setUpMemberRefCacheEntryFixture();
+
+    char** array = malloc(2 * sizeof(char*));
+    array[0] = strdup("TestIEDLD1/LLN0$ST$Ind1$stVal");
+    array[1] = strdup("TestIEDLD1/LLN0$ST$Ind1$q");
+
+    MmsReportClientMemberRefCacheEntry* entry = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            memberRefCacheEntryFixtureHandleRef, "TestIEDLD1/LLN0.RP.rp01", array, 2, "TestIEDLD1/LLN0$ds1");
+    TEST_ASSERT_NOT_NULL(entry);
+
+    /* Simulate a populated cache, as if reports had already been forwarded
+     * from this RCB pre-reboot. */
+    entry->lastForwardedValues[0] = MmsValue_newBoolean(true);
+    entry->lastForwardedValues[1] = MmsValue_newBitString(2);
+    entry->everPopulated = true;
+
+    MmsReportClientUseCases_resetValueDiffCacheToBootstrap(entry);
+
+    TEST_ASSERT_NULL(entry->lastForwardedValues[0]);
+    TEST_ASSERT_NULL(entry->lastForwardedValues[1]);
+    TEST_ASSERT_FALSE(entry->everPopulated);
+    /* Shape untouched - this is NOT a shape rebuild. */
+    TEST_ASSERT_EQUAL_STRING("TestIEDLD1/LLN0$ds1", entry->resolvedDatasetReference);
+    TEST_ASSERT_EQUAL_INT(2, entry->memberCount);
+    TEST_ASSERT_EQUAL_INT(2, entry->totalLeafSlots);
+    TEST_ASSERT_EQUAL_INT(0, entry->leafSlotOffsets[0]);
+    TEST_ASSERT_EQUAL_INT(1, entry->leafSlotOffsets[1]);
+
+    MmsReportClientUseCases_destroyMemberRefCacheEntry(entry);
+    tearDownMemberRefCacheEntryFixture();
+}
+
+void
+test_resetValueDiffCacheToBootstrap_nullSafety_doesNotCrash(void) {
+    MmsReportClientUseCases_resetValueDiffCacheToBootstrap(NULL);
+
+    setUpMemberRefCacheEntryFixture();
+    char** array = malloc(1 * sizeof(char*));
+    array[0] = strdup("TestIEDLD1/LLN0$ST$Ind1$stVal");
+    MmsReportClientMemberRefCacheEntry* entry = MmsReportClientUseCases_buildMemberRefCacheEntry(
+            memberRefCacheEntryFixtureHandleRef, "TestIEDLD1/LLN0.RP.rp01", array, 1, "TestIEDLD1/LLN0$ds1");
+    TEST_ASSERT_NOT_NULL(entry);
+
+    free(entry->lastForwardedValues);
+    entry->lastForwardedValues = NULL;
+
+    MmsReportClientUseCases_resetValueDiffCacheToBootstrap(entry);
+
+    MmsReportClientUseCases_destroyMemberRefCacheEntry(entry);
+    tearDownMemberRefCacheEntryFixture();
+}
+
 /* ---- computeNextBackoffDelay ---- */
 
 void
@@ -2416,6 +2475,8 @@ main(void) {
     RUN_TEST(test_buildMemberRefCacheEntry_leafOnlyMembers_noDecomposition_tagsResolvedDatasetReference);
     RUN_TEST(test_buildMemberRefCacheEntry_doLevelMember_decomposes_withNoRegisteredDataSet);
     RUN_TEST(test_buildMemberRefCacheEntry_null_onNullArray);
+    RUN_TEST(test_resetValueDiffCacheToBootstrap_clearsForwardedValues_leavesShapeIntact);
+    RUN_TEST(test_resetValueDiffCacheToBootstrap_nullSafety_doesNotCrash);
 
     RUN_TEST(test_computeNextBackoffDelay_returnsInitial_whenCurrentIsZero);
     RUN_TEST(test_computeNextBackoffDelay_doublesUntilCap);

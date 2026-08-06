@@ -906,6 +906,19 @@ MmsReportClientUseCases_swapMemberRefCacheEntryShape(MmsReportClientMemberRefCac
     free(fresh);
 }
 
+void
+MmsReportClientUseCases_resetValueDiffCacheToBootstrap(MmsReportClientMemberRefCacheEntry* entry) {
+    if (!entry || !entry->lastForwardedValues) return;
+
+    for (int i = 0; i < entry->totalLeafSlots; i++) {
+        if (entry->lastForwardedValues[i]) {
+            MmsValue_delete(entry->lastForwardedValues[i]);
+            entry->lastForwardedValues[i] = NULL;
+        }
+    }
+    entry->everPopulated = false;
+}
+
 static void
 freeCrossRcbDedupContent(MmsReportClientCrossRcbDedupCache* cache) {
     free(cache->rcbReference);
