@@ -1299,10 +1299,29 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     fprintf(stderr, "[mms_report_client] '%s' dataset resolved via %s: '%s'\n", target->objectReference,
             effectiveDatasetReference ? datasetTier : "none",
             effectiveDatasetReference ? effectiveDatasetReference : "(none)");
-    if (effectiveDatasetReference) {
-        ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
-        mask |= RCB_ELEMENT_DATSET;
+    if (!effectiveDatasetReference) {
+        /* No tier resolved a dataset - setRCBValues below is guaranteed to
+         * fail (a real device returns IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT/31
+         * for RptEna requested with no DatSet bound, confirmed against a real
+         * SIPROTEC 6MD device), so skip the doomed write rather than making
+         * it: against an already-struggling real device, one real MMS write
+         * per unresolved RCB (potentially 100+ per connect cycle) is pure
+         * noise indistinguishable from hammering it, for a result already
+         * known here. rcbStatusCallback still fires with the same error code
+         * a real attempt would have returned, so callers can't tell the
+         * difference. */
+        fprintf(stderr, "[mms_report_client] '%s' skipped - no dataset available, not attempting setRCBValues\n",
+                target->objectReference);
+        IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
+        if (handle->rcbStatusCallback) {
+            handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false,
+                    IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT);
+        }
+        ClientReportControlBlock_destroy(rcb);
+        return;
     }
+    ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
+    mask |= RCB_ELEMENT_DATSET;
 
     /* Resume a buffered RCB's delivery from the last EntryID this client
      * actually received, instead of re-requesting the server's entire
@@ -1660,7 +1679,7 @@ cacheContainsDatasetName(LinkedList cache, const char* datasetName) {
  * a delete failure just leaves the dataset behind, logged, not fatal.
  */
 static void
-cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* session) {
+cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* session, int* outLeakedCount) {
     if (!session->existingServerDatasets || !handle->targets) return;
 
     LinkedList element = LinkedList_getNext(session->existingServerDatasets);
@@ -1695,6 +1714,7 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
         } else {
             fprintf(stderr, "[mms_report_client] could not clean up orphaned dataset '%s': error %d - "
                     "left behind\n", candidate, deleteErr);
+            if (outLeakedCount) (*outLeakedCount)++;
         }
     }
 }
@@ -1711,15 +1731,26 @@ enableAllTargets(MmsReportClientHandle handle) {
 
     /* Fresh per connect cycle, never carried across reconnects - see
      * DynamicDatasetSession's own doc comment. */
+    int sclDynMax = IedModel_getDynDataSetMax(handle->iedModel);
+    int existingCount = LinkedList_size(existingServerDatasets);
     DynamicDatasetSession session = {
         .cache = LinkedList_create(),
-        .remainingBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(
-                IedModel_getDynDataSetMax(handle->iedModel), LinkedList_size(existingServerDatasets)),
+        .remainingBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclDynMax, existingCount),
         .budgetExhaustedLogged = false,
         .chunkAssignments = buildWholeDeviceClusterPlan(handle),
         .existingServerDatasets = existingServerDatasets,
         .claimedDatasetNames = LinkedList_create(),
     };
+    /* One-line, always-on summary of this cycle's real Dyn dataset budget -
+     * previously only inferable indirectly, either from the one-shot "budget
+     * exhausted" line (which never fires at all if targets simply run out of
+     * chunk assignments before the budget itself runs out, see
+     * getOrCreateDynamicDataset's own doc comment) or by manually counting
+     * per-RCB "resolved via none"/error 99 lines across a whole log capture -
+     * exactly the reconstruction this feature's own real-device
+     * investigations have had to do by hand. */
+    fprintf(stderr, "[mms_report_client] DynDataSet budget this cycle: SCL declares max=%d, %d already exist "
+            "on server, starting budget=%d\n", sclDynMax, existingCount, session.remainingBudget);
 
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element && !handle->stopRequested) {
@@ -1727,7 +1758,13 @@ enableAllTargets(MmsReportClientHandle handle) {
         element = LinkedList_getNext(element);
     }
 
-    if (!handle->stopRequested) cleanupOrphanedDatasets(handle, &session);
+    int leakedThisCycle = 0;
+    if (!handle->stopRequested) cleanupOrphanedDatasets(handle, &session, &leakedThisCycle);
+    if (leakedThisCycle > 0) {
+        fprintf(stderr, "[mms_report_client] %d domain-scoped dataset(s) could not be reclaimed this cycle "
+                "(server denied deletion) - permanently spent against this device's dataset quota until a "
+                "device-side reset\n", leakedThisCycle);
+    }
 
     if (session.cache) LinkedList_destroyDeep(session.cache, destroyDynamicDatasetCacheEntry);
     if (session.chunkAssignments) LinkedList_destroyDeep(session.chunkAssignments, destroyDynamicDatasetChunkAssignment);
@@ -1906,6 +1943,7 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
      * delete, connection already lost) just leaves a server-side dataset
      * behind - logged, not fatal to stopping. */
     if (handle->connection && handle->domainScopedDynamicDatasetNames) {
+        int leakedOnStop = 0;
         LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
         while (element) {
             char* datasetName = (char*) LinkedList_getData(element);
@@ -1913,8 +1951,14 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
             if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
                 fprintf(stderr, "[mms_report_client] could not delete dynamic dataset '%s' on stop: "
                         "error %d - left behind on the device\n", datasetName, deleteErr);
+                leakedOnStop++;
             }
             element = LinkedList_getNext(element);
+        }
+        if (leakedOnStop > 0) {
+            fprintf(stderr, "[mms_report_client] %d domain-scoped dataset(s) could not be deleted on stop - "
+                    "permanently spent against this device's dataset quota until a device-side reset\n",
+                    leakedOnStop);
         }
         LinkedList_destroyDeep(handle->domainScopedDynamicDatasetNames, free);
         handle->domainScopedDynamicDatasetNames = NULL;

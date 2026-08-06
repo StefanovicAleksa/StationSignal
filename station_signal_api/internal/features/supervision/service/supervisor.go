@@ -93,7 +93,18 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			proc.Terminate()
 			select {
 			case <-exitCh:
+				s.logger.Info("daemon exited gracefully after SIGTERM")
 			case <-time.After(domain.TermGracePeriod):
+				// Escalating past the graceful path: the daemon did not exit within
+				// TermGracePeriod, so its own MmsReportClientConnection_stop teardown
+				// (per-device dataset cleanup + ACSE Release) may not have finished for
+				// every active device before SIGKILL lands — any device still connected
+				// at this point may be left with an un-released MMS association on the
+				// real IED. Logged explicitly so this is diagnosable from
+				// station-signal-api.log instead of only inferable after the fact.
+				s.logger.Warn("daemon did not exit within grace period after SIGTERM, escalating to SIGKILL - "+
+					"active device connections may not have shut down cleanly on the remote IED(s)",
+					"gracePeriod", domain.TermGracePeriod)
 				proc.Kill()
 				<-exitCh
 			}
