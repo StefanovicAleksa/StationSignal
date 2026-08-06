@@ -1924,6 +1924,9 @@ static void
 cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* session, int* outLeakedCount) {
     if (!session->existingServerDatasets || !handle->targets) return;
 
+    fprintf(stderr, "[mms_report_client] orphan cleanup: evaluating %d dataset(s) discovered on the server "
+            "this cycle\n", LinkedList_size(session->existingServerDatasets));
+
     LinkedList element = LinkedList_getNext(session->existingServerDatasets);
     while (element) {
         char* candidate = (char*) LinkedList_getData(element);
@@ -1976,9 +1979,17 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
                 IedConnection_setRCBValues(handle->connection, &disableErr, orphanRcb,
                         RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
                 if (disableErr != IED_ERROR_OK) {
-                    fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' before orphan "
-                            "cleanup: error %d\n", matchedTarget->objectReference, disableErr);
+                    fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
+                            "before orphan cleanup: error %d\n", matchedTarget->objectReference, candidate,
+                            disableErr);
+                } else {
+                    fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from orphaned dataset '%s' "
+                            "before cleanup\n", matchedTarget->objectReference, candidate);
                 }
+            } else {
+                fprintf(stderr, "[mms_report_client] orphan candidate '%s' matches '%s's own deterministic "
+                        "name but its live DatSet is '%s' - not currently bound to it, skipping disable/"
+                        "unbind\n", candidate, matchedTarget->objectReference, liveDataSet ? liveDataSet : "(none)");
             }
             ClientReportControlBlock_destroy(orphanRcb);
         }
@@ -2232,6 +2243,12 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
      * dataset-delete loop below and BEFORE IedConnection_close (both
      * setRCBValues and deleteDataSet need a live association). */
     if (handle->connection && handle->domainScopedDynamicDatasetNames && handle->targets) {
+        int trackedCount = LinkedList_size(handle->domainScopedDynamicDatasetNames);
+        int targetCount = LinkedList_size(handle->targets);
+        int matchedCount = 0;
+        int unbindFailCount = 0;
+        fprintf(stderr, "[mms_report_client] stop: disabling+unbinding before delete - %d domain-scoped "
+                "dataset(s) tracked, checking %d target(s) for a live match\n", trackedCount, targetCount);
         LinkedList element = LinkedList_getNext(handle->targets);
         while (element) {
             ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
@@ -2239,21 +2256,37 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
             ClientReportControlBlock rcb =
                     IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
             if (rcb) {
-                const char* liveDataSet = ClientReportControlBlock_getDataSetReference(rcb);
+                const char* liveDataSetLive = ClientReportControlBlock_getDataSetReference(rcb);
+                /* Snapshot into an owned copy before mutating rcb below -
+                 * ClientReportControlBlock_getDataSetReference returns a
+                 * pointer into rcb's own internal buffer, which
+                 * setDataSetReference("") overwrites in place; logging after
+                 * that point off the original pointer would print the
+                 * already-cleared value instead of what was actually there. */
+                char* liveDataSet = liveDataSetLive ? MmsReportClientUtils_safeStringDup(liveDataSetLive) : NULL;
                 if (liveDataSet && stringListContains(handle->domainScopedDynamicDatasetNames, liveDataSet)) {
+                    matchedCount++;
                     ClientReportControlBlock_setRptEna(rcb, false);
                     ClientReportControlBlock_setDataSetReference(rcb, "");
                     IedConnection_setRCBValues(handle->connection, &err, rcb,
                             RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
                     if (err != IED_ERROR_OK) {
-                        fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' before dataset "
-                                "cleanup: error %d\n", target->objectReference, err);
+                        unbindFailCount++;
+                        fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
+                                "before dataset cleanup: error %d\n", target->objectReference, liveDataSet, err);
+                    } else {
+                        fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from dataset '%s'\n",
+                                target->objectReference, liveDataSet);
                     }
                 }
+                free(liveDataSet);
                 ClientReportControlBlock_destroy(rcb);
             }
             element = LinkedList_getNext(element);
         }
+        fprintf(stderr, "[mms_report_client] stop: disable+unbind pass done - %d target(s) matched a "
+                "tracked dataset, %d succeeded, %d failed\n", matchedCount, matchedCount - unbindFailCount,
+                unbindFailCount);
     }
 
     /* Buffered RCBs' self-created datasets are domain/VMD-scoped (see
@@ -2269,7 +2302,10 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
      * delete, connection already lost) just leaves a server-side dataset
      * behind - logged, not fatal to stopping. */
     if (handle->connection && handle->domainScopedDynamicDatasetNames) {
+        int toDelete = LinkedList_size(handle->domainScopedDynamicDatasetNames);
+        int deletedOnStop = 0;
         int leakedOnStop = 0;
+        fprintf(stderr, "[mms_report_client] stop: attempting to delete %d domain-scoped dataset(s)\n", toDelete);
         LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
         while (element) {
             char* datasetName = (char*) LinkedList_getData(element);
@@ -2278,9 +2314,14 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
                 fprintf(stderr, "[mms_report_client] could not delete dynamic dataset '%s' on stop: "
                         "error %d - left behind on the device\n", datasetName, deleteErr);
                 leakedOnStop++;
+            } else {
+                fprintf(stderr, "[mms_report_client] deleted dynamic dataset '%s' on stop\n", datasetName);
+                deletedOnStop++;
             }
             element = LinkedList_getNext(element);
         }
+        fprintf(stderr, "[mms_report_client] stop: dataset deletion done - %d of %d succeeded, %d left "
+                "behind\n", deletedOnStop, toDelete, leakedOnStop);
         if (leakedOnStop > 0) {
             fprintf(stderr, "[mms_report_client] %d domain-scoped dataset(s) could not be deleted on stop - "
                     "permanently spent against this device's dataset quota until a device-side reset\n",
