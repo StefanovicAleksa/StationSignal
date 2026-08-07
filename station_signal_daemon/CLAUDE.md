@@ -286,8 +286,12 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   bin-packing that may legitimately span several different LNs' leaves in one dataset) or
   `_groupReferencesByLn` (maxAttributes unknown — one dataset per LN, unbounded, the safe default
   with no known size bound to combine LNs against) packs it into clusters assigned to Dyn slots in
-  simple model-declaration order; whichever list (clusters or slots) runs out first is logged
-  plainly, never silently dropped. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
+  **round-robin-by-LN order** (`roundRobinSlotsByLn`) — one slot per distinct LN before any LN gets
+  a second, not raw model-declaration order — found against a real device where one LN alone (12
+  spare Dyn RCB instances) sorted ahead of every other LN/LD in declaration order, so a linear
+  assignment exhausted the device's entire cluster budget on that one LN before any other LN, let
+  alone another logical device, ever got a slot; whichever list (clusters or round-robined slots)
+  runs out first is logged plainly, never silently dropped. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
   on disconnect, no cleanup needed). **Buffered**: domain/VMD-scoped (`"$"`-joined, no `@` prefix,
   persists past the connection) instead — an association-scoped dataset is destroyed the instant
   the connection closes, which a real device (and the vendored reference server) rejects assigning

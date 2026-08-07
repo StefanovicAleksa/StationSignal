@@ -1892,14 +1892,27 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
  *     existed, since combining multiple LNs into one dataset without a known
  *     size bound risks an oversized, doomed createDataSet call.
  *
- * Clusters are assigned to Dyn slots in simple model-declaration order
- * (handle->targets' own existing order - no attempt to prioritize which part
- * of the device matters more, there's no signal to rank by since this
- * feature never polls). Whichever list (clusters or slots) runs out first
- * determines the shortfall, logged plainly either way - never a silent drop:
- * more clusters than slots means part of the device goes unreported this
- * cycle; more slots than clusters means some RCB instances simply have
- * nothing left to assign (the device is already fully covered).
+ * Clusters are assigned to Dyn slots in ROUND-ROBIN-BY-LN order (via
+ * roundRobinSlotsByLn, just below), not raw handle->targets declaration
+ * order - found against a real device: one LN alone (MDMEAS/LLN0, 12 spare
+ * Dyn RCB instances) sorted ahead of every other LN in handle->targets' own
+ * order, so a purely linear assignment exhausted this device's entire
+ * 14-cluster budget on that ONE LN before any OTHER LN - let alone another
+ * logical device entirely (MDCTRL, MDEXT) - ever got a single slot, even
+ * though plenty of the device's own reportable data (on those other LNs)
+ * was never packed into any cluster and had nothing to do with why they were
+ * skipped. Round-robining spends the budget on BREADTH (covering as many
+ * distinct LNs as possible) before DEPTH (giving an already-covered LN a
+ * second slot) - this was always the stated intent ("covering LDs/LNs that
+ * have zero RCBs of their own", see this function's own top doc comment)
+ * but linear order could silently defeat it whenever one LN alone had
+ * enough spare slots to absorb the whole budget. Whichever list (clusters or
+ * round-robined slots) runs out first determines the shortfall, logged
+ * plainly either way - never a silent drop: more clusters than slots means
+ * part of the device goes unreported this cycle; more slots than clusters
+ * means some RCB instances simply have nothing left to assign (the device is
+ * already fully covered) - both outcomes unchanged by this reordering, only
+ * WHICH specific slots land in which bucket changes.
  *
  * Recomputed fresh every connect cycle rather than cached on the handle: a
  * pure function of already-static data (handle->iedModel, handle->targets,
@@ -1907,6 +1920,113 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
  * (string work over the model's own size, no wire calls) and idempotent -
  * not worth growing sMmsReportClientHandle for.
  */
+/*
+ * Reorders `slots` (every Dyn target on the whole device, in whatever order
+ * buildWholeDeviceClusterPlan's own caller-facing doc comment above
+ * describes) into round-robin-by-LN order: one slot from each distinct LN
+ * (target->lnReference), in first-seen order, then a second slot from each
+ * LN that still has one left, and so on - instead of the raw order `slots`
+ * arrived in, where an LN with many spare Dyn RCB instances can otherwise
+ * exhaust an entire cluster budget before any OTHER LN gets a single one.
+ * See buildWholeDeviceClusterPlan's own doc comment for the real-device
+ * finding this was built to fix.
+ *
+ * Returns a NEW LinkedList of the same BORROWED ReportControlBlockTarget*
+ * pointers `slots` itself holds (destroy with LinkedList_destroyStatic,
+ * exactly like `slots`) - never mutates or frees `slots`, which the caller
+ * still owns and destroys separately. Falls back to `slots`' own original
+ * order (still correct, just not fair) if a bucket-cursor allocation fails -
+ * losing the fairness improvement on an allocation failure is preferable to
+ * losing slots outright.
+ */
+static LinkedList
+roundRobinSlotsByLn(LinkedList slots) {
+    LinkedList result = LinkedList_create();
+    if (!slots) return result;
+
+    /* Buckets: one LinkedList of borrowed ReportControlBlockTarget* per
+     * distinct LN, in first-seen order. `lnNames` is the parallel list of
+     * owned LN-name strings, used only for bucket-key comparison - same
+     * index/order as `buckets`. */
+    LinkedList lnNames = LinkedList_create();
+    LinkedList buckets = LinkedList_create();
+
+    LinkedList slotElement = LinkedList_getNext(slots);
+    while (slotElement) {
+        ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotElement);
+        slotElement = LinkedList_getNext(slotElement);
+
+        const char* ln = t->lnReference ? t->lnReference : "";
+
+        LinkedList nameElement = LinkedList_getNext(lnNames);
+        LinkedList bucketElement = LinkedList_getNext(buckets);
+        LinkedList targetBucket = NULL;
+        while (nameElement) {
+            if (strcmp((char*) LinkedList_getData(nameElement), ln) == 0) {
+                targetBucket = (LinkedList) LinkedList_getData(bucketElement);
+                break;
+            }
+            nameElement = LinkedList_getNext(nameElement);
+            bucketElement = LinkedList_getNext(bucketElement);
+        }
+
+        if (!targetBucket) {
+            targetBucket = LinkedList_create();
+            LinkedList_add(buckets, targetBucket);
+            LinkedList_add(lnNames, MmsReportClientUtils_safeStringDup(ln));
+        }
+        LinkedList_add(targetBucket, t);
+    }
+
+    int bucketCount = LinkedList_size(buckets);
+    LinkedList* cursors = bucketCount > 0 ? calloc((size_t) bucketCount, sizeof(LinkedList)) : NULL;
+    if (!cursors) {
+        /* Allocation failure (or zero buckets, i.e. empty `slots`) - fall
+         * back to draining buckets one at a time, in first-seen LN order,
+         * rather than losing any slots. Still correct, just not fair. */
+        LinkedList bucketElement = LinkedList_getNext(buckets);
+        while (bucketElement) {
+            LinkedList bucket = (LinkedList) LinkedList_getData(bucketElement);
+            LinkedList innerElement = LinkedList_getNext(bucket);
+            while (innerElement) {
+                LinkedList_add(result, LinkedList_getData(innerElement));
+                innerElement = LinkedList_getNext(innerElement);
+            }
+            bucketElement = LinkedList_getNext(bucketElement);
+        }
+    } else {
+        int idx = 0;
+        LinkedList bucketElement = LinkedList_getNext(buckets);
+        while (bucketElement) {
+            cursors[idx++] = LinkedList_getNext((LinkedList) LinkedList_getData(bucketElement));
+            bucketElement = LinkedList_getNext(bucketElement);
+        }
+
+        bool anyRemaining = true;
+        while (anyRemaining) {
+            anyRemaining = false;
+            for (int i = 0; i < bucketCount; i++) {
+                if (cursors[i]) {
+                    LinkedList_add(result, LinkedList_getData(cursors[i]));
+                    cursors[i] = LinkedList_getNext(cursors[i]);
+                    anyRemaining = true;
+                }
+            }
+        }
+        free(cursors);
+    }
+
+    LinkedList bucketCleanup = LinkedList_getNext(buckets);
+    while (bucketCleanup) {
+        LinkedList_destroyStatic((LinkedList) LinkedList_getData(bucketCleanup));
+        bucketCleanup = LinkedList_getNext(bucketCleanup);
+    }
+    LinkedList_destroyStatic(buckets);
+    LinkedList_destroyDeep(lnNames, free);
+
+    return result;
+}
+
 static LinkedList
 buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     LinkedList plan = LinkedList_create();
@@ -1968,8 +2088,14 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     int slotCount = LinkedList_size(slots);
     int assignedClusters = 0;
 
+    /* Round-robin-by-LN, not raw declaration order - see this function's own
+     * doc comment above and roundRobinSlotsByLn's own doc comment. `slots`
+     * itself (and slotCount, already captured above) is untouched - still
+     * owned and destroyed by this function exactly as before. */
+    LinkedList roundRobinSlots = roundRobinSlotsByLn(slots);
+
     LinkedList clusterElement = LinkedList_getNext(clusterLists);
-    LinkedList slotElement = LinkedList_getNext(slots);
+    LinkedList slotElement = LinkedList_getNext(roundRobinSlots);
     while (clusterElement) {
         if (!slotElement) {
             fprintf(stderr, "[mms_report_client] whole-device clustering produced %d dataset(s) but this "
@@ -2020,6 +2146,7 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
         clusterCleanup = LinkedList_getNext(clusterCleanup);
     }
     LinkedList_destroyStatic(clusterLists);
+    LinkedList_destroyStatic(roundRobinSlots);
     LinkedList_destroyStatic(slots);
 
     return plan;

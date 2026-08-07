@@ -976,6 +976,46 @@ symptom — has no fixture in this repo that simulates "accepts a write with `IE
 silently doesn't apply it," so it remains unproven end-to-end here; confirming it requires the real
 device the original report came from.
 
+## Whole-device clustering's linear slot assignment starved every LN after the first one that had enough spare RCBs
+
+A follow-on user report against the same real device: `C5_6MDCTRL`'s `urcbC01`/`D01`/`E01`/`F01` —
+real, in-use RCBs — never got enabled, logged as `dataset resolved via none: '(none)'` / `skipped -
+no dataset available, not attempting setRCBValues`. Not a budget-exhaustion case (no "budget
+exhausted" line in the log) and not URCB-specific (`C5_6MDEXT/LLN0.BR.brcbA01`/`brcbB01`, both
+buffered, were starved identically in an earlier capture on the same device) — a real code fault in
+`buildWholeDeviceClusterPlan` (`mms_report_client_connection.c`).
+
+That function builds `slots` — every Dyn RCB target on the whole device — by walking
+`handle->targets` in raw model-declaration order, then matches it 1:1, in that exact order, against
+`clusterLists` (the whole device's reportable data, chunked into as many fresh datasets as the
+device's `maxAttributes`/quota allows — 14 on this device). Once the 14 clusters ran out, every
+remaining slot got nothing, regardless of which LN it belonged to. On this device,
+`C5_6MDMEAS/LLN0` alone declares 12 spare Dyn RCB instances, and happens to sort ahead of every
+other LN in `handle->targets`' own order; `C5_6MDMEAS/MMXU1` adds 2 more, consuming the entire
+14-cluster budget before `C5_6MDCTRL` — 65+ further LNs — or `C5_6MDEXT` ever got a single turn.
+This directly contradicted the same function's own documented intent ("covering LDs/LNs that have
+zero RCBs of their own... maximizing distinct coverage") — the linear order silently defeated it
+whenever one LN alone had enough spare slots to absorb the whole budget.
+
+Fixed by adding `roundRobinSlotsByLn` (`mms_report_client_connection.c`, just above
+`buildWholeDeviceClusterPlan`): groups `slots`' borrowed `ReportControlBlockTarget*` entries into
+per-LN buckets (keyed by `target->lnReference`, first-seen order), then drains the buckets in
+round-robin — one slot per bucket per sweep — into a new list of the same borrowed pointers.
+`buildWholeDeviceClusterPlan` walks this reordered list instead of `slots` directly in its
+cluster-assignment loop; `slots`/`slotCount` themselves, and everything else in the function
+(chunking, logging, cleanup), are unchanged. This spends the device's limited dataset budget on
+breadth — covering as many distinct LNs as possible — before depth — giving an already-covered LN a
+second dataset — which is what the function's own design rationale already called for; it was just
+never actually implemented that way.
+
+Proven not to regress the existing suite: the full unit suite (39 binaries, 0 failures) and
+`integration_tests/mms_report_client`'s full 17-test E2E suite against `ied_simulator` both pass
+unchanged, including `test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances` and
+`test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly`, which exercise cluster/slot
+assignment directly. No fixture in this repo has enough distinct LNs with enough spare Dyn RCB
+instances to reproduce the actual starvation scenario, so the fairness improvement itself remains
+unproven end-to-end here; confirming it requires the real device the original report came from.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in
