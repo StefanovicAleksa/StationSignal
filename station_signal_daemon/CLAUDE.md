@@ -319,6 +319,15 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   no-SCL empirical/adaptive-discovery case (*inferring* an unknown `maxAttributes`/`max` cap from
   `createDataSet` failure patterns, as opposed to *discovering already-existing datasets*, which is
   now implemented) remains unimplemented — deferred, see `GAP3_DYNAMIC_DATASET_NOTES.md`.
+  **Sequential-write fallback on enable**: every `setRCBValues` call in `enableOneTarget` is first
+  attempted as one bundled multi-item MMS write (`singleRequest=true` — DatSet/EntryID/OptFlds/
+  TrgOps/IntgPd/GI/RptEna in one atomic PDU); if that still fails after the EntryID- and
+  temporarily-unavailable-retries above, it's retried exactly once more as separate sequential
+  per-element MMS writes (`singleRequest=false`, same item order) before giving up — some real
+  devices reject the bundle itself outright regardless of the values, only accepting DatSet
+  committed on its own before TrgOps/RptEna. Applies to both buffered and unbuffered RCBs; not
+  gated on a specific error code, same "implementation-defined failure mode" posture as the
+  EntryID retry.
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
   **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered

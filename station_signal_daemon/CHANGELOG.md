@@ -899,6 +899,32 @@ GI-only-configured RCB now reaches the callback with a real `previousValue` — 
 reverting the fix and observing this exact assertion fail, then restoring it and observing it pass
 again, with every other test in the suite unaffected either way.
 
+## RCB enable had no fallback for a device rejecting the bundled multi-item write
+
+Every `setRCBValues` call in `enableOneTarget` was sent with `singleRequest=true` — every dirty
+element (`DatSet`, `EntryID`, `OptFlds`, `TrgOps`, `IntgPd`, `GI`, `RptEna`) bundled into one atomic
+MMS write PDU (`IedConnection_setRCBValues`'s own item-list construction already orders these
+correctly within the bundle — DatSet before TrgOps before RptEna before a trailing GI — confirmed
+directly in the vendored `libiec61850` source,
+`third_party_src/libiec61850/src/iec61850/client/client_report_control.c`). That ordering guarantee is not the same
+thing as a device actually accepting a *combined* write at all: a real device can reject the bundle
+itself outright — independent of whether each individual value is valid — and only accept these
+same elements as separate, sequential MMS writes, DatSet committed on its own before TrgOps/RptEna
+follow. Until now this codebase never exercised the alternative the library already provides for
+exactly this: `singleRequest=false` sends the identical item list, same order, as individual
+`MmsConnection_writeVariable` calls instead of one `writeMultipleVariables` call, stopping at the
+first failure. A device with this quirk therefore failed to enable outright, with no fallback,
+regardless of how correct the mask/values themselves were.
+
+Fixed by adding exactly that fallback to `enableOneTarget` (`mms_report_client_connection.c`):
+if `setRCBValues` still fails after the existing EntryID-rejection retry and
+temporarily-unavailable retry loop (both unchanged, both still bundled), it's retried exactly once
+more with the same `mask` and `singleRequest=false`. Applied uniformly to both buffered and
+unbuffered RCBs — the underlying cause is server-side support for bundled multi-item writes, not
+the buffered/unbuffered distinction — and, like the EntryID retry beside it, triggered
+unconditionally on any remaining failure rather than gated on a specific error code, since IEC
+61850 leaves this failure mode implementation-defined across vendors.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

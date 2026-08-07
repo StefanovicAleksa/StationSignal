@@ -1653,6 +1653,29 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
     }
 
+    /* Last-resort fallback: a bundled single-request write (singleRequest=true
+     * above, everywhere else in this function) puts every dirty element -
+     * DatSet, TrgOps, RptEna, GI, etc. - into one atomic MMS write PDU.
+     * libiec61850 already orders the items correctly within that bundle
+     * (DatSet before TrgOps before RptEna before a trailing GI - see
+     * IedConnection_setRCBValues' own item-list construction), but some real
+     * devices reject the BUNDLE ITSELF outright - independent of whether the
+     * individual values are valid - and only accept these same elements as
+     * separate, sequential MMS writes (DatSet committed on its own first,
+     * then TrgOps/RptEna/GI after). singleRequest=false gets exactly that:
+     * the same mask, same per-element order, just sent as individual
+     * MmsConnection_writeVariable calls instead of one
+     * writeMultipleVariables call. Tried once, unconditionally on any
+     * remaining failure - same "don't guess at an implementation-defined
+     * failure mode" posture as the EntryID retry above - rather than gating
+     * on a specific error code that may not be consistent across vendors. */
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] setRCBValues (bundled single request) failed for '%s': error %d - "
+                "retrying as sequential per-element writes (some real devices reject a combined multi-item RCB "
+                "write outright, independent of the values themselves)\n", target->objectReference, err);
+        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, false);
+    }
+
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
                 target->objectReference, err);
