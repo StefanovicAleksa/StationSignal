@@ -925,6 +925,57 @@ the buffered/unbuffered distinction — and, like the EntryID retry beside it, t
 unconditionally on any remaining failure rather than gated on a specific error code, since IEC
 61850 leaves this failure mode implementation-defined across vendors.
 
+## The singleRequest=false fallback above wasn't enough — a device can report success for TrgOps and still silently ignore it
+
+A follow-on user report against the same real device: URCBs still weren't going active, even
+though the sequential-write fallback above was in place and the device now showed a dataset
+assigned. The daemon's own log showed every `setRCBValues` call returning `IED_ERROR_OK` — no
+error at all, on the very first (bundled) attempt, so the `singleRequest=false` fallback above
+never even triggered. The write claimed success; the RCB just wasn't actually reporting.
+
+This meant the previous fix's premise — that a struggling write always surfaces as an error code
+to retry on — was wrong for this specific failure mode. The device was accepting a write that
+included `TrgOps` bundled alongside `DatSet`/`RptEna` (sent before enable, matching the item order
+`IedConnection_setRCBValues` already uses) and silently never applying the `TrgOps` portion of it.
+No error, no diagnostic, nothing to retry against — the only way to see it was to read the RCB
+straight back off the device afterward and compare.
+
+Complicating this further: this codebase's own `ied_simulator` test fixture (and, going by that,
+presumably many real devices too) enforces the *opposite* constraint — a `TrgOps` write attempted
+*after* `RptEna` is already `true` is rejected outright with `IED_ERROR_TEMPORARILY_UNAVAILABLE`
+(confirmed directly: moving the `TrgOps` write to after enable, as originally suggested, broke
+`test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix` with exactly that error, every
+time, not intermittently). So neither "always write TrgOps before enable" nor "always write it
+after" is correct for every device — the real device silently drops the pre-enable write; the
+simulator hard-rejects the post-enable one.
+
+Fixed by not trusting either device's own claimed success and instead structuring
+`enableOneTarget` around a verify-and-correct pattern: `DatSet` (+ `TrgOps`/`EntryID`/`OptFlds` as
+applicable) is still written first, before enable — the common case, and what `ied_simulator`
+requires — then `RptEna` (+ `GI`) is written to actually enable the RCB. Only then, if `TrgOps`
+needed updating at all, is the RCB read straight back off the device
+(`readLiveTrgOps`/`ClientReportControlBlock_getTrgOps`) and compared against what was requested; a
+mismatch means the pre-enable write didn't actually stick, so `TrgOps` is written a second time,
+now that `RptEna` is confirmed `true` — exactly the order the real device needed, but only applied
+when the read-back proves it's actually necessary, so a spec-typical device (`TrgOps` before
+enable, correctly applied, e.g. `ied_simulator`) never reaches this corrective step at all. A
+corrective-step failure is logged loudly but left non-fatal to the overall enable — the RCB is
+already active by that point, and losing the `TrgOps` improvement means this specific device may
+not generate change-triggered reports on this RCB, not that reporting is broken outright. Each of
+the three writes (`writeRcbStep`) still gets its own bundled-then-sequential-then-temporarily-
+unavailable retry ladder from the previous fix, and `logRcbLiveState` read-backs bracket every
+failure point plus the final outcome — added specifically so a device's actual reported state, not
+just this client's assumption, is visible from a log capture, which is exactly what was missing
+when this bug was first reported.
+
+Proven not to regress the existing suite: `integration_tests/mms_report_client`'s full 17-test
+suite (including `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`, which fails
+immediately if `TrgOps` is unconditionally deferred to after enable) passes against
+`ied_simulator`. The corrective read-back path itself — the actual fix for the real device's
+symptom — has no fixture in this repo that simulates "accepts a write with `IED_ERROR_OK` but
+silently doesn't apply it," so it remains unproven end-to-end here; confirming it requires the real
+device the original report came from.
+
 ## `ipc_dispatcher` quality/label/CODEDENUM history
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in

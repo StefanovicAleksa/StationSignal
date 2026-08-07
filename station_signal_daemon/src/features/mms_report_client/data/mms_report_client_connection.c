@@ -1268,6 +1268,95 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     free(previousDatasetReference);
 }
 
+/* Writes one step of an RCB's ordered enable sequence (see enableOneTarget's
+ * own doc comment on why DatSet/RptEna/TrgOps are now three separate steps,
+ * not one combined write) and unconditionally logs the outcome - added
+ * specifically so a real device's per-step behavior is diagnosable from a
+ * log capture instead of only ever seeing one final combined result.
+ * Retries exactly like the old single-write path used to: bundled first
+ * (singleRequest=true), then, if that failed, as separate sequential
+ * per-element writes (singleRequest=false - some real devices reject a
+ * bundle outright regardless of the values, see CHANGELOG.md), then a few
+ * short retries if the device reports IED_ERROR_TEMPORARILY_UNAVAILABLE
+ * (still coming up after a restart). `stepName` is purely a log label. */
+static IedClientError
+writeRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const char* objectReference,
+        uint32_t mask, const char* stepName) {
+    IedClientError err = IED_ERROR_OK;
+    IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] setRCBValues step '%s' (bundled) failed for '%s': error %d - "
+                "retrying as sequential per-element writes\n", stepName, objectReference, err);
+        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, false);
+    }
+
+    int tempUnavailableRetries = 0;
+    while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
+            && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
+            && !handle->stopRequested) {
+        tempUnavailableRetries++;
+        fprintf(stderr, "[mms_report_client] setRCBValues step '%s' temporarily unavailable for '%s' (device "
+                "likely still initializing after a restart) - retry %d/%d\n", stepName, objectReference,
+                tempUnavailableRetries, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
+        interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
+        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    }
+
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] setRCBValues step '%s' failed for '%s': error %d\n",
+                stepName, objectReference, err);
+    } else {
+        fprintf(stderr, "[mms_report_client] setRCBValues step '%s' succeeded for '%s'\n", stepName, objectReference);
+    }
+
+    return err;
+}
+
+/* Reads the RCB straight back from the device and logs exactly what it
+ * reports for the three attributes this feature's enable sequence cares
+ * about - RptEna/DatSet/TrgOps - as its own, separate MMS read, independent
+ * of whatever this client just tried to write. Exists purely as a diagnostic:
+ * a setRCBValues call can return IED_ERROR_OK while the device still didn't
+ * actually apply what was asked (confirmed against a real device that
+ * accepted a write with success but left an unbuffered RCB not actually
+ * active) - without a real read-back there is no way to tell "we wrote it
+ * and it stuck" from "we wrote it and the device silently ignored it" from
+ * a log capture alone. Best-effort only: a failed read-back here is logged
+ * and otherwise ignored, never treated as the enable itself failing. */
+static void
+logRcbLiveState(MmsReportClientHandle handle, const char* objectReference, const char* when) {
+    IedClientError err = IED_ERROR_OK;
+    ClientReportControlBlock live = IedConnection_getRCBValues(handle->connection, &err, objectReference, NULL);
+    if (!live) {
+        fprintf(stderr, "[mms_report_client] '%s' live read-back (%s) failed: error %d\n",
+                objectReference, when, err);
+        return;
+    }
+    const char* liveDataset = ClientReportControlBlock_getDataSetReference(live);
+    fprintf(stderr, "[mms_report_client] '%s' device-reported live state (%s): RptEna=%d DatSet='%s' TrgOps=0x%x\n",
+            objectReference, when, ClientReportControlBlock_getRptEna(live),
+            liveDataset ? liveDataset : "(empty)", ClientReportControlBlock_getTrgOps(live));
+    ClientReportControlBlock_destroy(live);
+}
+
+/* Reads the RCB's live TrgOps straight back from the device, for comparison
+ * against what this client intended to set - see enableOneTarget's own
+ * step-3 doc comment for why this check exists (a real device was found
+ * reporting IED_ERROR_OK for a TrgOps write it then silently never applied).
+ * Returns -1 (never a real TrgOps bitmask - always non-negative wire values)
+ * on a failed read, so the caller's bit-mask comparison conservatively
+ * treats an unreadable device as "didn't stick" rather than assuming success. */
+static int
+readLiveTrgOps(MmsReportClientHandle handle, const char* objectReference) {
+    IedClientError err = IED_ERROR_OK;
+    ClientReportControlBlock live = IedConnection_getRCBValues(handle->connection, &err, objectReference, NULL);
+    if (!live) return -1;
+    int trgOps = ClientReportControlBlock_getTrgOps(live);
+    ClientReportControlBlock_destroy(live);
+    return trgOps;
+}
+
 static void
 enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session) {
     /* Defense-in-depth against enableAllTargets' own loop-top check below -
@@ -1304,8 +1393,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * comment in mms_report_client_types.h for the full design and
      * shouldForwardAndUpdateCache's own doc comment (mms_report_client_usecases.c)
      * for exactly how a persistently-NULL slot past the first report is
-     * detected and logged as a bug. */
-    uint32_t mask = RCB_ELEMENT_RPT_ENA;
+     * detected and logged as a bug. `mask` here accumulates only the
+     * "config" elements written in step 1 (OptFlds/DatSet/EntryID) - RptEna
+     * and TrgOps get their own masks for their own later steps, see this
+     * function's own doc comment below on why the enable sequence is now
+     * three separate ordered writes instead of one combined one. */
+    uint32_t mask = 0;
 
     /* Proactively request OptFlds.EntryID for every buffered RCB, rather
      * than relying on however the device happens to already be configured -
@@ -1369,10 +1462,21 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * purpose. Only writes it back (and only then adds RCB_ELEMENT_TRG_OPS
      * to the mask) if at least one of these bits isn't already set, to
      * avoid touching this attribute on every single reconnect once the
-     * device has accepted it once - same reasoning as OptFlds.EntryID. */
+     * device has accepted it once - same reasoning as OptFlds.EntryID.
+     * Bundled into step 1 (before enable) since most servers - including
+     * this codebase's own `ied_simulator` - only accept a TrgOps change
+     * while RptEna is false, and reject it with IED_ERROR_TEMPORARILY_UNAVAILABLE
+     * once enabled (confirmed directly: `integration_tests/mms_report_client`'s
+     * `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix` fails
+     * with exactly that error if this write is deferred to after RptEna).
+     * trgOpsNeedsUpdate is kept for a second purpose below - see this
+     * function's own doc comment on the post-enable read-back/corrective
+     * retry, for the opposite real-device failure mode (write reports
+     * success here but silently never applies). */
     int currentTrgOps = ClientReportControlBlock_getTrgOps(rcb);
     int neededTrgOps = TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI;
-    if ((currentTrgOps & neededTrgOps) != neededTrgOps) {
+    bool trgOpsNeedsUpdate = (currentTrgOps & neededTrgOps) != neededTrgOps;
+    if (trgOpsNeedsUpdate) {
         ClientReportControlBlock_setTrgOps(rcb, currentTrgOps | neededTrgOps);
         mask |= RCB_ELEMENT_TRG_OPS;
     }
@@ -1536,7 +1640,6 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         }
     }
 
-    ClientReportControlBlock_setRptEna(rcb, true);
     /* GI used to be requested on every enable unconditionally. Real-hardware
      * logs showed a buffered RCB's own GI response getting enqueued into its
      * buffered backlog as a brand-new entry (fresh, ever-increasing EntryID,
@@ -1559,16 +1662,41 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * bootstrap-seeded (see shouldForwardAndUpdateCache's own doc comment).
      * `reason` is still never trusted for filtering (see
      * shouldForwardAndUpdateCache's own doc comment). TrgOps.dchg/qchg/gi are
-     * now proactively OR'd in above (see that block's own doc comment) -
-     * BUF_TM/INTG_PD/CONF_REV, and TrgOps.dupd/integrity specifically, are
-     * still never touched, staying exactly as the IED's own config has them. */
+     * proactively OR'd in via trgOpsNeedsUpdate above (see that block's own
+     * doc comment) - BUF_TM/INTG_PD/CONF_REV, and TrgOps.dupd/integrity
+     * specifically, are still never touched, staying exactly as the IED's
+     * own config has them. requestGi is mutable (not const) - the EntryID
+     * rejection retry below can still force it true after this point, same
+     * as before this function's three-step restructuring. */
     bool requestGi = MmsReportClientUseCases_shouldRequestGiOnEnable(target->buffered, hasResumableEntryId);
-    if (requestGi) {
-        ClientReportControlBlock_setGI(rcb, true);
-        mask |= RCB_ELEMENT_GI;
-    }
 
-    IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    /* Real-device finding: a device can report IED_ERROR_OK for a TrgOps
+     * write bundled alongside DatSet (step 1, below - still the primary,
+     * pre-enable path, since most servers - including this codebase's own
+     * `ied_simulator` - only accept TrgOps while RptEna is false, see that
+     * step's own doc comment above) while silently never actually applying
+     * it - a real device's unbuffered RCBs were found accepting that exact
+     * write yet never actually going active. Rather than pick one fixed
+     * order and risk being wrong for whichever kind of device is on the
+     * other end, DatSet/RptEna/TrgOps are now three separate, independently
+     * logged writes (step 1, step 2, and a conditional step 3 below), and
+     * step 3 doesn't trust step 1's own claimed success for TrgOps - it
+     * reads the RCB straight back off the device and only retries TrgOps
+     * (now that RptEna is confirmed true, which some devices apparently
+     * require) if the live value proves step 1 didn't actually stick. This
+     * self-corrects for either failure mode observed in practice - a device
+     * that only accepts TrgOps before enable (the common case, step 1 alone
+     * suffices) or one that silently drops a pre-enable TrgOps write (step 3
+     * catches and corrects it) - without assuming either behavior up front.
+     * logRcbLiveState calls throughout are purely diagnostic, added
+     * specifically so a failure like this one shows the device's own actual
+     * reported state instead of only this client's guess at what it asked
+     * for. */
+
+    /* Step 1: dataset binding (DatSet, + TrgOps/EntryID/OptFlds if
+     * applicable, all accumulated into `mask` above) - config sent before
+     * the RCB is enabled, since most servers require that order. */
+    err = writeRcbStep(handle, rcb, target->objectReference, mask, "DatSet");
     if (err != IED_ERROR_OK && (mask & RCB_ELEMENT_ENTRY_ID)) {
         /* The server may have rejected an EntryID it no longer recognizes -
          * e.g. its own buffer wrapped past it after a very long disconnect,
@@ -1583,13 +1711,9 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         /* GI was skipped on the first attempt above precisely because we had
          * a resumable EntryID (requestGi was false) - now that the server
          * has rejected it and the cache is about to be cleared back to NULL,
-         * this retry is a fresh full-resume enable with nothing to resume
-         * from, so it needs the same GI safety net a genuine first-ever
+         * step 2 below needs the same GI safety net a genuine first-ever
          * enable gets. */
-        if (!requestGi) {
-            ClientReportControlBlock_setGI(rcb, true);
-            mask |= RCB_ELEMENT_GI;
-        }
+        requestGi = true;
 
         /* The server just told us the EntryID we cached is no longer valid
          * (buffer wrapped, or the server itself restarted with a fresh
@@ -1632,53 +1756,13 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             }
         }
 
-        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
-    }
-
-    /* See this file's own MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES doc
-     * comment - a few short retries for a device that's still coming up
-     * after a restart, rather than immediately tearing down a report handler
-     * that may already be receiving valid reports. Reuses whatever rcb/mask
-     * state the EntryID-retry block above left behind (untouched if that
-     * block never ran). */
-    int tempUnavailableRetries = 0;
-    while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
-            && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
-            && !handle->stopRequested) {
-        tempUnavailableRetries++;
-        fprintf(stderr, "[mms_report_client] setRCBValues temporarily unavailable for '%s' (device likely still "
-                "initializing after a restart) - retry %d/%d\n", target->objectReference, tempUnavailableRetries,
-                MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
-        interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
-        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
-    }
-
-    /* Last-resort fallback: a bundled single-request write (singleRequest=true
-     * above, everywhere else in this function) puts every dirty element -
-     * DatSet, TrgOps, RptEna, GI, etc. - into one atomic MMS write PDU.
-     * libiec61850 already orders the items correctly within that bundle
-     * (DatSet before TrgOps before RptEna before a trailing GI - see
-     * IedConnection_setRCBValues' own item-list construction), but some real
-     * devices reject the BUNDLE ITSELF outright - independent of whether the
-     * individual values are valid - and only accept these same elements as
-     * separate, sequential MMS writes (DatSet committed on its own first,
-     * then TrgOps/RptEna/GI after). singleRequest=false gets exactly that:
-     * the same mask, same per-element order, just sent as individual
-     * MmsConnection_writeVariable calls instead of one
-     * writeMultipleVariables call. Tried once, unconditionally on any
-     * remaining failure - same "don't guess at an implementation-defined
-     * failure mode" posture as the EntryID retry above - rather than gating
-     * on a specific error code that may not be consistent across vendors. */
-    if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] setRCBValues (bundled single request) failed for '%s': error %d - "
-                "retrying as sequential per-element writes (some real devices reject a combined multi-item RCB "
-                "write outright, independent of the values themselves)\n", target->objectReference, err);
-        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, false);
+        err = writeRcbStep(handle, rcb, target->objectReference, mask, "DatSet (EntryID retry)");
     }
 
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
                 target->objectReference, err);
+        logRcbLiveState(handle, target->objectReference, "after failed DatSet step");
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
@@ -1686,6 +1770,69 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
         ClientReportControlBlock_destroy(rcb);
         return;
     }
+
+    /* Step 2: enable - RptEna (+ GI, to force a deterministic snapshot per
+     * requestGi's own doc comment above). This is the step that actually
+     * makes the RCB active; step 3 below verifies step 1's TrgOps actually
+     * stuck now that this has run. */
+    ClientReportControlBlock_setRptEna(rcb, true);
+    uint32_t enableMask = RCB_ELEMENT_RPT_ENA;
+    if (requestGi) {
+        ClientReportControlBlock_setGI(rcb, true);
+        enableMask |= RCB_ELEMENT_GI;
+    }
+
+    err = writeRcbStep(handle, rcb, target->objectReference, enableMask, "RptEna");
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
+                target->objectReference, err);
+        logRcbLiveState(handle, target->objectReference, "after failed RptEna step");
+        IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
+        if (handle->rcbStatusCallback) {
+            handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
+        }
+        ClientReportControlBlock_destroy(rcb);
+        return;
+    }
+
+    /* Step 3 (corrective, conditional): verify TrgOps actually stuck, and
+     * retry it now that RptEna is confirmed true if it didn't. Step 1's
+     * TrgOps write (above, before enable) is what most devices need - it's
+     * what this codebase's own `ied_simulator` requires, and what a
+     * combined/library-ordered write already did before this function's
+     * three-step restructuring. But a real device was found reporting
+     * IED_ERROR_OK for that exact pre-enable write while silently never
+     * applying it - TrgOps only actually took effect once written again
+     * AFTER RptEna was already true. A device's own claimed success is
+     * therefore not trusted here: read the RCB straight back and check
+     * whether its live TrgOps genuinely contains the bits this feature
+     * needs before concluding step 1 actually worked. Only ever runs at all
+     * if trgOpsNeedsUpdate was true to begin with (step 1 had something to
+     * write) - most devices never reach this check. A failure here is
+     * logged loudly but deliberately non-fatal to the overall enable: the
+     * RCB is already active (RptEna=true, dataset bound) by this point, and
+     * failing to also get TrgOps updated only means this specific device
+     * may not generate change-triggered reports on this RCB, not that
+     * reporting is broken outright. */
+    if (trgOpsNeedsUpdate) {
+        int liveTrgOps = readLiveTrgOps(handle, target->objectReference);
+        if ((liveTrgOps & neededTrgOps) != neededTrgOps) {
+            fprintf(stderr, "[mms_report_client] '%s' step 1's TrgOps write reported success but the device's "
+                    "live TrgOps (0x%x) doesn't reflect the requested bits (0x%x) - retrying TrgOps now that "
+                    "RptEna is enabled\n", target->objectReference, liveTrgOps, neededTrgOps);
+            ClientReportControlBlock_setTrgOps(rcb, currentTrgOps | neededTrgOps);
+            IedClientError trgOpsErr = writeRcbStep(handle, rcb, target->objectReference, RCB_ELEMENT_TRG_OPS,
+                    "TrgOps (post-enable corrective retry)");
+            if (trgOpsErr != IED_ERROR_OK) {
+                fprintf(stderr, "[mms_report_client] '%s' post-enable TrgOps corrective retry also failed: "
+                        "error %d - RCB stays enabled with whatever TrgOps the device already has; this device "
+                        "may never generate change-triggered reports on this RCB\n", target->objectReference,
+                        trgOpsErr);
+            }
+        }
+    }
+
+    logRcbLiveState(handle, target->objectReference, "after enable sequence");
 
     /* The one success-path log line in this function - every other fprintf
      * here fires only on failure, so today there is no way to see which RCBs

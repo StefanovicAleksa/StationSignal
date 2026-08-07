@@ -319,15 +319,26 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   no-SCL empirical/adaptive-discovery case (*inferring* an unknown `maxAttributes`/`max` cap from
   `createDataSet` failure patterns, as opposed to *discovering already-existing datasets*, which is
   now implemented) remains unimplemented — deferred, see `GAP3_DYNAMIC_DATASET_NOTES.md`.
-  **Sequential-write fallback on enable**: every `setRCBValues` call in `enableOneTarget` is first
-  attempted as one bundled multi-item MMS write (`singleRequest=true` — DatSet/EntryID/OptFlds/
-  TrgOps/IntgPd/GI/RptEna in one atomic PDU); if that still fails after the EntryID- and
-  temporarily-unavailable-retries above, it's retried exactly once more as separate sequential
-  per-element MMS writes (`singleRequest=false`, same item order) before giving up — some real
-  devices reject the bundle itself outright regardless of the values, only accepting DatSet
-  committed on its own before TrgOps/RptEna. Applies to both buffered and unbuffered RCBs; not
-  gated on a specific error code, same "implementation-defined failure mode" posture as the
-  EntryID retry.
+  **Three-step, verified enable sequence**: `enableOneTarget` no longer sends DatSet/TrgOps/RptEna
+  as one shared write. Step 1 writes DatSet (+ EntryID/OptFlds/TrgOps if each needs updating) —
+  before enabling, since most servers (including this codebase's own `ied_simulator` —
+  `IED_ERROR_TEMPORARILY_UNAVAILABLE`/26, confirmed via
+  `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`) only accept a TrgOps change while
+  `RptEna` is false. Step 2 writes `RptEna` (+ `GI`) — this is what actually makes the RCB active.
+  Step 3 is conditional and corrective: if TrgOps needed updating, the RCB is read straight back off
+  the device (`readLiveTrgOps`) and TrgOps is retried — now that `RptEna` is confirmed true — only if
+  the live value proves step 1's write didn't actually stick. This exists because a real device was
+  found returning `IED_ERROR_OK` for step 1's TrgOps write while silently never applying it; a
+  device's own claimed success is therefore never trusted for TrgOps without a read-back. A step-3
+  failure is logged but non-fatal to the overall enable (the RCB is already active by that point).
+  Each of the three steps is its own `writeRcbStep` call: bundled first (`singleRequest=true`), then
+  — if that fails — retried once as separate sequential per-element writes (`singleRequest=false`,
+  same item order; some real devices reject a bundle outright regardless of the values), then a few
+  short temporarily-unavailable retries; every step's outcome is logged independently
+  (`writeRcbStep`), and `logRcbLiveState` read-backs bracket failures/the final result, specifically
+  so a real device's actual reported state — not just this client's guess at what it asked for — is
+  diagnosable from a log capture. Applies uniformly to both buffered and unbuffered RCBs — the
+  underlying cause is per-device write-order/support, not the buffered/unbuffered distinction.
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
   **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered
