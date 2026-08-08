@@ -457,17 +457,40 @@ bundled write: that spec makes `DatSet`/`OptFlds`/`TrgOps`/`BufTm`/`IntgPd` writ
    the cached `lastEntryId` clear + value-diff-cache reset + forced GI it triggers no longer has
    to be inferred from a combined failure that could equally have been about DatSet or TrgOps.
    `BufTm`/`IntgPd`/`ConfRev` are never written at any step.
-6. **Every executed step is read-back verified** — `runRcbStep` follows each write with its own
+6. **Steps 2 and 3 are judged against step 1's read-back, not the entry snapshot.** A real
+   SIPROTEC clears `TrgOps` *and* `OptFlds` whenever `DatSet` is written to a **different** value.
+   Deciding from the pre-step-1 snapshot therefore skipped the rewrite for any RCB that arrived
+   already carrying `dchg|qchg|gi`, enabling it with `TrgOps=0x0` — unable to emit a change report
+   and unable to answer step 6's GI, so completely silent while every write returned
+   `IED_ERROR_OK` (three of eighteen enabled RCBs on real hardware; see `CHANGELOG.md`).
+   `runRcbStep`'s `outLive` out-param hands its existing read-back to the caller — no extra
+   round-trip — and `enableOneTarget` drives both skip-conditions from that `postDatSetState`.
+   A **failed** read-back falls through to writing, never to skipping: rewriting a value the device
+   may already hold is harmless, skipping risks leaving the attribute wiped. Both "skipped" lines
+   print the post-DatSet value actually judged. Note this is *not* a buffered/unbuffered split —
+   the causal variable is whether `DatSet` changed; buffered RCBs are equally exposed through
+   `OptFlds`, where the same bug kills EntryID resumption with no symptom at all.
+7. **A dead RCB is counted as FAILED, not enabled.** After the sequence, the last step's read-back
+   (step 6's if GI ran, else step 5's) is checked: live `TrgOps` with neither
+   `TRG_OPT_DATA_CHANGED` nor `TRG_OPT_QUALITY_CHANGED` means the RCB can never emit an
+   event-driven report, so it logs `FAILED`, uninstalls the handler, fires
+   `rcbStatusCallback(false, IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT)` and returns
+   `RCB_ENABLE_OUTCOME_FAILED`. Judged on the change triggers only — missing just `TRG_OPT_GI` is
+   degraded (changes still flow, only the enable snapshot is lost) and stays a warning, so a device
+   legitimately refusing only that bit isn't written off. An unreadable final state is not fatal.
+   The `rptEnaApplied` warning lives here too, alongside the other flavour of "enabled on paper
+   only". This is what makes the cycle summary's "no failures" trustworthy.
+8. **Every executed step is read-back verified** — `runRcbStep` follows each write with its own
    independent `getRCBValues` (`readAndLogLiveRcbState`) and emits `VERIFIED`, `NOT APPLIED`, or
    `unverifiable`. This is the only way to detect a device that returns `IED_ERROR_OK` for a write
    it silently never applies. `OptFlds`/`TrgOps` verify by *containment* (`(live & expected) ==
    expected`), never equality, since this feature only ever ORs bits in and never clobbers what
    the device already had. `EntryID`/`GI` are write-only in effect and reported as unverifiable
    rather than falsely confirmed. An `RptEna=true` that returns OK but reads back false gets a
-   loud named warning but is deliberately **not** treated as a failure — a device is not obliged
-   to reflect the change on an immediate read. The `TEMPORARILY_UNAVAILABLE` retry loop lives
-   inside `runRcbStep`, per-step.
-7. On success, fires the RCB-status callback with `enabled=true` and returns
+   loud named warning (emitted with the step-7 verdict) but is deliberately **not** treated as a
+   failure — a device is not obliged to reflect the change on an immediate read. The
+   `TEMPORARILY_UNAVAILABLE` retry loop lives inside `runRcbStep`, per-step.
+9. On success, fires the RCB-status callback with `enabled=true` and returns
    `RCB_ENABLE_OUTCOME_ENABLED`.
 
 **`enableAllTargets` tallies those outcomes** and closes every connect cycle with one summary

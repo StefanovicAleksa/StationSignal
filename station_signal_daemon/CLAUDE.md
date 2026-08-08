@@ -213,6 +213,23 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   bootstrap-suppression path any first observation would. Only steps 1 and 5 abort the enable;
   a failure in 0/2/3/4/6 is logged loudly and the sequence continues, since a degraded-but-enabled
   RCB beats no RCB. `BufTm`/`IntgPd`/`ConfRev` are never written at any step.
+  **Steps 2 and 3 judge against the state left behind by step 1, never against the entry snapshot.**
+  A real SIPROTEC clears `TrgOps` *and* `OptFlds` whenever `DatSet` is written to a **different**
+  value, so an RCB that arrived already carrying `dchg|qchg|gi` has it wiped by step 1; deciding
+  from the pre-step-1 snapshot skipped the rewrite and enabled the RCB with `TrgOps=0x0`, which can
+  never emit a change report and does not even answer step 6's GI — three of eighteen enabled RCBs
+  were silently dark on real hardware while every write returned `IED_ERROR_OK` (see `CHANGELOG.md`).
+  `runRcbStep` therefore hands its read-back back to the caller (`outLive`, no extra round-trip) and
+  `enableOneTarget` drives both skip-conditions from that `postDatSetState`. **A failed read-back
+  falls through to writing, never to skipping** — rewriting a value the device may already hold is
+  harmless; skipping risks leaving the attribute wiped. This is *not* a buffered/unbuffered split
+  (the obvious misreading): the causal variable is whether `DatSet` changed, and buffered RCBs are
+  equally exposed via `OptFlds`, where the same bug would silently kill EntryID resumption.
+  **An RCB that cannot report is counted as FAILED, not enabled**: after the sequence, if the live
+  `TrgOps` has neither `dchg` nor `qchg` the RCB is silent by construction, so it logs `FAILED`,
+  uninstalls its handler and fires `rcbStatusCallback(false, …)`. Judged on the change triggers
+  only — missing just `TRG_OPT_GI` is degraded (changes still flow, only the enable snapshot is
+  lost) and stays a warning. This is what makes the cycle summary's "no failures" trustworthy.
   **Every executed step is verified by its own independent read-back** (`runRcbStep` →
   `readAndLogLiveRcbState`), logging `VERIFIED` / `NOT APPLIED` / `unverifiable` — this exists for
   the failure mode that has no error code at all, a device returning `IED_ERROR_OK` for a write it
@@ -331,7 +348,13 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   to a buffered RCB outright (`IED_ERROR_OBJECT_VALUE_INVALID`/error 32 — confirmed against a real
   SIPROTEC 6MD device, see `CHANGELOG.md`). A later `createDataSet` attempt for the same
   (deterministic, per-target) name legitimately fails with `IED_ERROR_OBJECT_EXISTS` — treated as a
-  successful reuse, not an error.
+  successful reuse, not an error. **Once that domain-scoped fallback has actually worked once in a
+  connect cycle, the association-specific attempt is skipped for every remaining unbuffered target**
+  (`DynamicDatasetSession.associationSpecificCreateRejected`): on a device that rejects the form
+  structurally it never succeeds for any target, so retrying per-target only spends a doomed
+  ~100-member round-trip each time (nine wasted large PDUs in one real connect cycle). Latched only
+  on a fallback that succeeded — if both scopes fail, the association-specific form isn't
+  demonstrably the problem — and per-cycle only, never persisted.
   **Real budget, not a blind guess**: `discoverExistingServerDatasets` (once per connect cycle,
   scoped to Dyn targets' own LDs, via `IedConnection_getLogicalDeviceDataSets`) feeds
   `MmsReportClientUseCases_computeInitialDynamicDatasetBudget`, correcting SCL's declared

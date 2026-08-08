@@ -1554,3 +1554,88 @@ against them with the spare last, and claims both of the simulator's startup dat
 via static RCBs so the adoption tier can't rescue the spare and mask the case. Verified
 non-vacuous by a negative control: temporarily restoring the old callback fire makes the new test
 fail with exactly its own message, and removing it makes it pass again. Full suite now 18/18.
+
+### Follow-up: the sequential enable silently killed RCBs whose TrgOps was already correct
+
+The first real-hardware capture with the new logging showed reporting working end-to-end and a
+summary of `178 RCB(s): 18 enabled, 160 not needed, no failures`. It also contained, in plain
+sight, a bug the restructure itself had introduced:
+
+```
+'C5_6MDMEAS/MMXU1.RP.urcbA01' (on entry):                RptEna=0 DatSet=''      OptFlds=0x0 TrgOps=0x13
+'C5_6MDMEAS/MMXU1.RP.urcbA01' (after step '1/6 DatSet'):  RptEna=0 DatSet='…$dyn' OptFlds=0x0 TrgOps=0x0
+'C5_6MDMEAS/MMXU1.RP.urcbA01' step '3/6 TrgOps': skipped (device already has dchg|qchg|gi set, TrgOps=0x13)
+'C5_6MDMEAS/MMXU1.RP.urcbA01' (after step '5/6 RptEna=true'): RptEna=1 … TrgOps=0x0
+```
+
+**A real SIPROTEC clears `TrgOps` and `OptFlds` whenever `DatSet` is written to a *different*
+value.** Steps 2 and 3 took their skip-decisions from `entryState`, captured before step 1 and
+therefore stale by the time they were consulted. An RCB that arrived with `TrgOps` already correct
+had it wiped by the DatSet write and never rewritten, and was then enabled with `TrgOps=0x0`.
+
+Fatal, and provable from the same capture: those RCBs get `GI=true` written, `setRCBValues returned
+OK`, and then **no `report received` line at all**, with `SqNum` still `0` — healthy ones show
+`SqNum=1` and a full GI snapshot. `TrgOps=0` means even GI is ignored. Three of the eighteen
+"enabled" RCBs were completely dark, taking ~102 attributes with them
+(`C5_6MDMEAS/MMXU1.RP.urcbA01`'s 98-member cluster covering `Q2XSWI1`/`Q2CSWI1`/`Q2CILO1`/
+`sinGAPC1`/all of `C5_6MDEXT`, plus `C5_6MDCTRL/LLN0.RP.urcbA01`/`urcbB01`'s adopted
+`DataSet_2`/`DataSet_3`). Cross-checked against the follow-up capture's `forwarding report for …`
+lines: none of the three ever appear.
+
+**Not a buffered/unbuffered split**, which is how the log first reads. The causal variable is "did
+`DatSet` change". Breakage needs two conditions together: DatSet actually changes (device wipes
+TrgOps) AND entry TrgOps already contained `dchg|qchg|gi` (so step 3 skips). RCBs entering with
+`TrgOps=0x0` are fine — step 3 runs after step 1 and writes the correct value back. The two enabled
+buffered RCBs escaped only because they already had DIGSI-assigned datasets, so step 1 rewrote an
+identical string and no reset fired. Buffered is equally exposed, and its version is *worse*:
+`brcbA01` carries `OptFlds=0x40` (EntryID), so the first buffered RCB whose DatSet does change
+would have step 2 skip on the stale snapshot and lose EntryID resumption **silently** — no missing
+data, no error, just a full backlog redelivery on every reconnect.
+
+**Fix.** `runRcbStep` gained an optional `outLive` out-param handing the caller the read-back it
+already performs (no extra round-trip; ownership transfers, caller calls `destroyRcbLiveState`).
+`enableOneTarget` captures step 1's read-back as `postDatSetState` and drives both the OptFlds and
+TrgOps skip-conditions from it. A **failed** read-back falls through to writing, never to skipping —
+if the device's state can't be seen, rewriting a value it may already hold is harmless, whereas
+skipping risks leaving the attribute wiped. Both "skipped" log lines now print the post-DatSet value
+they actually judged, so a skip can never again be justified by a number the device stopped
+reporting. `entryState` survives only for the step-0 pre-disable decision and the entry log, which
+are genuinely about pre-write state.
+
+**An RCB that cannot report is now counted as FAILED.** After the sequence, the last step's
+read-back (step 6's if GI ran, else step 5's) is checked: if live TrgOps has neither
+`TRG_OPT_DATA_CHANGED` nor `TRG_OPT_QUALITY_CHANGED`, the RCB can never emit an event-driven report,
+so it logs `FAILED`, uninstalls the handler, fires `rcbStatusCallback(false, …)` and returns
+`RCB_ENABLE_OUTCOME_FAILED`. Deliberately judged on the change triggers only, not the full `0x13`:
+missing *just* `TRG_OPT_GI` is degraded, not dead (changes still flow, only the enable snapshot is
+lost) and stays a warning, so a device that legitimately refuses only the GI bit is not written off.
+An unreadable final state is not fatal either — absence of evidence isn't evidence of death. The
+pre-existing `rptEnaApplied` warning moved here too, next to the other flavour of "enabled on paper
+only". The upshot is that the summary's "no failures" is now a statement worth trusting.
+
+**Association-specific creation is latched off after the first rejection.** Every unbuffered Dyn
+target was spending a doomed ~100-member `createDataSet` before falling back — nine wasted large
+PDUs in one real connect cycle, with the `DynDataSet` budget sitting untouched at 15 all run,
+confirming none ever succeeds. `DynamicDatasetSession.associationSpecificCreateRejected` is set once
+an association-specific attempt has failed *and* the domain-scoped fallback has succeeded (latching
+only on a working fallback — if both fail, the association-specific form isn't demonstrably the
+problem), and later unbuffered targets skip straight to domain-scoped. Per connect cycle only, never
+persisted.
+
+Also reworded `buildDynamicDatasetName`'s scope lines, which claimed `(buffered RCB - …)` for a
+name derived on an *unbuffered* target's domain-scoped fallback — that parameter selects the scope,
+not the RCB kind, and the wrong assertion was actively misleading while reading these very logs.
+
+**No automated regression test, deliberately.** The vendored libiec61850 server does not clear
+TrgOps on a DatSet change, so a test written against `ied_simulator` would pass identically before
+and after this fix and prove nothing. `IedServer_setRCBEventHandler` does deliver
+`RCB_EVENT_SET_PARAMETER` with the `parameterName`, but the handler has no public way to mutate the
+RCB's TrgOps, and its `serviceError` argument is passed by value (it reports an error, it cannot
+inject one) — so the device behaviour cannot be faithfully simulated, and neither can a
+TrgOps-refusing device for the dead-RCB check. Shipping a green test that exercises neither path
+would be worse than none. Verified instead by: the full suite passing unchanged (582 unit, 18 E2E),
+the ordering invariant still guarded by
+`test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`, a run-log check that both steps now
+report `device had 0x… after the DatSet write` (e.g. `urcbGiOnly`: `device had 0x10 after the DatSet
+write`), and the next hardware capture, where the three named RCBs must show step 3 *running* and
+end at `TrgOps=0x13 VERIFIED`.
