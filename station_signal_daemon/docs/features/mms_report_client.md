@@ -396,51 +396,96 @@ a fresh `dynamicDatasetCache` (LN reference → generated dataset name) per conn
 at the end — never carried across reconnects, since the `@`-scoped datasets it names don't survive
 one either.
 
-**`enableOneTarget`** — called once per target, every connect and every reconnect:
+**`enableOneTarget`** — called once per target, every connect and every reconnect. The enable is a
+sequence of **single-element** `setRCBValues` writes in strict IEC 61850-7-2 order, never one
+bundled write: that spec makes `DatSet`/`OptFlds`/`TrgOps`/`BufTm`/`IntgPd` writable only while
+`RptEna` is FALSE, and a bundled rejection names the *request*, never the *element*. See
+`CHANGELOG.md`'s "RCB enable rebuilt as a sequential, per-element, read-back-verified sequence".
+
 1. `IedConnection_getRCBValues` — fetch the RCB object. On failure, logs and fires the optional
    RCB-status callback with `enabled=false`.
-2. `IedConnection_installReportHandler` — installed **before** enabling, so no report can arrive
-   with no handler attached.
-3. Build the enable mask, starting with `RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_GI`.
-4. **Buffered-RCB EntryID opt-in**: if `target->buffered`, reads the RCB's current `OptFlds`
-   (`ClientReportControlBlock_getOptFlds`) and, only if `RPT_OPT_ENTRY_ID` isn't already set, ORs
-   it in and adds `RCB_ELEMENT_OPT_FLDS` to the mask — never clobbers any other OptFlds bit, and
-   only writes it once (not on every reconnect) since OptFlds isn't expected to reset itself
-   across associations the way `RptEna` does. This exists because a real device was found sending
-   zero EntryID across every single report — without this bit, EntryID resumption below is
-   structurally impossible against such a device, regardless of how correct the resumption logic
-   itself is, since there is never anything to cache and resume from.
-5. **DatSet**: always explicitly (re-)set, never relying on a server-side default dataset. If
-   `target->datasetReference` is `NULL` (SCL declared no `datSet`, `datSet="Dyn"`), falls back to
-   `getOrCreateDynamicDataset` (below). If a dataset reference resolves either way, adds it to the
-   mask via `RCB_ELEMENT_DATSET`.
-6. `ClientReportControlBlock_setRptEna(rcb, true)` + `ClientReportControlBlock_setGI(rcb, true)` —
-   **GI is requested on every enable, unconditionally**, purely to force an immediate,
-   deterministic snapshot to diff the cache against — never trusted or forwarded on its own
-   merits. On a genuine first-ever connect this snapshot lands against the still-all-`NULL` cache
-   and is bootstrap-suppressed like any other first observation. On every reconnect after that,
-   the same snapshot instead diffs against the real, preserved last-known value from before the
-   disconnect — a genuine change made while disconnected forwards with a real previous value; an
-   unchanged resend is suppressed by the ordinary diff check. Without GI, a device with no
-   periodic integrity reporting and no coincidental traffic at enable time could leave a real
-   change undetected simply because nothing prompted the device to report it yet.
-   `TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are never touched — left exactly as the device's own SCL
-   config has them.
-7. **EntryID resumption**: for a buffered RCB, looks up its cache entry and, under
-   `memberRefCacheLock`, reads `lastEntryId`. If set, calls `ClientReportControlBlock_setEntryId`
-   and adds `RCB_ELEMENT_ENTRY_ID` to the mask, so a reconnect resumes delivery from where this
-   client left off instead of the server redelivering its entire unacknowledged backlog on every
-   `RptEna` transition. `ClientReportControlBlock_setEntryId` itself is a local, synchronous
-   struct mutation (clones the value internally), safe to call while holding the lock, unlike the
-   network call below. On the very first-ever enable (`lastEntryId` still `NULL`) this is a no-op
-   — full backlog resume, same as before this mechanism existed.
-8. `IedConnection_setRCBValues(..., mask, true)` — the actual enable write. If it fails **and**
-   `RCB_ELEMENT_ENTRY_ID` was set, retries once with that bit cleared (full resume) rather than
-   leaving the RCB unreported — the server may have rejected an EntryID it no longer recognizes
-   (its own buffer wrapped past it, or it restarted); IEC 61850 leaves the exact failure mode here
-   implementation-defined, so this doesn't guess at it. Any remaining failure uninstalls the
-   report handler, fires the RCB-status callback with `enabled=false`, and returns.
-9. On success, fires the RCB-status callback with `enabled=true`.
+2. `captureAndLogRcbState` — logs the device's own state before anything is touched (`RptEna`,
+   `DatSet`, `OptFlds`, `TrgOps`, `BufTm`, `IntgPd`, `ConfRev`, `SqNum`, EntryID presence),
+   reusing the object from step 1 rather than paying a second round-trip. This is the baseline
+   every later `NOT APPLIED` verdict is judged against, and it supplies the three inputs the
+   steps below branch on.
+3. **Dataset resolution, FIRST** — the four-tier order (STATIC → PULL LIVE → ADOPT → SELF-CREATE)
+   runs here, ahead of any local mutation of the RCB object and any wire write. A target that
+   resolves no dataset is abandoned completely untouched: no pre-disable, no config writes, and
+   no report handler installed only to be uninstalled again. The resolved reference is kept as an
+   **owned copy**, not the borrowed pointer each tier returns — tier 2's borrowed pointer aliases
+   `rcb`'s own internal `MmsValue` buffer, which `setDataSetReference` may free and reallocate.
+
+   **Two different outcomes share the "no dataset" exit, and they are reported differently**,
+   split by `getOrCreateDynamicDataset`'s `outWasNeeded` out-param (the only signal that
+   distinguishes them):
+   - **NOT NEEDED** — tier 4 found no cluster assigned to this slot, i.e. clustering ran out of
+     clusters before it ran out of Dyn RCB slots and the device's data is already fully covered.
+     Benign and routine on hardware with redundant spare RCB instances. Logged calmly, and
+     **fires no RCB-status callback at all** — the callback's contract is "once per enable
+     *attempt*" and no attempt was made. Returns `RCB_ENABLE_OUTCOME_NOT_NEEDED`.
+   - **FAILED** — a dataset was genuinely needed and could not be obtained (budget exhausted,
+     `createDataSet` rejected, no wire-convertible members, or a malformed model with no LN
+     reference). Logged loudly as `FAILED`, fires the callback with `enabled=false` and the
+     synthesized `IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT` a real attempt would have returned.
+     Returns `RCB_ENABLE_OUTCOME_FAILED`.
+
+   These two used to produce byte-identical output and the same callback, which on a device with
+   dozens of spares buried the real failures among the benign ones.
+4. `IedConnection_installReportHandler` — installed **before** enabling, so no report can arrive
+   with no handler attached, but now only for targets that actually got a dataset.
+5. The seven ordered steps, each one `setRCBValues` with exactly one `RCB_ELEMENT_*`:
+
+   | Step | Element | Runs when | Fatal? |
+   |---|---|---|---|
+   | 0 | `RptEna=false` | device reports it already enabled | no |
+   | 1 | `DatSet` | always | **yes** |
+   | 2 | `OptFlds` (OR in `RPT_OPT_ENTRY_ID`) | buffered, bit not already set | no |
+   | 3 | `TrgOps` (OR in `dchg\|qchg\|gi`) | bits not already set | no |
+   | 4 | `EntryID` | buffered, cached resume point exists | no |
+   | 5 | `RptEna=true` | always | **yes** |
+   | 6 | `GI` | per `shouldRequestGiOnEnable` | no |
+
+   Only 1 and 5 abort (uninstall handler, RCB-status callback with `enabled=false`, return);
+   0/2/3/4/6 log loudly and continue, since a degraded-but-enabled RCB beats no RCB at all.
+   Step 0 exists because a buffered RCB commonly survives a disconnect still enabled, which makes
+   every config write below it illegal until it has run. Step 3 stays **before** step 5 because
+   most servers — including this repo's own `ied_simulator` — reject a TrgOps change once the RCB
+   is enabled; `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix` fails with
+   `IED_ERROR_TEMPORARILY_UNAVAILABLE` if it is deferred, and is the standing guard on this order.
+   Step 4's failure is now an *isolated* signal (the write carried nothing but the EntryID), so
+   the cached `lastEntryId` clear + value-diff-cache reset + forced GI it triggers no longer has
+   to be inferred from a combined failure that could equally have been about DatSet or TrgOps.
+   `BufTm`/`IntgPd`/`ConfRev` are never written at any step.
+6. **Every executed step is read-back verified** — `runRcbStep` follows each write with its own
+   independent `getRCBValues` (`readAndLogLiveRcbState`) and emits `VERIFIED`, `NOT APPLIED`, or
+   `unverifiable`. This is the only way to detect a device that returns `IED_ERROR_OK` for a write
+   it silently never applies. `OptFlds`/`TrgOps` verify by *containment* (`(live & expected) ==
+   expected`), never equality, since this feature only ever ORs bits in and never clobbers what
+   the device already had. `EntryID`/`GI` are write-only in effect and reported as unverifiable
+   rather than falsely confirmed. An `RptEna=true` that returns OK but reads back false gets a
+   loud named warning but is deliberately **not** treated as a failure — a device is not obliged
+   to reflect the change on an immediate read. The `TEMPORARILY_UNAVAILABLE` retry loop lives
+   inside `runRcbStep`, per-step.
+7. On success, fires the RCB-status callback with `enabled=true` and returns
+   `RCB_ENABLE_OUTCOME_ENABLED`.
+
+**`enableAllTargets` tallies those outcomes** and closes every connect cycle with one summary
+line — `enable cycle complete for N RCB(s): N enabled, N not needed (device already fully
+covered), N FAILED` (the failure clause is only named when the count is non-zero, so a healthy
+cycle reads clean). Suppressed entirely when `stopRequested` is set, where a partial tally would
+be misleading. This is the line to read first in a real-hardware capture: the per-RCB detail now
+runs to dozens of lines each, and counting them by hand was the only way to answer "did anything
+actually break this cycle?"
+
+**GI** (step 6) is requested on every enable *except* for a buffered RCB with a valid EntryID to
+resume from (`MmsReportClientUseCases_shouldRequestGiOnEnable`) — purely to force an immediate,
+deterministic snapshot to diff the cache against, never trusted or forwarded on its own merits.
+On a genuine first-ever connect it lands against the still-all-`NULL` cache and is
+bootstrap-suppressed like any other first observation. On a reconnect it instead diffs against the
+real, preserved last-known value from before the disconnect. Without it, a device with no periodic
+integrity reporting and no coincidental traffic at enable time could leave a real change
+undetected simply because nothing prompted the device to report it yet.
 
 The value-diff cache is deliberately never reset anywhere in this function — on first connect it's
 already all-`NULL` from `buildMemberRefCache`; on every subsequent enable, preserving the real
@@ -571,9 +616,15 @@ once, never mutated as a whole list afterward (only the per-entry cache fields i
 
 ## 5. Known limitations / deliberate scope boundaries
 
-- **`TrgOps`/`BufTm`/`IntgPd`/`ConfRev` are never written** — only `RptEna`/`GI`/`DatSet`, and
-  (for buffered RCBs) `OptFlds`/`EntryID`, are ever set. Every other RCB attribute is left exactly
-  as the device's own SCL/engineering-tool configuration has it.
+- **`BufTm`/`IntgPd`/`ConfRev` are never written** — only `RptEna`/`DatSet`/`TrgOps`/`GI`, and
+  (for buffered RCBs) `OptFlds`/`EntryID`, are ever set, and `TrgOps`/`OptFlds` are only ever
+  OR'd into what the device already has, never clobbered. Every other RCB attribute is left
+  exactly as the device's own SCL/engineering-tool configuration has it.
+- **The enable sequence's per-step read-backs and the dataset path's per-member logging are a
+  deliberate temporary diagnostic posture** — roughly six writes and seven extra reads per RCB per
+  connect cycle, plus two log lines per dataset member. On a large device against an
+  already-struggling IED this is real load. See `CHANGELOG.md` for what to trim once the current
+  real-hardware failure is understood.
 - **Dynamic dataset creation has no chunking against a device's `maxAttributes` cap** — an LN with
   more reportable leaves than the cap fails `createDataSet` for that LN outright and falls back to
   the pre-existing failure mode (DATSET left unset, `setRCBValues` fails, logged, RCB skipped).

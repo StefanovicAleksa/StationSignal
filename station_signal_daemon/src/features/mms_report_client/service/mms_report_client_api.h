@@ -56,7 +56,17 @@ MmsReportClient_setConnectionStateCallback(MmsReportClientHandle client,
         MmsReportClientConnStateCallback callback, void* userParam);
 
 /* Optional (may be left unset/NULL). Fires once per RCB after each enable
- * attempt (initial connect or post-reconnect re-enable), success or failure. */
+ * ATTEMPT (initial connect or post-reconnect re-enable), success or failure.
+ *
+ * "Attempt" is load-bearing: an RCB the device does not need this cycle - a
+ * spare Dyn slot left with nothing to cover once whole-device clustering ran
+ * out of clusters, which is the common case on hardware carrying dozens of
+ * redundant RCB instances - is never touched at all, so it makes no attempt
+ * and fires NOTHING here. It is neither enabled nor failed; it simply wasn't
+ * used. Only a genuine failure (dataset needed but unobtainable, or a
+ * rejected DatSet/RptEna write) fires with enabled=false. Do not infer "every
+ * RCB in the model reports here exactly once per cycle" - count the enabled
+ * ones, or read the daemon's own per-cycle summary log line. */
 void
 MmsReportClient_setRcbStatusCallback(MmsReportClientHandle client,
         MmsReportClientRcbStatusCallback callback, void* userParam);

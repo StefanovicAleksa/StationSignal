@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="reporter1-spare-rcb-fixture" nameStructure="IEDName" />
+
+  <Communication>
+    <SubNetwork name="StationBus" type="8-MMS">
+      <ConnectedAP iedName="Reporter1" apName="AP1">
+        <GSE ldInst="LD1" cbName="gcbInd">
+          <Address>
+            <P type="VLAN-ID">10</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0c-cd-01-00-01</P>
+            <P type="APPID">1000</P>
+          </Address>
+          <MinTime>10</MinTime>
+          <MaxTime>5000</MaxTime>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <IED name="Reporter1">
+    <!-- NO <Services><DynDataSet> ON PURPOSE, and that is the whole point of
+         this fixture.
+
+         With no maxAttributes declared, buildWholeDeviceClusterPlan takes its
+         UNKNOWN branch and packs via MmsReportClientUseCases_groupReferencesByLn
+         - exactly one cluster per LN carrying reportable (FC=ST/MX) leaves.
+         This model has precisely two such LNs (LLN0: Mod/Beh/Health; GGIO1:
+         Ind1/SPCSO1), so the plan deterministically produces TWO clusters
+         regardless of how many leaves each LN happens to contain - no
+         dependence on leaf arithmetic that a later DataTypeTemplates edit
+         could silently change.
+
+         Three Dyn (no datSet) RCBs are then declared below against those two
+         clusters. Clusters are assigned to Dyn slots in model-declaration
+         order, so the THIRD one (brcbDyn, declared last) is left with nothing
+         to cover - the "not needed" outcome under test: the device's
+         reportable data is already fully covered, so that spare slot must be
+         left completely untouched and must NOT be reported as a failure.
+
+         Omitting <Services> entirely also leaves both dataset-count budgets at
+         -1 (undeclared = unlimited), so nothing here can fail for budget
+         reasons and muddy the distinction being tested. -->
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="LD1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="ds1" desc="Indication dataset">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="q" />
+            </DataSet>
+            <DataSet name="ds2" desc="stVal-only dataset">
+              <FCDA ldInst="LD1" lnClass="GGIO" lnInst="1" fc="ST" doName="Ind1" daName="stVal" />
+            </DataSet>
+
+            <!-- ds1 and ds2 are the only two datasets the simulator creates at
+                 startup, and adoptUnclaimedDataset matches candidates by LD
+                 (not LN), so without these two static RCBs claiming them both
+                 they would be adoptable by the Dyn RCBs below - the spare
+                 would then resolve via tier 3 and enable, destroying the very
+                 case this fixture exists to produce. discoverExistingServerDatasets
+                 drops any discovered name that some OTHER target's SCL-declared
+                 datSet already claims, so declaring these two empties the
+                 adoption pool and forces all three Dyn RCBs down to tier 4. -->
+            <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
+                intgPd="60000" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <!-- Named with the "01" suffix directly, with max="1", so
+                 ied_model's own instance-name resolution yields exactly the
+                 "rcbMulti01" the simulator really exposes - never a bare
+                 "rcbMulti" that would not resolve, nor several instances that
+                 do not exist server-side. -->
+            <ReportControl name="rcbMulti01" rptID="rcbMulti01" datSet="ds2" confRev="1" buffered="true"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+
+            <GSEControl name="gcbInd" appID="1000" datSet="ds1" type="GOOSE" confRev="1" />
+          </LN0>
+
+          <LN lnClass="GGIO" lnType="GGIOType" inst="1" prefix="">
+            <!-- Dyn slot 1 of 3 - takes the first cluster. -->
+            <ReportControl name="urcbDyn" rptID="urcbDyn" confRev="1" buffered="false"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <!-- Dyn slot 2 of 3 - takes the second (and last) cluster. -->
+            <ReportControl name="urcbDyn2" rptID="urcbDyn2" confRev="1" buffered="false"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <!-- Dyn slot 3 of 3, DECLARED LAST ON PURPOSE - the spare under
+                 test. No cluster is left for it, so it must be left untouched
+                 and must not fire the RCB-status callback at all. -->
+            <ReportControl name="brcbDyn" rptID="brcbDyn" confRev="1" buffered="true"
+                intgPd="0" bufTime="0">
+              <TrgOps dchg="true" qchg="true" gi="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+          </LN>
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+      <DO name="Health" type="ENS1" />
+      <DO name="NamPlt" type="LPL1" />
+    </LNodeType>
+
+    <LNodeType id="GGIOType" lnClass="GGIO">
+      <DO name="Ind1" type="SPS1" />
+      <DO name="SPCSO1" type="SPC1" />
+    </LNodeType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="Enum" type="HealthKind" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="LPL1" cdc="LPL">
+      <DA name="vendor" bType="VisString255" fc="DC" />
+      <DA name="swRev" bType="VisString255" fc="DC" />
+    </DOType>
+
+    <DOType id="SPS1" cdc="SPS">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="SPC1" cdc="SPC">
+      <DA name="stVal" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="Oper" bType="Struct" type="OperSPS" fc="CO" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DAType id="OperSPS">
+      <BDA name="ctlVal" bType="BOOLEAN" />
+    </DAType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+
+    <EnumType id="HealthKind">
+      <EnumVal ord="1">Ok</EnumVal>
+      <EnumVal ord="2">Warning</EnumVal>
+      <EnumVal ord="3">Alarm</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

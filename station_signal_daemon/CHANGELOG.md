@@ -1396,3 +1396,161 @@ compare would have wrongly forwarded it despite this being a simpler case than t
 partial-overlap one). `run_all_tests.sh`'s full suite (630 tests across unit + every E2E suite,
 including `integration_tests/goose_subscriber/`'s existing identical-dataset case) re-verified
 passing unchanged.
+
+## RCB enable rebuilt as a sequential, per-element, read-back-verified sequence
+
+**Context**: four commits (`91dcb1f`, `f991e17`, `6984c37`, `6f82e81`) attacking the same
+real-hardware symptom — RCBs on a real SIPROTEC not going active — were reverted on 2026-08-08
+back to `ad32bb8`, because they made the device's behavior worse without ever making it
+diagnosable. They are preserved on `origin/backup/pre-revert-2026-08-08`. What follows replaces
+them; it deliberately does **not** restore `f991e17`'s post-enable corrective TrgOps retry.
+
+**Root problem, restated**: `enableOneTarget` sent `DatSet | OptFlds | TrgOps | EntryID |
+RptEna | GI` as ONE bundled `IedConnection_setRCBValues` call. Two structural consequences:
+
+1. **A rejection named the request, not the element.** One error code covered "the device
+   didn't like the dataset", "...the trigger options", "...the EntryID" and "...the enable
+   itself" indistinguishably. Every real-hardware investigation in this file above had to
+   *guess* which attribute a device had objected to, then confirm by editing code and
+   redeploying.
+2. **It violated IEC 61850-7-2.** `DatSet`/`OptFlds`/`TrgOps`/`BufTm`/`IntgPd` are writable only
+   while `RptEna` is FALSE. The bundle asked for all of them *plus* `RptEna=true` at once, and
+   on a reconnect that found the RCB still enabled (common for buffered RCBs, whose whole point
+   is surviving a disconnect) every config element in it was illegal, with no way to disable
+   first.
+
+**The new sequence.** `enableOneTarget` now resolves the dataset FIRST — before any local
+mutation of the RCB object and before any wire write — and a target that resolves no dataset is
+now left *completely untouched* (no pre-disable, no config writes, and no report handler
+installed then immediately uninstalled). Only targets that will actually be given a dataset are
+written to at all. With a dataset in hand it then runs seven ordered steps, each a
+**single-element** `setRCBValues`:
+
+| Step | Element | When | Fatal? |
+|---|---|---|---|
+| 0 | `RptEna=false` | only if the device reports it already enabled | no |
+| 1 | `DatSet` | always | **yes** |
+| 2 | `OptFlds` (OR in `ENTRY_ID`) | buffered, bit not already set | no |
+| 3 | `TrgOps` (OR in `dchg\|qchg\|gi`) | bits not already set | no |
+| 4 | `EntryID` | buffered, cached resume point exists | no |
+| 5 | `RptEna=true` | always | **yes** |
+| 6 | `GI` | per `shouldRequestGiOnEnable` | no |
+
+Only 1 and 5 abort: without a bound dataset or the enable itself the RCB genuinely cannot
+report, whereas a degraded-but-enabled RCB beats no RCB, and the log now says exactly which
+capability is degraded. Step 3 stays **before** step 5 deliberately — most servers, including
+this repo's own `ied_simulator`, reject a TrgOps change once `RptEna` is true
+(`test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix` fails with
+`IED_ERROR_TEMPORARILY_UNAVAILABLE` if it is deferred), and that test is the standing guard on
+this ordering.
+
+**Read-back verification.** Every executed step is followed by its own independent
+`getRCBValues` (`runRcbStep` → `readAndLogLiveRcbState`) and a verdict line: `VERIFIED`,
+`NOT APPLIED`, or `unverifiable`. This exists specifically for the failure mode with no error
+code at all — a device returning `IED_ERROR_OK` for a write it silently never applies, which
+`f991e17` first observed and could only work around by guessing. `OptFlds`/`TrgOps` are checked
+by *containment*, never equality, since this feature only ever ORs bits in. `EntryID`/`GI` are
+write-only in effect and reported as unverifiable rather than falsely confirmed. A
+`RptEna=true` that returns OK but reads back false is logged as a loud, named warning but is
+**not** treated as a failure — a device is not obliged to reflect the change on an immediate
+read, and this client has no basis to overrule an explicit `IED_ERROR_OK`.
+
+**Deleted along the way**: the single bundled write, its "retry the whole bundle without
+EntryID" branch, and its standalone `TEMPORARILY_UNAVAILABLE` loop. That retry loop now lives
+inside `runRcbStep`, per-step — a device still initializing after a restart can return that for
+any element, not just whichever happened to be last in a bundle. The EntryID-rejection handling
+survives but is now triggered by an isolated single-element failure, so it no longer has to be
+*inferred* from a combined failure that could equally have been about DatSet or TrgOps.
+
+**Latent aliasing bug fixed in passing**: tier 2 (PULL LIVE) resolved
+`effectiveDatasetReference` from `ClientReportControlBlock_getDataSetReference(rcb)`, which
+returns a pointer into `rcb`'s own internal `MmsValue` buffer, then fed it straight back into
+`ClientReportControlBlock_setDataSetReference(rcb, ...)`. That setter's
+`MmsValue_setVisibleString` → `setVisibleStringValue` frees and reallocates that exact buffer
+whenever the new string is longer than the old, i.e. argument and destination are the same
+allocation. Benign today only because the string is byte-identical and the realloc branch is
+therefore never taken — the same aliasing class as the stop-path bug fixed in `ad32bb8`. The
+resolved reference is now an owned copy on every tier, removing the hazard rather than relying
+on the lengths staying equal.
+
+**Excessive logging on the dataset path.** Separately and deliberately, essentially every
+decision, input and outcome in dataset provisioning now logs: the derived dataset name and which
+scoping scheme produced it; each LD queried during discovery and each dataset found under it;
+the full whole-device cluster plan (slot list, total reportable attributes, the chosen
+`maxAttributes` cap *and which SCL declaration it came from*, the chunking strategy, and one
+line per cluster→slot assignment); every adoption candidate considered and the specific reason
+it was accepted or rejected; the previously-silent tier-2 rejection paths; every member
+reference both as requested and as converted to wire form; a new explicit warning when wire
+conversion drops *some* members (previously only total loss said anything, so a partial drop
+silently changed a dataset's shape with no trace); and the cleanup-tracking list insert. Every
+`IedClientError` in the file is now rendered by name via `IedClientError_toString` — present in
+`iec61850_client.h` all along, used nowhere in `src/` until now — alongside the numeric code.
+
+**This log volume is a deliberate temporary diagnostic posture, not a steady state.** Roughly
+six writes and seven extra reads per RCB per connect cycle, and on the order of 20+ lines per
+RCB plus two lines per dataset member. On a 100-RCB device with 60-attribute datasets that is a
+lot of both wire traffic and log volume, against a device that may already be struggling. Trim
+it once the real-hardware failure is understood — the read-backs in `runRcbStep` and the
+per-member dumps in `createAndCacheDynamicDatasetAttempt`/`pullLiveDataset`/`tryAdoptCandidate`
+are the parts to cut first.
+
+Verified: warning-clean under `-Wall -Wextra`, full `tests/` suite passing, and all 17
+`integration_tests/mms_report_client/` cases passing — including
+`test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix` (the step-ordering guard) and
+`test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable`.
+
+### Follow-up: "not needed" split out from "failed"
+
+The change above left one outcome conflated with another. A spare Dyn RCB that simply **wasn't
+needed** — whole-device clustering ran out of clusters before it ran out of Dyn slots, so the
+device's reportable data is already fully covered — produced byte-identical output to an RCB that
+**genuinely failed** to obtain a dataset (budget exhausted, `createDataSet` rejected, no
+wire-convertible members, malformed LN reference). Same log line, and the same *synthesized*
+`rcbStatusCallback(false, IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT)` — a deliberately faked error
+code, with a comment stating that callers "can't tell the difference." On a real SIPROTEC carrying
+dozens of redundant spare RCB instances, that buries the handful of real failures under a pile of
+benign ones, defeating the point of the per-RCB diagnostics this whole entry is about.
+
+**Worth recording, because it sized this work:** the RCB-status callback is **production-dead**.
+`Orchestration_setRcbStatusCallback` is called only by integration tests — never by `src/main.c`
+or `src/device_manager/` — so in the shipped daemon `handle->rcbStatusCallback` is always `NULL`
+and the guard in `orchestration_api.c`'s `runFromIedModelHandle` never fires. There is no
+`IpcDispatcher` adapter for RCB status, no `RCB_STATUS` websocket envelope, nothing in the Go API
+(whose own `docs/features/reporting.md` describes RCB-enable failure as unobservable), and nothing
+in the frontend. The real payoff here is therefore log readability, not UI, and the change is
+strictly daemon-local.
+
+**Split.** `getOrCreateDynamicDataset` gained a `bool* outWasNeeded` out-param — the only signal
+separating its two NULL returns: `false` for "no cluster was assigned to this slot" (benign),
+`true` for "a dataset was needed here and couldn't be obtained" (real). `enableOneTarget` now
+returns an `RcbEnableOutcome` (`ENABLED` / `NOT_NEEDED` / `FAILED` / `SKIPPED_STOPPING`) instead of
+`void`, and its no-dataset branch forks:
+
+- **not needed** — calm log stating the reason positively, and **no callback at all**. This is
+  consistent with the documented contract rather than a break of it: `mms_report_client_api.h` says
+  the callback "fires once per RCB after each enable *attempt*", and the previous change already
+  established that a not-needed RCB is never touched, so it makes no attempt. That header comment
+  now says so explicitly, and warns against inferring one callback per RCB per cycle.
+- **failed** — loud `FAILED` log pointing at the RCB's own tier 2/3/4 lines above, callback
+  unchanged.
+
+**Per-cycle summary.** `enableAllTargets` tallies the outcomes and closes each cycle with
+`enable cycle complete for N RCB(s): N enabled, N not needed (device already fully covered), N
+FAILED`. The failure clause is only named when non-zero so a healthy cycle reads clean, and the
+whole line is suppressed under `stopRequested` where a partial tally would mislead. With per-RCB
+detail now running to dozens of lines, this is the line a capture gets read for.
+
+**Tests.** No existing assertion changed meaning:
+`test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly` is the one case asserting a
+`false` fire, and its `urcbDyn2` demonstrably *does* get a cluster assignment before failing on
+budget → classified `FAILED` → callback still fires. The several `TEST_ASSERT_FALSE(...Failed)`
+assertions became strictly stronger, since a benign spare can no longer trip them.
+
+New coverage: `fixtures/reporter1_spare_rcb.cid` plus
+`test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed`. The fixture omits `<Services>`
+entirely so clustering takes its `groupReferencesByLn` branch and deterministically yields exactly
+one cluster per reportable LN (two here) regardless of leaf arithmetic, declares three Dyn RCBs
+against them with the spare last, and claims both of the simulator's startup datasets (`ds1`/`ds2`)
+via static RCBs so the adoption tier can't rescue the spare and mask the case. Verified
+non-vacuous by a negative control: temporarily restoring the old callback fire makes the new test
+fail with exactly its own message, and removing it makes it pass again. Full suite now 18/18.

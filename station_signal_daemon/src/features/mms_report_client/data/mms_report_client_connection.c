@@ -292,6 +292,16 @@ buildDynamicDatasetName(const char* lnReference, bool buffered) {
         for (char* p = name; *p; p++) {
             if (*p == '.') *p = '$';
         }
+        /* Logged on every derivation, not just on use: this name is the join
+         * key for reuse-on-reconnect (IED_ERROR_OBJECT_EXISTS), for
+         * adoptUnclaimedDataset's own-name preference, for
+         * cleanupOrphanedDatasets' strict match, and for the stop-path
+         * deletion pass. A single character's difference between what this
+         * builds and what the server actually holds silently breaks all four,
+         * and was previously invisible in a log capture. */
+        fprintf(stderr, "[mms_report_client] derived domain-scoped dataset name '%s' from '%s' (buffered RCB - "
+                "persists past this connection, '.' folded to '$' to match the server's own wire form)\n",
+                name, lnReference);
         return name;
     }
 
@@ -302,6 +312,9 @@ buildDynamicDatasetName(const char* lnReference, bool buffered) {
     for (char* p = name; *p; p++) {
         if (*p == '/') *p = '_';
     }
+    fprintf(stderr, "[mms_report_client] derived association-scoped dataset name '%s' from '%s' (unbuffered RCB - "
+            "destroyed automatically when this connection closes, no cleanup tracking needed)\n",
+            name, lnReference);
     return name;
 }
 
@@ -320,11 +333,22 @@ rememberDomainScopedDatasetName(MmsReportClientHandle handle, const char* datase
 
     LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
     while (element) {
-        if (strcmp((char*) LinkedList_getData(element), datasetName) == 0) return;
+        if (strcmp((char*) LinkedList_getData(element), datasetName) == 0) {
+            fprintf(stderr, "[mms_report_client] domain-scoped dataset '%s' already tracked for cleanup - "
+                    "not re-added\n", datasetName);
+            return;
+        }
         element = LinkedList_getNext(element);
     }
 
     LinkedList_add(handle->domainScopedDynamicDatasetNames, MmsReportClientUtils_safeStringDup(datasetName));
+    /* This list is the ONLY record of what the graceful stop path has to
+     * delete - a name that never lands here permanently consumes the
+     * device's dataset quota if the daemon is later killed. Logging the
+     * insert makes that bookkeeping auditable from a log capture rather than
+     * only observable as quota that mysteriously never comes back. */
+    fprintf(stderr, "[mms_report_client] tracking domain-scoped dataset '%s' for cleanup on stop (%d name(s) "
+            "tracked so far)\n", datasetName, LinkedList_size(handle->domainScopedDynamicDatasetNames));
 }
 
 /*
@@ -417,8 +441,8 @@ logGranularCreateDataSetError(MmsReportClientHandle handle, const char* datasetN
                     "the device\n", datasetName);
             IedClientError deleteErr = IED_ERROR_OK;
             if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
-                fprintf(stderr, "[mms_report_client] could not delete diagnostic dataset '%s': error %d - left "
-                        "behind on the device\n", datasetName, deleteErr);
+                fprintf(stderr, "[mms_report_client] could not delete diagnostic dataset '%s': %s (%d) - left "
+                        "behind on the device\n", datasetName, IedClientError_toString(deleteErr), deleteErr);
             }
         }
     }
@@ -436,6 +460,16 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
      * this one log line (edge-triggered, see that same doc comment). */
     int* budget = buffered ? &session->remainingConfBudget : &session->remainingDynBudget;
     bool* budgetExhaustedLogged = buffered ? &session->confBudgetExhaustedLogged : &session->dynBudgetExhaustedLogged;
+
+    /* Entry banner. Every input this attempt depends on, in one place, before
+     * anything can fail - so a rejection further down can be read against the
+     * exact request that produced it rather than reconstructed from
+     * surrounding lines. */
+    fprintf(stderr, "[mms_report_client] === createDataSet attempt for '%s' (LN '%s') === scope=%s, "
+            "requested members=%d, pool=%s, remaining budget=%d\n",
+            logRcbReference, logLnReference, buffered ? "domain-scoped" : "association-specific",
+            memberCount, buffered ? "ConfDataSet" : "DynDataSet", *budget);
+
     if (MmsReportClientUseCases_isDynamicDatasetBudgetExhausted(*budget)) {
         if (!*budgetExhaustedLogged) {
             int sclMax = buffered ? IedModel_getConfDataSetMax(handle->iedModel)
@@ -449,12 +483,36 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
         return NULL;
     }
 
+    /* Every member reference this attempt was ASKED to include, before any
+     * conversion - the input side of the comparison against the wire form
+     * below. Verbose on purpose: on a device rejecting a create for reasons
+     * it won't name (IED_ERROR_UNKNOWN/99), the exact member list is the only
+     * thing left to reason about. */
+    for (int i = 0; i < memberCount; i++) {
+        fprintf(stderr, "[mms_report_client]   requested member[%d/%d] for '%s': %s\n",
+                i + 1, memberCount, logRcbReference, memberReferences[i] ? memberReferences[i] : "(null)");
+    }
+
     LinkedList wireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
     if (!wireRefs || LinkedList_size(wireRefs) == 0) {
-        fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' - "
-                "'%s' will not get a dynamic dataset\n", logLnReference, logRcbReference);
+        fprintf(stderr, "[mms_report_client] no wire-convertible attribute references for LN '%s' (0 of %d "
+                "converted) - '%s' will not get a dynamic dataset\n", logLnReference, memberCount,
+                logRcbReference);
         if (wireRefs) LinkedList_destroyDeep(wireRefs, free);
         return NULL;
+    }
+
+    /* A PARTIAL conversion loss silently changes the dataset's shape - the
+     * created dataset genuinely has fewer members than this target's cluster
+     * assignment believes, which then has to be reconciled by
+     * ensureLnFallbackMemberRefCache against a member list that no longer
+     * matches. Previously only the total-loss case above said anything at
+     * all, so a partial drop left no trace whatsoever. */
+    int wireCount = LinkedList_size(wireRefs);
+    if (wireCount != memberCount) {
+        fprintf(stderr, "[mms_report_client] WARNING: converted only %d of %d member reference(s) to wire form "
+                "for '%s' - %d dropped; the created dataset's real shape will differ from this target's own "
+                "cluster assignment\n", wireCount, memberCount, logRcbReference, memberCount - wireCount);
     }
 
     char* datasetName = buildDynamicDatasetName(cacheKey, buffered);
@@ -469,8 +527,15 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
      * SIPROTEC 6MD663 declaring DynDataSet maxAttributes="60") - without it, a
      * failure below only shows a raw error code with nothing to compare it
      * against. */
-    fprintf(stderr, "[mms_report_client] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s)\n",
-            datasetName, logLnReference, memberCount);
+    fprintf(stderr, "[mms_report_client] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s) "
+            "(as actually sent on the wire)\n", datasetName, logLnReference, wireCount);
+    int wireIndex = 0;
+    for (LinkedList wireElement = LinkedList_getNext(wireRefs); wireElement;
+            wireElement = LinkedList_getNext(wireElement)) {
+        wireIndex++;
+        fprintf(stderr, "[mms_report_client]   wire member[%d/%d] of '%s': %s\n",
+                wireIndex, wireCount, datasetName, (char*) LinkedList_getData(wireElement));
+    }
 
     IedClientError err = IED_ERROR_OK;
     IedConnection_createDataSet(handle->connection, &err, datasetName, wireRefs);
@@ -487,24 +552,29 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
     bool reusedExisting = false;
     if (err == IED_ERROR_OBJECT_EXISTS && buffered) {
         fprintf(stderr, "[mms_report_client] dynamic dataset '%s' for LN '%s' already exists on the server - "
-                "reusing it\n", datasetName, logLnReference);
+                "reusing it (budget unchanged at %d, it was never new this cycle)\n",
+                datasetName, logLnReference, *budget);
         reusedExisting = true;
     } else if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
-                "'%s' will not report\n", logLnReference, err, logRcbReference);
+        fprintf(stderr, "[mms_report_client] dynamic dataset creation FAILED for LN '%s' (dataset '%s', %d "
+                "member(s), %s): %s (%d) - '%s' will not report\n", logLnReference, datasetName, wireCount,
+                buffered ? "domain-scoped" : "association-specific", IedClientError_toString(err), err,
+                logRcbReference);
         logGranularCreateDataSetError(handle, datasetName, memberReferences, memberCount, buffered);
         free(datasetName);
         return NULL;
     }
 
     if (!reusedExisting) {
-        fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s'\n", datasetName, logLnReference);
         /* Only a genuinely NEW dataset counts against this cycle's budget -
          * a reused pre-existing one was never new against the device's own
          * count this cycle (see DynamicDatasetSession's own doc comment on
          * why cache hits stay free; this is the same reasoning applied to a
          * dataset the SERVER already knew about before this cycle started). */
         if (*budget > 0) (*budget)--;
+        fprintf(stderr, "[mms_report_client] created dynamic dataset '%s' for LN '%s' with %d member(s) - "
+                "%s budget now %d\n", datasetName, logLnReference, wireCount,
+                buffered ? "ConfDataSet" : "DynDataSet", *budget);
     }
 
     if (buffered) rememberDomainScopedDatasetName(handle, datasetName);
@@ -589,20 +659,64 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
  * own overflow logging), if this connect cycle's own dataset-count budget is
  * already exhausted (see DynamicDatasetSession's own doc comment), or if
  * dataset creation itself failed (cap exceeded, maxAttributes exceeded,
- * etc.) - either way, the caller falls back to today's pre-existing behavior
- * (skip DATSET, let setRCBValues fail, log, move on).
+ * etc.).
+ *
+ * *outWasNeeded distinguishes those NULL cases from each other, and is the
+ * ONLY signal that does - they are otherwise indistinguishable to the caller,
+ * which is exactly the conflation this out-param exists to break:
+ *
+ *   false => this target was NEVER NEEDED this cycle. Clustering simply ran
+ *            out of clusters before it ran out of Dyn RCB slots, i.e. the
+ *            device's reportable data is already fully covered by other
+ *            targets. A benign, expected outcome on any device carrying
+ *            redundant spare RCB instances (a real SIPROTEC has dozens), not
+ *            a failure, and enableOneTarget must not report it as one.
+ *   true  => a dataset genuinely WAS needed here and could not be obtained
+ *            (budget exhausted, createDataSet rejected, no wire-convertible
+ *            members, or a malformed model with no LN reference). This RCB's
+ *            share of the device's data will go unreported - a real problem.
+ *
+ * Always written before any return, including the success paths (where it is
+ * false: nothing is outstanding once a dataset resolved).
  */
 static const char*
 getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target,
-        DynamicDatasetSession* session) {
-    if (!session || !target->lnReference) return NULL;
+        DynamicDatasetSession* session, bool* outWasNeeded) {
+    *outWasNeeded = false;
+
+    if (!session || !target->lnReference) {
+        /* A target with no LN reference is a malformed model, not a spare
+         * slot the device happens not to need - genuinely a failure. */
+        *outWasNeeded = true;
+        fprintf(stderr, "[mms_report_client] tier 4 (self-create) unavailable for '%s': %s\n",
+                target->objectReference, session ? "target has no LN reference" : "no dataset session");
+        return NULL;
+    }
 
     DynamicDatasetChunkAssignment* chunk =
             lookupChunkAssignment(session->chunkAssignments, target->objectReference);
-    if (!chunk) return NULL;
+    if (!chunk) {
+        /* Not an error - whole-device clustering ran out of clusters before
+         * it ran out of Dyn RCB slots, i.e. the device's reportable data is
+         * already fully covered by other targets this cycle (see
+         * buildWholeDeviceClusterPlan's own underflow log). Stated explicitly
+         * so it reads as "nothing left to cover" instead of looking like a
+         * lookup bug, and reported via *outWasNeeded=false so the caller
+         * leaves this RCB alone entirely rather than calling it failed. */
+        fprintf(stderr, "[mms_report_client] tier 4 (self-create) skipped for '%s': no whole-device cluster was "
+                "assigned to this RCB slot this cycle (the device's reportable data is already fully covered "
+                "by other slots)\n", target->objectReference);
+        return NULL;
+    }
+    fprintf(stderr, "[mms_report_client] tier 4 (self-create) for '%s': assigned cluster has %d member(s)\n",
+            target->objectReference, chunk->memberCount);
 
     const char* existing = lookupDynamicDatasetName(session->cache, target->objectReference, target->buffered);
-    if (existing) return existing;
+    if (existing) {
+        fprintf(stderr, "[mms_report_client] tier 4 (self-create) for '%s': session cache hit - reusing '%s' "
+                "already created this cycle, no wire call\n", target->objectReference, existing);
+        return existing;
+    }
 
     /* Cache hits above stay free (zero wire cost, always allowed) - the
      * budget check itself now lives in createAndCacheDynamicDatasetAttempt,
@@ -610,9 +724,14 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
      * DynamicDatasetSession's own doc comment) - a single top-level check
      * here couldn't distinguish an unbuffered target's Dyn-budget-gated real
      * attempt from its own Conf-budget-gated fallback. */
-    return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
-            target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
-            target->buffered);
+    const char* created = createAndCacheDynamicDataset(handle, session, target->objectReference,
+            target->lnReference, target->objectReference, (const char* const*) chunk->memberReferences,
+            chunk->memberCount, target->buffered);
+    /* Past the chunk lookup above, this target demonstrably HAD work to do,
+     * so a NULL here is a genuine failure to do it - never the benign
+     * "nothing left to cover" case. */
+    if (!created) *outWasNeeded = true;
+    return created;
 }
 
 /* Cheap, purely-local skip: true if datasetRef looks like a name
@@ -724,15 +843,30 @@ static bool
 pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, ClientReportControlBlock rcb,
         DynamicDatasetSession* session, LinkedList* outMemberRefs) {
     const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
-    if (!liveDataset || liveDataset[0] == '\0') return false;
-    if (looksLikeOurOwnDynamicDatasetName(liveDataset, target)) return false;
+    /* Both of these rejections used to return silently, which made tier 2
+     * indistinguishable from tier 2 never having been consulted at all - the
+     * log jumped straight from "resolving" to whatever tier 3/4 did next. */
+    if (!liveDataset || liveDataset[0] == '\0') {
+        fprintf(stderr, "[mms_report_client] tier 2 (pull live) for '%s': device has no DatSet assigned to this "
+                "RCB right now - falling through\n", target->objectReference);
+        return false;
+    }
+    fprintf(stderr, "[mms_report_client] tier 2 (pull live) for '%s': device reports DatSet='%s'\n",
+            target->objectReference, liveDataset);
+    if (looksLikeOurOwnDynamicDatasetName(liveDataset, target)) {
+        fprintf(stderr, "[mms_report_client] tier 2 (pull live) for '%s': '%s' is this client's own "
+                "association-scoped name from a PRIOR connection and is already destroyed server-side - "
+                "dangling, falling through\n", target->objectReference, liveDataset);
+        return false;
+    }
 
     IedClientError err = IED_ERROR_OK;
     bool isDeletable = false;
     LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, liveDataset, &isDeletable);
     if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
-        fprintf(stderr, "[mms_report_client] live-assigned dataset '%s' for '%s' could not be resolved "
-                "(error %d) - will create our own instead\n", liveDataset, target->objectReference, err);
+        fprintf(stderr, "[mms_report_client] live-assigned dataset '%s' for '%s' could not be resolved: %s (%d) "
+                "- will create our own instead\n", liveDataset, target->objectReference,
+                IedClientError_toString(err), err);
         if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
         return false;
     }
@@ -766,6 +900,19 @@ pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
 
     fprintf(stderr, "[mms_report_client] reusing live-assigned dataset '%s' for '%s' (%d member(s))\n",
             liveDataset, target->objectReference, LinkedList_size(wireRefs));
+    /* The real decode shape every report on this RCB will be interpreted
+     * against (refreshPulledMemberRefCache below rebuilds the member cache
+     * from exactly this list) - a mismatch between it and what the device
+     * actually sends is the root cause class behind silently misattributed
+     * values, and was previously only ever visible as a member COUNT. */
+    int pulledIndex = 0;
+    int pulledCount = LinkedList_size(wireRefs);
+    for (LinkedList pulledElement = LinkedList_getNext(wireRefs); pulledElement;
+            pulledElement = LinkedList_getNext(pulledElement)) {
+        pulledIndex++;
+        fprintf(stderr, "[mms_report_client]   pulled member[%d/%d] of '%s': %s\n",
+                pulledIndex, pulledCount, liveDataset, (char*) LinkedList_getData(pulledElement));
+    }
 
     if (session) {
         LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(liveDataset));
@@ -949,8 +1096,18 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
 
         IedClientError err = IED_ERROR_OK;
         LinkedList mmsNames = IedConnection_getLogicalDeviceDataSets(handle->connection, &err, ldName);
-        if (!mmsNames) continue;
+        if (!mmsNames) {
+            /* Previously a silent continue - an LD whose directory query is
+             * refused contributes nothing to either the budget correction or
+             * the adoption pool, which then looks identical to an LD that
+             * genuinely holds no datasets at all. */
+            fprintf(stderr, "[mms_report_client] could not list datasets under LD '%s': %s (%d) - this LD "
+                    "contributes nothing to the budget correction or the adoption pool\n",
+                    ldName, IedClientError_toString(err), err);
+            continue;
+        }
 
+        int perLdCount = 0;
         LinkedList nameElement = LinkedList_getNext(mmsNames);
         while (nameElement) {
             char* mmsName = (char*) LinkedList_getData(nameElement);
@@ -962,7 +1119,10 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
             if (!full) continue;
             snprintf(full, fullLen, "%s/%s", ldName, mmsName);
             LinkedList_add(existing, full);
+            perLdCount++;
+            fprintf(stderr, "[mms_report_client]   existing dataset on server: '%s'\n", full);
         }
+        fprintf(stderr, "[mms_report_client] LD '%s' holds %d existing dataset(s)\n", ldName, perLdCount);
         LinkedList_destroyDeep(mmsNames, free);
     }
 
@@ -995,15 +1155,17 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
             }
         }
         if (sclKnown) {
+            fprintf(stderr, "[mms_report_client] excluding '%s' from the adoption pool - our own model says it "
+                    "is a DIFFERENT RCB's SCL-declared static datSet, so adopting it would duplicate coverage "
+                    "instead of adding any\n", candidate);
             LinkedList_remove(existing, candidate);
             free(candidate);
         }
     }
 
-    if (LinkedList_size(existing) > 0) {
-        fprintf(stderr, "[mms_report_client] discovered %d existing dataset(s) already on the server "
-                "across this client's own LD(s)\n", LinkedList_size(existing));
-    }
+    fprintf(stderr, "[mms_report_client] discovery complete: %d existing dataset(s) already on the server "
+            "across this client's own LD(s), available as adoption candidates and as the ConfDataSet budget "
+            "correction\n", LinkedList_size(existing));
 
     return existing;
 }
@@ -1023,12 +1185,15 @@ discoverExistingServerDatasets(MmsReportClientHandle handle) {
 static bool
 tryAdoptCandidate(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session,
         const char* candidate, LinkedList* outMemberRefs) {
+    fprintf(stderr, "[mms_report_client] tier 3 (adopt) for '%s': considering candidate '%s'\n",
+            target->objectReference, candidate);
+
     IedClientError err = IED_ERROR_OK;
     bool isDeletable = false;
     LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, candidate, &isDeletable);
     if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
-        fprintf(stderr, "[mms_report_client] discovered dataset '%s' could not be resolved (error %d) - "
-                "skipping as an adoption candidate\n", candidate, err);
+        fprintf(stderr, "[mms_report_client] discovered dataset '%s' could not be resolved: %s (%d) - "
+                "skipping as an adoption candidate\n", candidate, IedClientError_toString(err), err);
         if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
         LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
         return false;
@@ -1057,8 +1222,20 @@ tryAdoptCandidate(MmsReportClientHandle handle, ReportControlBlockTarget* target
         return false;
     }
 
-    fprintf(stderr, "[mms_report_client] adopting existing dataset '%s' for '%s' (%d member(s)) - "
-            "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs));
+    fprintf(stderr, "[mms_report_client] adopting existing dataset '%s' for '%s' (%d member(s), deletable=%d) - "
+            "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs),
+            isDeletable);
+    /* Same reasoning as pullLiveDataset's own member dump - this list becomes
+     * this RCB's decode shape, so it has to be visible when a report decodes
+     * to something unexpected. */
+    int adoptedIndex = 0;
+    int adoptedCount = LinkedList_size(wireRefs);
+    for (LinkedList adoptedElement = LinkedList_getNext(wireRefs); adoptedElement;
+            adoptedElement = LinkedList_getNext(adoptedElement)) {
+        adoptedIndex++;
+        fprintf(stderr, "[mms_report_client]   adopted member[%d/%d] of '%s': %s\n",
+                adoptedIndex, adoptedCount, candidate, (char*) LinkedList_getData(adoptedElement));
+    }
 
     LinkedList_add(session->claimedDatasetNames, MmsReportClientUtils_safeStringDup(candidate));
     *outMemberRefs = wireRefs;
@@ -1127,7 +1304,11 @@ adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* ta
     if (!session || !session->existingServerDatasets || !target->lnReference) return NULL;
 
     char* slash = strchr(target->lnReference, '/');
-    if (!slash) return NULL;
+    if (!slash) {
+        fprintf(stderr, "[mms_report_client] tier 3 (adopt) unavailable for '%s': LN reference '%s' has no '/', "
+                "so its LD cannot be determined\n", target->objectReference, target->lnReference);
+        return NULL;
+    }
     size_t ldLen = (size_t) (slash - target->lnReference);
 
     if (target->buffered && target->objectReference) {
@@ -1138,8 +1319,16 @@ adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* ta
                 char* candidate = (char*) LinkedList_getData(element);
                 element = LinkedList_getNext(element);
                 if (strcmp(candidate, ownName) != 0) continue;
-                if (!stringListContains(session->claimedDatasetNames, candidate)
-                        && tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) {
+                if (stringListContains(session->claimedDatasetNames, candidate)) {
+                    fprintf(stderr, "[mms_report_client] tier 3 (adopt) for '%s': its own previous name '%s' is "
+                            "on the server but was already claimed this cycle - falling through to the "
+                            "LD-wide scan\n", target->objectReference, candidate);
+                    break;
+                }
+                fprintf(stderr, "[mms_report_client] tier 3 (adopt) for '%s': found its OWN previous dataset "
+                        "name '%s' among the discovered candidates - preferring it over the LD-wide scan\n",
+                        target->objectReference, candidate);
+                if (tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) {
                     free(ownName);
                     return candidate;
                 }
@@ -1149,17 +1338,26 @@ adoptUnclaimedDataset(MmsReportClientHandle handle, ReportControlBlockTarget* ta
         }
     }
 
+    int consideredCandidates = 0;
     LinkedList element = LinkedList_getNext(session->existingServerDatasets);
     while (element) {
         char* candidate = (char*) LinkedList_getData(element);
         element = LinkedList_getNext(element);
 
         if (strncmp(candidate, target->lnReference, ldLen) != 0 || candidate[ldLen] != '/') continue;
-        if (stringListContains(session->claimedDatasetNames, candidate)) continue;
+        consideredCandidates++;
+        if (stringListContains(session->claimedDatasetNames, candidate)) {
+            fprintf(stderr, "[mms_report_client] tier 3 (adopt) for '%s': candidate '%s' already claimed by "
+                    "another target this cycle - skipping\n", target->objectReference, candidate);
+            continue;
+        }
 
         if (tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) return candidate;
     }
 
+    fprintf(stderr, "[mms_report_client] tier 3 (adopt) found nothing usable for '%s': %d candidate(s) exist "
+            "under its LD, all already claimed or unusable - falling through to self-create\n",
+            target->objectReference, consideredCandidates);
     return NULL;
 }
 
@@ -1268,30 +1466,295 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
     free(previousDatasetReference);
 }
 
+/* ---- Sequential, verified RCB enable-sequence plumbing --------------------
+ *
+ * IEC 61850-7-2 makes an RCB's configuration attributes (DatSet, OptFlds,
+ * TrgOps, BufTm, IntgPd) writable only while RptEna is FALSE. This feature
+ * previously asked for every one of them PLUS RptEna=true inside a SINGLE
+ * bundled IedConnection_setRCBValues call. Two things went wrong with that
+ * against real hardware:
+ *
+ *   - A rejection named the whole REQUEST, never the ELEMENT. One error code
+ *     covered "the device didn't like the dataset", "...the trigger options",
+ *     "...the EntryID" and "...the enable itself" indistinguishably, so a log
+ *     capture from a real device could never say which attribute the device
+ *     actually objected to - the single biggest obstacle to diagnosing why
+ *     RCBs weren't going active on a real SIPROTEC.
+ *   - On a reconnect where the device still reports the RCB as already
+ *     enabled, every config element in that bundle is illegal per the rule
+ *     above, and a bundle has no way to disable first.
+ *
+ * The enable is therefore now a strict, spec-ordered sequence of SINGLE-element
+ * writes (see enableOneTarget's own step list), each one run through
+ * runRcbStep below, which logs what it intended, what the device returned (by
+ * NAME, via IedClientError_toString, not just a bare code), and what the
+ * device itself reports on an independent read-back immediately afterwards.
+ *
+ * NOTE ON LOG VOLUME: this block is deliberately verbose - up to six writes
+ * and seven extra reads per RCB per connect cycle, each with its own log
+ * lines. That is the point (a device that accepts a write and silently never
+ * applies it is structurally invisible any other way), but it is a
+ * DIAGNOSTIC posture, not a steady-state one - see CHANGELOG.md.
+ */
+
+/* One snapshot of an RCB's live, device-reported state. `datSet` is an OWNED
+ * copy, not the borrowed pointer ClientReportControlBlock_getDataSetReference
+ * hands back - that one points into the RCB object's own internal buffer and
+ * dies with ClientReportControlBlock_destroy (and is overwritten in place by
+ * a subsequent setDataSetReference, the exact bug fixed on the stop path in
+ * this file's history). Always pair with destroyRcbLiveState. */
+typedef struct {
+    bool readOk;
+    bool rptEna;
+    char* datSet;
+    int optFlds;
+    int trgOps;
+    uint32_t bufTm;
+    uint32_t intgPd;
+    uint32_t confRev;
+    uint16_t sqNum;
+    bool hasEntryId;
+} RcbLiveState;
+
 static void
+destroyRcbLiveState(RcbLiveState* state) {
+    if (!state) return;
+    free(state->datSet);
+    state->datSet = NULL;
+}
+
+/* Snapshots an already-fetched RCB object's device-reported values into an
+ * RcbLiveState and logs them as one line. Split out from
+ * readAndLogLiveRcbState so enableOneTarget's own entry log can reuse the
+ * getRCBValues result it already has, rather than paying a second, identical
+ * round-trip purely to print the same numbers. */
+static void
+captureAndLogRcbState(const char* objectReference, const char* when, ClientReportControlBlock rcb,
+        RcbLiveState* out) {
+    const char* datasetReference = ClientReportControlBlock_getDataSetReference(rcb);
+    out->readOk = true;
+    out->rptEna = ClientReportControlBlock_getRptEna(rcb);
+    out->datSet = datasetReference ? MmsReportClientUtils_safeStringDup(datasetReference) : NULL;
+    out->optFlds = ClientReportControlBlock_getOptFlds(rcb);
+    out->trgOps = ClientReportControlBlock_getTrgOps(rcb);
+    out->bufTm = ClientReportControlBlock_getBufTm(rcb);
+    out->intgPd = ClientReportControlBlock_getIntgPd(rcb);
+    out->confRev = ClientReportControlBlock_getConfRev(rcb);
+    out->sqNum = ClientReportControlBlock_getSqNum(rcb);
+    out->hasEntryId = ClientReportControlBlock_getEntryId(rcb) != NULL;
+
+    fprintf(stderr, "[mms_report_client] '%s' live RCB state (%s): RptEna=%d DatSet='%s' OptFlds=0x%x "
+            "TrgOps=0x%x BufTm=%u IntgPd=%u ConfRev=%u SqNum=%u EntryID=%s\n",
+            objectReference, when, out->rptEna, out->datSet ? out->datSet : "(empty)", out->optFlds,
+            out->trgOps, out->bufTm, out->intgPd, out->confRev, (unsigned) out->sqNum,
+            out->hasEntryId ? "present" : "absent");
+}
+
+/* Reads the RCB straight back off the device as its OWN MMS read - deliberately
+ * independent of whatever this client just wrote - and logs every attribute
+ * this feature's enable sequence touches. Exists because a setRCBValues call
+ * can return IED_ERROR_OK while the device never actually applies the value;
+ * without a real read-back there is no way to tell "we wrote it and it stuck"
+ * from "we wrote it and the device silently ignored it" from a log capture
+ * alone. Best-effort and purely diagnostic: a failed read logs and sets
+ * readOk=false, and is never treated as the enable itself failing. */
+static void
+readAndLogLiveRcbState(MmsReportClientHandle handle, const char* objectReference, const char* when,
+        RcbLiveState* out) {
+    memset(out, 0, sizeof(*out));
+
+    IedClientError err = IED_ERROR_OK;
+    ClientReportControlBlock live = IedConnection_getRCBValues(handle->connection, &err, objectReference, NULL);
+    if (!live) {
+        fprintf(stderr, "[mms_report_client] '%s' live read-back (%s) FAILED: %s (%d) - device state unknown "
+                "at this point\n", objectReference, when, IedClientError_toString(err), err);
+        return;
+    }
+
+    captureAndLogRcbState(objectReference, when, live, out);
+    ClientReportControlBlock_destroy(live);
+}
+
+/* What runRcbStep should compare its own read-back against, to decide whether
+ * the write it just made actually took effect on the device. */
+typedef enum {
+    RCB_STEP_VERIFY_NONE,     /* EntryID / GI - write-only in effect, a read-back proves nothing */
+    RCB_STEP_VERIFY_DATSET,   /* expectedString, exact match */
+    RCB_STEP_VERIFY_OPT_FLDS, /* expectedBits, containment only - see below */
+    RCB_STEP_VERIFY_TRG_OPS,  /* expectedBits, containment only - see below */
+    RCB_STEP_VERIFY_RPT_ENA,  /* expectedBool */
+} RcbStepVerify;
+
+/* One step of the enable sequence. `element` must be EXACTLY ONE RCB_ELEMENT_*
+ * constant - runRcbStep's whole reason for existing is that a failure names
+ * one attribute, which a multi-element mask would defeat, and its verify
+ * logic assumes a single attribute per call. `intendedText` is caller-formatted
+ * "what we are asking for", for the log only. */
+typedef struct {
+    uint32_t element;
+    const char* name;
+    const char* intendedText;
+    RcbStepVerify verify;
+    const char* expectedString;
+    int expectedBits;
+    bool expectedBool;
+} RcbStep;
+
+/* Writes one element of an RCB, then proves (or disproves) that it landed.
+ *
+ * Bit-valued verifies check CONTAINMENT ((live & expected) == expected), never
+ * equality: this feature only ever ORs bits into OptFlds/TrgOps and never
+ * clobbers bits the device already had (see enableOneTarget's own doc comments
+ * on both), so a live value carrying extra bits is correct, not a mismatch.
+ *
+ * The TEMPORARILY_UNAVAILABLE retry loop that used to wrap the single bundled
+ * write now lives here, per-step - a device still initializing after a restart
+ * can return it for any element, not just whichever one happened to be last.
+ *
+ * Returns the setRCBValues error. *outApplied reports whether the read-back
+ * actually confirmed the value (true for RCB_STEP_VERIFY_NONE, which has
+ * nothing to confirm; false whenever the read-back failed or contradicted the
+ * write) - deliberately separate from the return value, because "device said
+ * OK but didn't do it" is exactly the failure mode that has no error code. */
+static IedClientError
+runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const char* objectReference,
+        const RcbStep* step, bool* outApplied) {
+    if (outApplied) *outApplied = false;
+
+    fprintf(stderr, "[mms_report_client] '%s' step '%s': writing %s (element 0x%x)\n",
+            objectReference, step->name, step->intendedText, step->element);
+
+    IedClientError err = IED_ERROR_OK;
+    IedConnection_setRCBValues(handle->connection, &err, rcb, step->element, true);
+
+    int tempUnavailableRetries = 0;
+    while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
+            && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
+            && !handle->stopRequested) {
+        tempUnavailableRetries++;
+        fprintf(stderr, "[mms_report_client] '%s' step '%s': temporarily unavailable (device likely still "
+                "initializing after a restart) - retry %d/%d\n", objectReference, step->name,
+                tempUnavailableRetries, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
+        interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
+        IedConnection_setRCBValues(handle->connection, &err, rcb, step->element, true);
+    }
+
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] '%s' step '%s': setRCBValues FAILED: %s (%d)\n",
+                objectReference, step->name, IedClientError_toString(err), err);
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '%s': setRCBValues returned OK\n",
+                objectReference, step->name);
+    }
+
+    char when[128];
+    snprintf(when, sizeof(when), "after step '%s'", step->name);
+    RcbLiveState live;
+    readAndLogLiveRcbState(handle, objectReference, when, &live);
+
+    if (step->verify == RCB_STEP_VERIFY_NONE) {
+        fprintf(stderr, "[mms_report_client] '%s' step '%s': unverifiable (write-only attribute, nothing to "
+                "read back)\n", objectReference, step->name);
+        if (outApplied) *outApplied = true;
+    } else if (!live.readOk) {
+        fprintf(stderr, "[mms_report_client] '%s' step '%s': unverifiable (read-back failed)\n",
+                objectReference, step->name);
+    } else {
+        bool applied = false;
+        char actual[256];
+        char expected[256];
+
+        switch (step->verify) {
+            case RCB_STEP_VERIFY_DATSET:
+                applied = live.datSet && step->expectedString && strcmp(live.datSet, step->expectedString) == 0;
+                snprintf(actual, sizeof(actual), "DatSet='%s'", live.datSet ? live.datSet : "(empty)");
+                snprintf(expected, sizeof(expected), "DatSet='%s'",
+                        step->expectedString ? step->expectedString : "(none)");
+                break;
+            case RCB_STEP_VERIFY_OPT_FLDS:
+                applied = (live.optFlds & step->expectedBits) == step->expectedBits;
+                snprintf(actual, sizeof(actual), "OptFlds=0x%x", live.optFlds);
+                snprintf(expected, sizeof(expected), "OptFlds to contain 0x%x", step->expectedBits);
+                break;
+            case RCB_STEP_VERIFY_TRG_OPS:
+                applied = (live.trgOps & step->expectedBits) == step->expectedBits;
+                snprintf(actual, sizeof(actual), "TrgOps=0x%x", live.trgOps);
+                snprintf(expected, sizeof(expected), "TrgOps to contain 0x%x", step->expectedBits);
+                break;
+            case RCB_STEP_VERIFY_RPT_ENA:
+                applied = live.rptEna == step->expectedBool;
+                snprintf(actual, sizeof(actual), "RptEna=%d", live.rptEna);
+                snprintf(expected, sizeof(expected), "RptEna=%d", step->expectedBool);
+                break;
+            default:
+                snprintf(actual, sizeof(actual), "(none)");
+                snprintf(expected, sizeof(expected), "(none)");
+                break;
+        }
+
+        if (applied) {
+            fprintf(stderr, "[mms_report_client] '%s' step '%s': VERIFIED - device reports %s\n",
+                    objectReference, step->name, actual);
+        } else if (err == IED_ERROR_OK) {
+            /* The silent-ignore case this whole helper exists to expose. */
+            fprintf(stderr, "[mms_report_client] '%s' step '%s': NOT APPLIED - setRCBValues reported success "
+                    "but the device's live state is %s, expected %s\n",
+                    objectReference, step->name, actual, expected);
+        } else {
+            fprintf(stderr, "[mms_report_client] '%s' step '%s': not applied (write already failed above) - "
+                    "device's live state is %s, expected %s\n",
+                    objectReference, step->name, actual, expected);
+        }
+        if (outApplied) *outApplied = applied;
+    }
+
+    destroyRcbLiveState(&live);
+    return err;
+}
+
+/* How one target's enable attempt ended, for enableAllTargets' own per-cycle
+ * tally. The distinction that matters is NOT_NEEDED vs FAILED: both leave the
+ * RCB unreported and both used to produce byte-identical output, but only one
+ * of them is a problem. On a device carrying dozens of redundant spare RCB
+ * instances (a real SIPROTEC does), conflating them buries the handful of real
+ * failures among a pile of benign ones. */
+typedef enum {
+    RCB_ENABLE_OUTCOME_ENABLED,           /* bound and enabled, reporting */
+    RCB_ENABLE_OUTCOME_NOT_NEEDED,        /* benign: device's data already fully covered elsewhere */
+    RCB_ENABLE_OUTCOME_FAILED,            /* a dataset/enable was genuinely needed and didn't happen */
+    RCB_ENABLE_OUTCOME_SKIPPED_STOPPING,  /* a stop landed mid-loop; excluded from the tally */
+} RcbEnableOutcome;
+
+static RcbEnableOutcome
 enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, DynamicDatasetSession* session) {
     /* Defense-in-depth against enableAllTargets' own loop-top check below -
      * covers the narrow gap between that check and this call actually
      * landing, if a stop lands on the connection concurrently mid-loop. */
-    if (handle->stopRequested) return;
+    if (handle->stopRequested) return RCB_ENABLE_OUTCOME_SKIPPED_STOPPING;
 
     IedClientError err = IED_ERROR_OK;
 
     ClientReportControlBlock rcb =
         IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
     if (!rcb) {
-        fprintf(stderr, "[mms_report_client] getRCBValues failed for '%s': error %d\n",
-                target->objectReference, err);
+        fprintf(stderr, "[mms_report_client] getRCBValues failed for '%s': %s (%d)\n",
+                target->objectReference, IedClientError_toString(err), err);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
         }
-        return;
+        return RCB_ENABLE_OUTCOME_FAILED;
     }
 
-    /* Install the handler before enabling, so no report can arrive unhandled
-     * in the gap between the two. */
-    IedConnection_installReportHandler(handle->connection, target->objectReference,
-            ClientReportControlBlock_getRptId(rcb), MmsReportClientReportAdapter_onReport, handle);
+    /* Everything the device itself says about this RCB before this client
+     * touches anything - taken straight from the getRCBValues above, no extra
+     * round-trip (see captureAndLogRcbState). Two jobs: it's the baseline
+     * every "NOT APPLIED" verdict later in this sequence is judged against,
+     * and it supplies the three inputs the steps below branch on (live
+     * RptEna - does this RCB need disabling before its config is writable? -
+     * plus OptFlds and TrgOps). */
+    RcbLiveState entryState;
+    memset(&entryState, 0, sizeof(entryState));
+    captureAndLogRcbState(target->objectReference, "on entry, before any write", rcb, &entryState);
 
     /* The value-diff cache is deliberately NEVER reset here anymore - on the
      * very first connect it's already all-NULL (fresh from buildMemberRefCache),
@@ -1305,77 +1768,6 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * shouldForwardAndUpdateCache's own doc comment (mms_report_client_usecases.c)
      * for exactly how a persistently-NULL slot past the first report is
      * detected and logged as a bug. */
-    uint32_t mask = RCB_ELEMENT_RPT_ENA;
-
-    /* Proactively request OptFlds.EntryID for every buffered RCB, rather
-     * than relying on however the device happens to already be configured -
-     * a real device was found sending ZERO EntryID across every single
-     * report (confirmed via a temporary diagnostic log: 2581/2581 received
-     * reports had no EntryID at all), making the EntryID-resumption
-     * mechanism below structurally impossible against it regardless of how
-     * correct our own resumption logic is, since there is never anything to
-     * cache and resume from. ORs RPT_OPT_ENTRY_ID into whatever OptFlds bits
-     * the device already has configured (read via
-     * ClientReportControlBlock_getOptFlds, which reflects the device's own
-     * current config since `rcb` was just populated from a real
-     * IedConnection_getRCBValues call above) - never clobbers the rest, same
-     * minimal-footprint posture as everywhere else in this function. Only
-     * writes it back (and only then adds RCB_ELEMENT_OPT_FLDS to the mask)
-     * if the bit isn't already set, to avoid touching this attribute on
-     * every single reconnect once the device has accepted it once - unlike
-     * DatSet/RptEna, OptFlds isn't expected to reset itself across
-     * associations. The alternative (a site-side SCL/engineering-tool config
-     * change enabling entryID="true" on the device itself) is noted in
-     * CLAUDE.md's own mms_report_client bullet - this client-side approach
-     * was chosen instead so the daemon works against a device's default
-     * configuration without requiring a site visit/reconfiguration first. */
-    if (target->buffered) {
-        int currentOptFlds = ClientReportControlBlock_getOptFlds(rcb);
-        if (!(currentOptFlds & RPT_OPT_ENTRY_ID)) {
-            ClientReportControlBlock_setOptFlds(rcb, currentOptFlds | RPT_OPT_ENTRY_ID);
-            mask |= RCB_ELEMENT_OPT_FLDS;
-        }
-    }
-
-    /* Proactively OR in TrgOps.dchg/qchg/gi for every RCB, rather than
-     * relying on however the device happens to already be configured - a
-     * real device (via OMICRON IED Scout's "Simulate IED" feature, standing
-     * in for this device's real engineering export) was found with TrgOps
-     * carrying ONLY General Interrogation (dchg/qchg/dupd/integrity all
-     * false), meaning it would NEVER generate a report on an actual data or
-     * quality change - only the one-time GI snapshot on enable, which this
-     * feature's own bootstrap-suppression correctly never forwards anyway.
-     * Every subsequent value change on such an RCB was therefore silently
-     * invisible, with nothing to log on either side - the server genuinely
-     * never sends anything, so there is nothing for this feature's own
-     * reporting/filtering logic to even see, let alone drop.
-     *
-     * ORs TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI into
-     * whatever TrgOps bits the device already has configured (read via
-     * ClientReportControlBlock_getTrgOps, which reflects the device's own
-     * current config since `rcb` was just populated from a real
-     * IedConnection_getRCBValues call above) - never clobbers the rest, same
-     * minimal-footprint posture as OptFlds.EntryID above. GI is included
-     * here too since this feature's own GI request (RCB_ELEMENT_GI below)
-     * depends on TrgOps.gi being enabled server-side to be honored at all,
-     * per IEC 61850 - without it, even the bootstrap snapshot this feature
-     * already relies on could be silently ignored by a spec-compliant
-     * server. Deliberately does NOT touch TRG_OPT_DATA_UPDATE or
-     * TRG_OPT_INTEGRITY: integrity is a periodic/timer-based trigger, and
-     * this feature is deliberately, strictly event-driven (see
-     * CHANGELOG.md) - enabling it would reintroduce exactly the kind of
-     * "periodic traffic that looks like an event" problem the value-diff
-     * cache exists to filter out, not something worth manufacturing on
-     * purpose. Only writes it back (and only then adds RCB_ELEMENT_TRG_OPS
-     * to the mask) if at least one of these bits isn't already set, to
-     * avoid touching this attribute on every single reconnect once the
-     * device has accepted it once - same reasoning as OptFlds.EntryID. */
-    int currentTrgOps = ClientReportControlBlock_getTrgOps(rcb);
-    int neededTrgOps = TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI;
-    if ((currentTrgOps & neededTrgOps) != neededTrgOps) {
-        ClientReportControlBlock_setTrgOps(rcb, currentTrgOps | neededTrgOps);
-        mask |= RCB_ELEMENT_TRG_OPS;
-    }
 
     /* DatSet must be (re-)set explicitly on enable - relying on a
      * server-side default dataset (configured only via ReportControlBlock_create's
@@ -1383,6 +1775,13 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * reference client example (client_example_no_thread.c) always sets
      * RCB_ELEMENT_DATSET alongside RPT_ENA too, using the same "$"-joined
      * reference format ied_model already hands us in datasetReference.
+     *
+     * RESOLVED FIRST, BEFORE ANY WIRE WRITE OR ANY LOCAL MUTATION OF `rcb`.
+     * A target this client cannot bind a dataset to must not be touched at
+     * all - not disabled, not reconfigured, not left half-set-up with a
+     * report handler installed for an RCB that will never report. Everything
+     * from the report-handler install onwards is therefore gated on this
+     * block succeeding.
      *
      * Four-tier resolution order for which dataset to assign:
      *   1. STATIC - target->datasetReference, if SCL declared one for this
@@ -1443,19 +1842,35 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      *      cleanup-on-stop. This tier's own mechanism/lifetime is not
      *      otherwise touched by tiers 1-3 existing above it, only the
      *      priority order is new.
-     * If even tier 4 fails (no reportable attributes, or the device rejects
-     * creation - cap exceeded, etc.), DATSET is left unset and setRCBValues
-     * below fails with IED_ERROR_OBJECT_VALUE_INVALID, same as before this
-     * feature existed. */
-    const char* effectiveDatasetReference = target->datasetReference;
+     *
+     * The resolved name is kept as an OWNED copy, not the borrowed pointer
+     * each tier hands back. Tier 2's own borrowed pointer aliases `rcb`'s
+     * internal MmsValue buffer (ClientReportControlBlock_getDataSetReference
+     * returns MmsValue_toString of rcb->datSet), and the step-1 write below
+     * feeds it straight back into ClientReportControlBlock_setDataSetReference,
+     * whose MmsValue_setVisibleString frees and reallocates that exact buffer
+     * whenever the new string is longer than the old one - i.e. the argument
+     * and the destination are the same allocation. It happens to be benign
+     * today (same string, same length, so the realloc branch is never taken),
+     * but it is the identical aliasing bug already fixed once on the stop
+     * path in this file, and owning the string removes the hazard outright
+     * instead of relying on the lengths staying equal. */
+    char* effectiveDatasetReference = target->datasetReference
+            ? MmsReportClientUtils_safeStringDup(target->datasetReference) : NULL;
     const char* datasetTier = effectiveDatasetReference ? "SCL" : NULL;
+    /* Only meaningful if every tier below fails: see getOrCreateDynamicDataset's
+     * own doc comment. Distinguishes "this RCB was never needed" from "this
+     * RCB needed a dataset and couldn't get one". A target that resolves via
+     * tiers 1-3 never reaches tier 4 and leaves this at its false default,
+     * which is correct - nothing is outstanding for it either. */
+    bool datasetWasNeeded = false;
     if (!effectiveDatasetReference) {
         LinkedList pulledMemberRefs = NULL;
         if (pullLiveDataset(handle, target, rcb, session, &pulledMemberRefs)) {
             const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
             refreshPulledMemberRefCache(handle, target, liveDataset, pulledMemberRefs);
             LinkedList_destroyDeep(pulledMemberRefs, free);
-            effectiveDatasetReference = liveDataset;
+            effectiveDatasetReference = MmsReportClientUtils_safeStringDup(liveDataset);
             datasetTier = "live";
         } else {
             LinkedList adoptedMemberRefs = NULL;
@@ -1463,18 +1878,19 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             if (adopted) {
                 refreshPulledMemberRefCache(handle, target, adopted, adoptedMemberRefs);
                 LinkedList_destroyDeep(adoptedMemberRefs, free);
-                effectiveDatasetReference = adopted;
+                effectiveDatasetReference = MmsReportClientUtils_safeStringDup(adopted);
                 datasetTier = "adopted";
             } else {
-                effectiveDatasetReference = getOrCreateDynamicDataset(handle, target, session);
-                ensureLnFallbackMemberRefCache(handle, target, effectiveDatasetReference, session);
+                const char* created = getOrCreateDynamicDataset(handle, target, session, &datasetWasNeeded);
+                ensureLnFallbackMemberRefCache(handle, target, created, session);
+                effectiveDatasetReference = created ? MmsReportClientUtils_safeStringDup(created) : NULL;
                 datasetTier = "self-created";
             }
         }
     }
-    /* Which of the three tiers (see this function's own doc comment just
+    /* Which of the four tiers (see this function's own doc comment just
      * above) actually resolved the dataset - or that none did, the same
-     * "DATSET left unset, setRCBValues about to fail" case documented there.
+     * "nothing to bind, nothing to enable" case documented there.
      * Logged unconditionally (not just on failure) so a real run shows, per
      * RCB, exactly which path was taken without having to infer it from
      * whichever failure fprintf's did or didn't fire. */
@@ -1482,46 +1898,263 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             effectiveDatasetReference ? datasetTier : "none",
             effectiveDatasetReference ? effectiveDatasetReference : "(none)");
     if (!effectiveDatasetReference) {
-        /* No tier resolved a dataset - setRCBValues below is guaranteed to
-         * fail (a real device returns IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT/31
-         * for RptEna requested with no DatSet bound, confirmed against a real
-         * SIPROTEC 6MD device), so skip the doomed write rather than making
-         * it: against an already-struggling real device, one real MMS write
-         * per unresolved RCB (potentially 100+ per connect cycle) is pure
-         * noise indistinguishable from hammering it, for a result already
-         * known here. rcbStatusCallback still fires with the same error code
-         * a real attempt would have returned, so callers can't tell the
-         * difference. */
-        fprintf(stderr, "[mms_report_client] '%s' skipped - no dataset available, not attempting setRCBValues\n",
-                target->objectReference);
-        IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
+        /* No tier resolved a dataset, so every write below would be
+         * guaranteed to fail (a real device returns
+         * IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT/31 for RptEna requested with
+         * no DatSet bound, confirmed against a real SIPROTEC 6MD device) -
+         * skip the doomed sequence rather than making it: against an
+         * already-struggling real device, a whole write/read-back sequence per
+         * unresolved RCB (potentially 100+ per connect cycle) is pure noise
+         * indistinguishable from hammering it, for a result already known
+         * here. No report handler has been installed at this point, so there
+         * is nothing to uninstall either.
+         *
+         * TWO GENUINELY DIFFERENT OUTCOMES SHARE THIS BRANCH, and they used to
+         * be reported identically - same log line, same synthesized
+         * rcbStatusCallback(false, ...) - which on a device with dozens of
+         * redundant spare RCB instances buried the handful of real failures
+         * under a pile of benign ones. datasetWasNeeded (see
+         * getOrCreateDynamicDataset's own doc comment) separates them. */
+        if (!datasetWasNeeded) {
+            /* Benign: clustering ran out of clusters before it ran out of Dyn
+             * RCB slots, so the device's data is already fully covered and
+             * this spare slot has nothing left to report on. Deliberately
+             * does NOT fire rcbStatusCallback: that callback's own contract
+             * (mms_report_client_api.h) is "fires once per RCB after each
+             * enable ATTEMPT", and no attempt was made here - the device was
+             * never touched. Reporting a non-event as a failure was the bug. */
+            fprintf(stderr, "[mms_report_client] '%s' not needed this cycle - the device's reportable data is "
+                    "already fully covered by other RCB(s), so this spare slot is deliberately left untouched "
+                    "(not a failure)\n", target->objectReference);
+            destroyRcbLiveState(&entryState);
+            ClientReportControlBlock_destroy(rcb);
+            return RCB_ENABLE_OUTCOME_NOT_NEEDED;
+        }
+
+        /* Real failure: this target had work to do and couldn't do it. Says
+         * so loudly, and points at the tier lines above rather than making
+         * the reader correlate by hand. Still fires the callback with the
+         * same synthesized error a real attempt would have returned. */
+        fprintf(stderr, "[mms_report_client] '%s' FAILED to obtain a dataset - it needed one but none could be "
+                "created or adopted for it (see this RCB's own tier 2/3/4 lines above for which step gave up "
+                "and why); this RCB will not report\n", target->objectReference);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false,
                     IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT);
         }
+        destroyRcbLiveState(&entryState);
         ClientReportControlBlock_destroy(rcb);
-        return;
+        return RCB_ENABLE_OUTCOME_FAILED;
     }
-    ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
-    mask |= RCB_ELEMENT_DATSET;
 
-    /* Resume a buffered RCB's delivery from the last EntryID this client
-     * actually received, instead of re-requesting the server's entire
+    /* Install the handler before enabling, so no report can arrive unhandled
+     * in the gap between the two. Deliberately AFTER dataset resolution: a
+     * target that never gets a dataset is now abandoned before this point,
+     * so there is no longer an install/uninstall churn for RCBs this client
+     * was never going to enable. */
+    IedConnection_installReportHandler(handle->connection, target->objectReference,
+            ClientReportControlBlock_getRptId(rcb), MmsReportClientReportAdapter_onReport, handle);
+
+    /* ---- The enable sequence --------------------------------------------
+     *
+     * Strict IEC 61850-7-2 order, ONE single-element write per step, each one
+     * put through runRcbStep (see its own doc comment, and the block comment
+     * above it, for why this is no longer a single bundled write):
+     *
+     *   0. RptEna=false - only if the device reports it as already enabled.
+     *                     DatSet/OptFlds/TrgOps are only writable while
+     *                     RptEna is FALSE, so on a reconnect that finds the
+     *                     RCB still active, every step below is illegal until
+     *                     this one has run.
+     *   1. DatSet       - bind the dataset resolved above.            FATAL
+     *   2. OptFlds      - buffered only, OR in EntryID.
+     *   3. TrgOps       - OR in dchg/qchg/gi.
+     *   4. EntryID      - buffered only, the resume point.
+     *   5. RptEna=true  - and only now is the RCB actually enabled.    FATAL
+     *   6. GI           - a trigger request against an already-active RCB.
+     *
+     * Only steps 1 and 5 are fatal: without a bound dataset, or without the
+     * enable itself, the RCB genuinely cannot report. A failure in step
+     * 0/2/3/4/6 is logged loudly and the sequence continues - a degraded RCB
+     * that is still bound and enabled beats no RCB at all, and the log then
+     * says exactly which capability is degraded and why. */
+
+    /* Step 0. */
+    if (entryState.rptEna) {
+        fprintf(stderr, "[mms_report_client] '%s' is already enabled on the device - disabling first so its "
+                "configuration attributes become writable (IEC 61850-7-2: DatSet/OptFlds/TrgOps/BufTm/IntgPd "
+                "are only writable while RptEna is FALSE)\n", target->objectReference);
+        ClientReportControlBlock_setRptEna(rcb, false);
+        RcbStep disableStep = {
+            .element = RCB_ELEMENT_RPT_ENA,
+            .name = "0/6 RptEna=false (pre-disable)",
+            .intendedText = "RptEna=false",
+            .verify = RCB_STEP_VERIFY_RPT_ENA,
+            .expectedBool = false,
+        };
+        /* Non-fatal by design: if the device refuses to disable, the config
+         * steps below will each fail on their own and name themselves, which
+         * is strictly more diagnostic than bailing out here would be. */
+        runRcbStep(handle, rcb, target->objectReference, &disableStep, NULL);
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '0/6 RptEna=false (pre-disable)': skipped (device "
+                "already reports RptEna=0, configuration attributes are writable as-is)\n",
+                target->objectReference);
+    }
+
+    /* Step 1. */
+    ClientReportControlBlock_setDataSetReference(rcb, effectiveDatasetReference);
+    {
+        char intended[512];
+        snprintf(intended, sizeof(intended), "DatSet='%s' (resolved via %s)", effectiveDatasetReference,
+                datasetTier);
+        RcbStep datSetStep = {
+            .element = RCB_ELEMENT_DATSET,
+            .name = "1/6 DatSet",
+            .intendedText = intended,
+            .verify = RCB_STEP_VERIFY_DATSET,
+            .expectedString = effectiveDatasetReference,
+        };
+        err = runRcbStep(handle, rcb, target->objectReference, &datSetStep, NULL);
+    }
+    if (err != IED_ERROR_OK) {
+        fprintf(stderr, "[mms_report_client] '%s' ABORTING enable at step 1 - the dataset binding itself was "
+                "rejected, so there is nothing left to enable\n", target->objectReference);
+        IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
+        if (handle->rcbStatusCallback) {
+            handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
+        }
+        free(effectiveDatasetReference);
+        destroyRcbLiveState(&entryState);
+        ClientReportControlBlock_destroy(rcb);
+        return RCB_ENABLE_OUTCOME_FAILED;
+    }
+
+    /* Step 2. Proactively request OptFlds.EntryID for every buffered RCB,
+     * rather than relying on however the device happens to already be
+     * configured - a real device was found sending ZERO EntryID across every
+     * single report (confirmed via a temporary diagnostic log: 2581/2581
+     * received reports had no EntryID at all), making the EntryID-resumption
+     * mechanism below structurally impossible against it regardless of how
+     * correct our own resumption logic is, since there is never anything to
+     * cache and resume from. ORs RPT_OPT_ENTRY_ID into whatever OptFlds bits
+     * the device already has configured (entryState.optFlds, read from the
+     * device by the getRCBValues at the top of this function) - never
+     * clobbers the rest, same minimal-footprint posture as everywhere else
+     * here. Only written at all if the bit isn't already set, to avoid
+     * touching this attribute on every single reconnect once the device has
+     * accepted it once - unlike DatSet/RptEna, OptFlds isn't expected to
+     * reset itself across associations. The alternative (a site-side
+     * SCL/engineering-tool config change enabling entryID="true" on the
+     * device itself) is noted in CLAUDE.md's own mms_report_client bullet -
+     * this client-side approach was chosen instead so the daemon works
+     * against a device's default configuration without requiring a site
+     * visit/reconfiguration first. */
+    if (target->buffered && !(entryState.optFlds & RPT_OPT_ENTRY_ID)) {
+        int desiredOptFlds = entryState.optFlds | RPT_OPT_ENTRY_ID;
+        ClientReportControlBlock_setOptFlds(rcb, desiredOptFlds);
+        char intended[256];
+        snprintf(intended, sizeof(intended), "OptFlds=0x%x (device had 0x%x, OR'ing in RPT_OPT_ENTRY_ID 0x%x)",
+                desiredOptFlds, entryState.optFlds, RPT_OPT_ENTRY_ID);
+        RcbStep optFldsStep = {
+            .element = RCB_ELEMENT_OPT_FLDS,
+            .name = "2/6 OptFlds",
+            .intendedText = intended,
+            .verify = RCB_STEP_VERIFY_OPT_FLDS,
+            .expectedBits = RPT_OPT_ENTRY_ID,
+        };
+        IedClientError optFldsErr = runRcbStep(handle, rcb, target->objectReference, &optFldsStep, NULL);
+        if (optFldsErr != IED_ERROR_OK) {
+            fprintf(stderr, "[mms_report_client] '%s' step 2 failed but is NON-FATAL - continuing without "
+                    "OptFlds.EntryID; this RCB will report, but EntryID resumption across reconnects will "
+                    "not work against this device\n", target->objectReference);
+        }
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '2/6 OptFlds': skipped (%s)\n", target->objectReference,
+                target->buffered ? "device already has OptFlds.EntryID set"
+                                 : "unbuffered RCB - EntryID is a buffered-only concept");
+    }
+
+    /* Step 3. Proactively OR in TrgOps.dchg/qchg/gi for every RCB, rather
+     * than relying on however the device happens to already be configured - a
+     * real device (via OMICRON IED Scout's "Simulate IED" feature, standing
+     * in for this device's real engineering export) was found with TrgOps
+     * carrying ONLY General Interrogation (dchg/qchg/dupd/integrity all
+     * false), meaning it would NEVER generate a report on an actual data or
+     * quality change - only the one-time GI snapshot on enable, which this
+     * feature's own bootstrap-suppression correctly never forwards anyway.
+     * Every subsequent value change on such an RCB was therefore silently
+     * invisible, with nothing to log on either side - the server genuinely
+     * never sends anything, so there is nothing for this feature's own
+     * reporting/filtering logic to even see, let alone drop.
+     *
+     * ORs TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI into
+     * whatever TrgOps bits the device already has (entryState.trgOps) -
+     * never clobbers the rest, same minimal-footprint posture as OptFlds
+     * above. GI is included here too since this feature's own GI request
+     * (step 6 below) depends on TrgOps.gi being enabled server-side to be
+     * honored at all, per IEC 61850 - without it, even the bootstrap snapshot
+     * this feature already relies on could be silently ignored by a
+     * spec-compliant server. Deliberately does NOT touch TRG_OPT_DATA_UPDATE
+     * or TRG_OPT_INTEGRITY: integrity is a periodic/timer-based trigger, and
+     * this feature is deliberately, strictly event-driven (see CHANGELOG.md) -
+     * enabling it would reintroduce exactly the kind of "periodic traffic
+     * that looks like an event" problem the value-diff cache exists to filter
+     * out, not something worth manufacturing on purpose. Only written at all
+     * if at least one of these bits is missing, same reasoning as OptFlds.
+     *
+     * Written BEFORE RptEna, per this function's own step-order doc comment
+     * above - most servers, including this codebase's own `ied_simulator`,
+     * only accept a TrgOps change while RptEna is false and reject it with
+     * IED_ERROR_TEMPORARILY_UNAVAILABLE once enabled (confirmed directly:
+     * integration_tests/mms_report_client's
+     * test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix fails
+     * with exactly that error if this write is deferred to after step 5). */
+    int neededTrgOps = TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI;
+    if ((entryState.trgOps & neededTrgOps) != neededTrgOps) {
+        int desiredTrgOps = entryState.trgOps | neededTrgOps;
+        ClientReportControlBlock_setTrgOps(rcb, desiredTrgOps);
+        char intended[256];
+        snprintf(intended, sizeof(intended), "TrgOps=0x%x (device had 0x%x, OR'ing in dchg|qchg|gi 0x%x)",
+                desiredTrgOps, entryState.trgOps, neededTrgOps);
+        RcbStep trgOpsStep = {
+            .element = RCB_ELEMENT_TRG_OPS,
+            .name = "3/6 TrgOps",
+            .intendedText = intended,
+            .verify = RCB_STEP_VERIFY_TRG_OPS,
+            .expectedBits = neededTrgOps,
+        };
+        bool trgOpsApplied = false;
+        IedClientError trgOpsErr = runRcbStep(handle, rcb, target->objectReference, &trgOpsStep, &trgOpsApplied);
+        if (trgOpsErr != IED_ERROR_OK || !trgOpsApplied) {
+            fprintf(stderr, "[mms_report_client] '%s' step 3 did not take effect but is NON-FATAL - this RCB "
+                    "will be enabled with whatever TrgOps the device already has, which means it may only ever "
+                    "produce the one-time GI snapshot and never a change-triggered report\n",
+                    target->objectReference);
+        }
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '3/6 TrgOps': skipped (device already has "
+                "dchg|qchg|gi set, TrgOps=0x%x)\n", target->objectReference, entryState.trgOps);
+    }
+
+    /* Step 4. Resume a buffered RCB's delivery from the last EntryID this
+     * client actually received, instead of re-requesting the server's entire
      * unacknowledged backlog on every RptEna transition - see
      * MmsReportClientMemberRefCacheEntry.lastEntryId's own doc comment for
      * why this matters (a redelivered multi-entry backlog defeats the
      * single-slot value-diff cache). RCB_ELEMENT_ENTRY_ID is only meaningful
      * for buffered RCBs (iec61850_client.h) - gated on target->buffered.
      * lastEntryId is written by the report-adapter thread, so this read goes
-     * through the same memberRefCacheLock that guards it; ClientReportControlBlock_setEntryId
-     * itself is a local, synchronous struct mutation (confirmed against
-     * libiec61850's own source - it clones the value internally), not a
-     * network call, so it's safe to make while holding the lock, unlike
-     * IedConnection_setRCBValues below. On the very first-ever enable
-     * (lastEntryId still NULL - nothing to resume from yet) this is a no-op,
-     * same full-backlog behavior as before this change. Computed BEFORE the
-     * GI decision just below - hasResumableEntryId is that decision's own
-     * input (see MmsReportClientUseCases_shouldRequestGiOnEnable). */
+     * through the same memberRefCacheLock that guards it;
+     * ClientReportControlBlock_setEntryId itself is a local, synchronous
+     * struct mutation (confirmed against libiec61850's own source - it clones
+     * the value internally), not a network call, so it's safe to make while
+     * holding the lock, unlike the IedConnection_setRCBValues inside
+     * runRcbStep, which is deliberately outside it. On the very first-ever
+     * enable (lastEntryId still NULL - nothing to resume from yet) this step
+     * is skipped entirely, same full-backlog behavior as before this feature
+     * existed. Computed BEFORE the GI decision just below - hasResumableEntryId
+     * is that decision's own input (MmsReportClientUseCases_shouldRequestGiOnEnable). */
     bool hasResumableEntryId = false;
     if (target->buffered) {
         MmsReportClientMemberRefCacheEntry* cacheEntry = lookupMemberRefCacheByRcb(handle, target->objectReference);
@@ -1529,14 +2162,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
             Semaphore_wait(handle->memberRefCacheLock);
             if (cacheEntry->lastEntryId) {
                 ClientReportControlBlock_setEntryId(rcb, cacheEntry->lastEntryId);
-                mask |= RCB_ELEMENT_ENTRY_ID;
                 hasResumableEntryId = true;
             }
             Semaphore_post(handle->memberRefCacheLock);
         }
     }
 
-    ClientReportControlBlock_setRptEna(rcb, true);
     /* GI used to be requested on every enable unconditionally. Real-hardware
      * logs showed a buffered RCB's own GI response getting enqueued into its
      * buffered backlog as a brand-new entry (fresh, ever-increasing EntryID,
@@ -1557,66 +2188,69 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * net as before this change). On the very first-ever connect, this
      * snapshot lands against the still-all-NULL cache and is silently
      * bootstrap-seeded (see shouldForwardAndUpdateCache's own doc comment).
-     * `reason` is still never trusted for filtering (see
-     * shouldForwardAndUpdateCache's own doc comment). TrgOps.dchg/qchg/gi are
-     * now proactively OR'd in above (see that block's own doc comment) -
-     * BUF_TM/INTG_PD/CONF_REV, and TrgOps.dupd/integrity specifically, are
-     * still never touched, staying exactly as the IED's own config has them. */
+     * `reason` is still never trusted for filtering (see that same doc
+     * comment). Not const - step 4's own rejection handling below can still
+     * force it true. BUF_TM/INTG_PD/CONF_REV, and TrgOps.dupd/integrity
+     * specifically, are never touched anywhere in this sequence, staying
+     * exactly as the IED's own config has them. */
     bool requestGi = MmsReportClientUseCases_shouldRequestGiOnEnable(target->buffered, hasResumableEntryId);
-    if (requestGi) {
-        ClientReportControlBlock_setGI(rcb, true);
-        mask |= RCB_ELEMENT_GI;
-    }
 
-    IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
-    if (err != IED_ERROR_OK && (mask & RCB_ELEMENT_ENTRY_ID)) {
-        /* The server may have rejected an EntryID it no longer recognizes -
-         * e.g. its own buffer wrapped past it after a very long disconnect,
-         * or the server itself restarted. IEC 61850 leaves the exact failure
-         * mode here implementation-defined, so rather than guess at it, fall
-         * back once to the pre-existing full-resume behavior instead of
-         * leaving this RCB unreported. */
-        fprintf(stderr, "[mms_report_client] setRCBValues with EntryID failed for '%s': error %d - "
-                "retrying without EntryID (full resume, gi=true)\n", target->objectReference, err);
-        mask &= ~(uint32_t) RCB_ELEMENT_ENTRY_ID;
+    if (hasResumableEntryId) {
+        RcbStep entryIdStep = {
+            .element = RCB_ELEMENT_ENTRY_ID,
+            .name = "4/6 EntryID",
+            .intendedText = "the cached EntryID as this RCB's resume point",
+            .verify = RCB_STEP_VERIFY_NONE,
+        };
+        IedClientError entryIdErr = runRcbStep(handle, rcb, target->objectReference, &entryIdStep, NULL);
+        if (entryIdErr != IED_ERROR_OK) {
+            /* Unlike the old bundled write - where an EntryID rejection had
+             * to be INFERRED from a combined failure that could equally have
+             * been about DatSet or TrgOps - this write carried nothing but
+             * the EntryID, so its rejection is unambiguous. The server no
+             * longer recognizes the EntryID we cached: its own buffer wrapped
+             * past it after a very long disconnect, or the server itself
+             * restarted. IEC 61850 leaves the exact failure mode here
+             * implementation-defined, so rather than guess at it, fall back
+             * to the pre-existing full-resume behavior instead of leaving
+             * this RCB unreported - non-fatal, the sequence continues to
+             * step 5.
+             *
+             * Clear the cached EntryID back to NULL rather than leaving it in
+             * place. Required alongside MmsReportClientReportAdapter_onReport's
+             * own EntryID-staleness guard (mms_report_client_report_adapter.c):
+             * that guard drops any incoming report whose EntryID isn't strictly
+             * greater than this cached value, and only ever advances it on a
+             * report that survives the guard - so if a restarted server's own
+             * counter legitimately restarts low, a stale cached value here
+             * would make every one of its fresh reports look "stale" too,
+             * permanently silencing this RCB until the whole daemon process
+             * restarts. This reset is the one signal we actually have that the
+             * old baseline can no longer be trusted, so it puts the guard back
+             * into its fail-open, "nothing to compare against yet" bootstrap
+             * state.
+             *
+             * This same rejection is also the definitive signal the device's
+             * report state was reset (most commonly a real device reboot) - a
+             * subsequently recreated dataset holds genuinely fresh values even
+             * when it has the exact same deterministic name as before (the
+             * everyday reconnect case ensureLnFallbackMemberRefCache's own
+             * name-based check is built for), so the value-diff cache must be
+             * reset to bootstrap here too, not just lastEntryId - otherwise the
+             * next report diffs fresh post-reset values against stale
+             * pre-reset ones and nearly everything reads as "changed."
+             * MmsReportClientUseCases_resetValueDiffCacheToBootstrap's own doc
+             * comment has the full reasoning.
+             *
+             * GI was skipped above precisely because we had a resumable
+             * EntryID - now that the server has rejected it and the cache is
+             * about to be cleared, step 6 needs the same GI safety net a
+             * genuine first-ever enable gets. */
+            fprintf(stderr, "[mms_report_client] '%s' step 4 failed but is NON-FATAL - the device rejected "
+                    "the cached EntryID, falling back to a full resume (gi=true) for this enable\n",
+                    target->objectReference);
+            requestGi = true;
 
-        /* GI was skipped on the first attempt above precisely because we had
-         * a resumable EntryID (requestGi was false) - now that the server
-         * has rejected it and the cache is about to be cleared back to NULL,
-         * this retry is a fresh full-resume enable with nothing to resume
-         * from, so it needs the same GI safety net a genuine first-ever
-         * enable gets. */
-        if (!requestGi) {
-            ClientReportControlBlock_setGI(rcb, true);
-            mask |= RCB_ELEMENT_GI;
-        }
-
-        /* The server just told us the EntryID we cached is no longer valid
-         * (buffer wrapped, or the server itself restarted with a fresh
-         * EntryID counter) - clear it back to NULL rather than leaving it in
-         * place. Required alongside MmsReportClientReportAdapter_onReport's
-         * own EntryID-staleness guard (mms_report_client_report_adapter.c):
-         * that guard drops any incoming report whose EntryID isn't strictly
-         * greater than this cached value, and only ever advances it on a
-         * report that survives the guard - so if a restarted server's own
-         * counter legitimately restarts low, a stale cached value here would
-         * make every one of its fresh reports look "stale" too, permanently
-         * silencing this RCB until the whole daemon process restarts. This
-         * reset is the one signal we actually have that the old baseline can
-         * no longer be trusted, so it puts the guard back into its
-         * fail-open, "nothing to compare against yet" bootstrap state. */
-        /* This same rejection is also the definitive signal the device's
-         * report state was reset (most commonly a real device reboot) - a
-         * subsequently recreated dataset holds genuinely fresh values even
-         * when it has the exact same deterministic name as before (the
-         * everyday reconnect case ensureLnFallbackMemberRefCache's own
-         * name-based check is built for), so the value-diff cache must be
-         * reset to bootstrap here too, not just lastEntryId - otherwise the
-         * next report diffs fresh post-reset values against stale
-         * pre-reset ones and nearly everything reads as "changed."
-         * MmsReportClientUseCases_resetValueDiffCacheToBootstrap's own doc
-         * comment has the full reasoning. */
-        if (target->buffered) {
             MmsReportClientMemberRefCacheEntry* cacheEntry =
                     lookupMemberRefCacheByRcb(handle, target->objectReference);
             if (cacheEntry) {
@@ -1631,51 +2265,87 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
                         "cache reset to bootstrap (device report state was reset)\n", target->objectReference);
             }
         }
-
-        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '4/6 EntryID': skipped (%s)\n", target->objectReference,
+                target->buffered ? "no cached EntryID to resume from yet - this enable is a full resume"
+                                 : "unbuffered RCB - EntryID is a buffered-only concept");
     }
 
-    /* See this file's own MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES doc
-     * comment - a few short retries for a device that's still coming up
-     * after a restart, rather than immediately tearing down a report handler
-     * that may already be receiving valid reports. Reuses whatever rcb/mask
-     * state the EntryID-retry block above left behind (untouched if that
-     * block never ran). */
-    int tempUnavailableRetries = 0;
-    while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
-            && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
-            && !handle->stopRequested) {
-        tempUnavailableRetries++;
-        fprintf(stderr, "[mms_report_client] setRCBValues temporarily unavailable for '%s' (device likely still "
-                "initializing after a restart) - retry %d/%d\n", target->objectReference, tempUnavailableRetries,
-                MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
-        interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
-        IedConnection_setRCBValues(handle->connection, &err, rcb, mask, true);
+    /* Step 5 - and only now, with the dataset bound and every configuration
+     * attribute already written while the RCB was disabled, is it actually
+     * enabled. */
+    ClientReportControlBlock_setRptEna(rcb, true);
+    bool rptEnaApplied = false;
+    {
+        RcbStep rptEnaStep = {
+            .element = RCB_ELEMENT_RPT_ENA,
+            .name = "5/6 RptEna=true",
+            .intendedText = "RptEna=true",
+            .verify = RCB_STEP_VERIFY_RPT_ENA,
+            .expectedBool = true,
+        };
+        err = runRcbStep(handle, rcb, target->objectReference, &rptEnaStep, &rptEnaApplied);
     }
-
     if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] setRCBValues failed for '%s': error %d\n",
-                target->objectReference, err);
+        fprintf(stderr, "[mms_report_client] '%s' ABORTING enable at step 5 - the device refused to enable "
+                "reporting on this RCB\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
         }
+        free(effectiveDatasetReference);
+        destroyRcbLiveState(&entryState);
         ClientReportControlBlock_destroy(rcb);
-        return;
+        return RCB_ENABLE_OUTCOME_FAILED;
+    }
+    if (!rptEnaApplied) {
+        /* Deliberately NOT treated as a failure: a device is not obliged to
+         * reflect the change on an immediate read-back, and this client has
+         * no basis to overrule an explicit IED_ERROR_OK. But it is the single
+         * most important line in a "reports never arrive" investigation, so
+         * it says so plainly rather than being buried in runRcbStep's own
+         * generic NOT APPLIED verdict. */
+        fprintf(stderr, "[mms_report_client] '%s' WARNING: the device accepted RptEna=true but its own "
+                "read-back does not show this RCB as enabled - reporting may never start on it. Treated as "
+                "success anyway (a device may simply not reflect the change immediately); this is the line "
+                "to look at first if no reports arrive from this RCB\n", target->objectReference);
     }
 
-    /* The one success-path log line in this function - every other fprintf
-     * here fires only on failure, so today there is no way to see which RCBs
-     * are actually reporting short of watching the IPC stream itself. */
+    /* Step 6. */
+    if (requestGi) {
+        ClientReportControlBlock_setGI(rcb, true);
+        RcbStep giStep = {
+            .element = RCB_ELEMENT_GI,
+            .name = "6/6 GI",
+            .intendedText = "GI=true (one-shot general interrogation against the now-active RCB)",
+            .verify = RCB_STEP_VERIFY_NONE,
+        };
+        IedClientError giErr = runRcbStep(handle, rcb, target->objectReference, &giStep, NULL);
+        if (giErr != IED_ERROR_OK) {
+            fprintf(stderr, "[mms_report_client] '%s' step 6 failed but is NON-FATAL - the RCB is bound and "
+                    "enabled, it just won't produce the initial snapshot this enable asked for\n",
+                    target->objectReference);
+        }
+    } else {
+        fprintf(stderr, "[mms_report_client] '%s' step '6/6 GI': skipped (buffered RCB resuming from a valid "
+                "EntryID - the backlog already covers everything missed, see this function's own GI doc "
+                "comment)\n", target->objectReference);
+    }
+
+    /* No extra read-back here: whichever step ran last (5 or 6) already
+     * logged the device's own live state immediately afterwards, so a final
+     * one would be an identical round-trip for an identical line. */
     fprintf(stderr, "[mms_report_client] enabled reporting for '%s' (buffered=%d, dataset='%s', gi=%d)\n",
-            target->objectReference, target->buffered,
-            effectiveDatasetReference ? effectiveDatasetReference : "(none)", requestGi);
+            target->objectReference, target->buffered, effectiveDatasetReference, requestGi);
 
     if (handle->rcbStatusCallback) {
         handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, true, IED_ERROR_OK);
     }
 
+    free(effectiveDatasetReference);
+    destroyRcbLiveState(&entryState);
     ClientReportControlBlock_destroy(rcb);
+    return RCB_ENABLE_OUTCOME_ENABLED;
 }
 
 /*
@@ -1757,17 +2427,30 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
         slotScan = LinkedList_getNext(slotScan);
     }
     if (LinkedList_size(slots) == 0) {
+        fprintf(stderr, "[mms_report_client] whole-device cluster plan: this device has NO Dyn RCB slots (every "
+                "RCB already carries an SCL-declared datSet) - nothing to plan\n");
         LinkedList_destroyStatic(slots);
         return plan;
+    }
+    fprintf(stderr, "[mms_report_client] whole-device cluster plan: %d Dyn RCB slot(s) available\n",
+            LinkedList_size(slots));
+    for (LinkedList slotLog = LinkedList_getNext(slots); slotLog; slotLog = LinkedList_getNext(slotLog)) {
+        ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotLog);
+        fprintf(stderr, "[mms_report_client]   Dyn slot: '%s' (LN '%s', buffered=%d)\n",
+                t->objectReference, t->lnReference ? t->lnReference : "(none)", t->buffered);
     }
 
     LinkedList wholeDeviceLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(handle->iedModel);
     int leafCount = wholeDeviceLeaves ? LinkedList_size(wholeDeviceLeaves) : 0;
     if (leafCount == 0) {
+        fprintf(stderr, "[mms_report_client] whole-device cluster plan: the model has NO reportable (FC=ST/MX) "
+                "attributes anywhere - no Dyn RCB can be given a dataset this cycle\n");
         if (wholeDeviceLeaves) LinkedList_destroyDeep(wholeDeviceLeaves, free);
         LinkedList_destroyStatic(slots);
         return plan;
     }
+    fprintf(stderr, "[mms_report_client] whole-device cluster plan: %d reportable attribute(s) across the "
+            "whole device to distribute\n", leafCount);
 
     char** leafArray = calloc((size_t) leafCount, sizeof(char*));
     if (!leafArray) {
@@ -1787,6 +2470,12 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     int confMaxAttributes = IedModel_getConfDataSetMaxAttributes(handle->iedModel);
     int dynMaxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
     int maxAttributes = confMaxAttributes > 0 ? confMaxAttributes : dynMaxAttributes;
+    fprintf(stderr, "[mms_report_client] whole-device cluster plan: SCL declares ConfDataSet maxAttributes=%d, "
+            "DynDataSet maxAttributes=%d - using cap %d from %s, strategy=%s\n",
+            confMaxAttributes, dynMaxAttributes, maxAttributes,
+            confMaxAttributes > 0 ? "ConfDataSet" : (dynMaxAttributes > 0 ? "DynDataSet" : "neither (undeclared)"),
+            maxAttributes > 0 ? "DO-atomic bin-packing across the whole device"
+                              : "one dataset per LN (no known size bound to pack against)");
     LinkedList clusterLists = (maxAttributes > 0)
             ? MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(
                     (const char* const*) leafArray, leafCount, maxAttributes)
@@ -1797,6 +2486,8 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     int totalClusters = LinkedList_size(clusterLists);
     int slotCount = LinkedList_size(slots);
     int assignedClusters = 0;
+    fprintf(stderr, "[mms_report_client] whole-device cluster plan: chunking produced %d cluster(s) for %d "
+            "slot(s)\n", totalClusters, slotCount);
 
     LinkedList clusterElement = LinkedList_getNext(clusterLists);
     LinkedList slotElement = LinkedList_getNext(slots);
@@ -1826,6 +2517,14 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
                 assignment->memberReferences = memberArray;
                 assignment->memberCount = memberCount;
                 LinkedList_add(plan, assignment);
+                /* The plan itself, one line per assignment. Which slot got
+                 * which part of the device is otherwise only inferable by
+                 * correlating createDataSet lines after the fact, and a
+                 * cluster whose size exceeds the device's real (as opposed to
+                 * SCL-declared) cap is only diagnosable if the intended size
+                 * is on record before the create is attempted. */
+                fprintf(stderr, "[mms_report_client]   cluster %d/%d -> slot '%s' (%d member(s))\n",
+                        assignedClusters + 1, totalClusters, assignedTarget->objectReference, memberCount);
             } else {
                 for (int f = 0; f < memberCount; f++) free(memberArray[f]);
                 free(memberArray);
@@ -1980,8 +2679,8 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
                         RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
                 if (disableErr != IED_ERROR_OK) {
                     fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
-                            "before orphan cleanup: error %d\n", matchedTarget->objectReference, candidate,
-                            disableErr);
+                            "before orphan cleanup: %s (%d)\n", matchedTarget->objectReference, candidate,
+                            IedClientError_toString(disableErr), disableErr);
                 } else {
                     fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from orphaned dataset '%s' "
                             "before cleanup\n", matchedTarget->objectReference, candidate);
@@ -1999,8 +2698,8 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
             fprintf(stderr, "[mms_report_client] cleaned up orphaned dataset '%s' - not needed by any "
                     "target this cycle, reclaiming budget\n", candidate);
         } else {
-            fprintf(stderr, "[mms_report_client] could not clean up orphaned dataset '%s': error %d - "
-                    "left behind\n", candidate, deleteErr);
+            fprintf(stderr, "[mms_report_client] could not clean up orphaned dataset '%s': %s (%d) - "
+                    "left behind\n", candidate, IedClientError_toString(deleteErr), deleteErr);
             if (outLeakedCount) (*outLeakedCount)++;
         }
     }
@@ -2045,10 +2744,37 @@ enableAllTargets(MmsReportClientHandle handle) {
     fprintf(stderr, "[mms_report_client] ConfDataSet budget this cycle: SCL declares max=%d, %d already exist "
             "on server, starting budget=%d\n", sclConfMax, existingCount, session.remainingConfBudget);
 
+    int enabledCount = 0;
+    int notNeededCount = 0;
+    int failedCount = 0;
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element && !handle->stopRequested) {
-        enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), &session);
+        switch (enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), &session)) {
+            case RCB_ENABLE_OUTCOME_ENABLED:    enabledCount++; break;
+            case RCB_ENABLE_OUTCOME_NOT_NEEDED: notNeededCount++; break;
+            case RCB_ENABLE_OUTCOME_FAILED:     failedCount++; break;
+            case RCB_ENABLE_OUTCOME_SKIPPED_STOPPING: break; /* teardown, not an outcome worth counting */
+        }
         element = LinkedList_getNext(element);
+    }
+
+    /* The one number a real-hardware log capture is actually read for. Without
+     * it, answering "did anything really fail this cycle?" means counting
+     * per-RCB lines by hand across a capture that now runs to dozens of lines
+     * per RCB. Suppressed entirely mid-teardown, where a partial tally would
+     * be actively misleading. The failure clause is only named when there
+     * genuinely are failures, so a healthy cycle reads clean rather than
+     * ending on the word FAILED every time. */
+    if (!handle->stopRequested) {
+        int total = enabledCount + notNeededCount + failedCount;
+        if (failedCount > 0) {
+            fprintf(stderr, "[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
+                    "(device already fully covered), %d FAILED - see the per-RCB lines above\n",
+                    total, enabledCount, notNeededCount, failedCount);
+        } else {
+            fprintf(stderr, "[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
+                    "(device already fully covered), no failures\n", total, enabledCount, notNeededCount);
+        }
     }
 
     int leakedThisCycle = 0;
@@ -2273,7 +2999,8 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
                     if (err != IED_ERROR_OK) {
                         unbindFailCount++;
                         fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
-                                "before dataset cleanup: error %d\n", target->objectReference, liveDataSet, err);
+                                "before dataset cleanup: %s (%d)\n", target->objectReference, liveDataSet,
+                                IedClientError_toString(err), err);
                     } else {
                         fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from dataset '%s'\n",
                                 target->objectReference, liveDataSet);
@@ -2312,7 +3039,8 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
             IedClientError deleteErr = IED_ERROR_OK;
             if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
                 fprintf(stderr, "[mms_report_client] could not delete dynamic dataset '%s' on stop: "
-                        "error %d - left behind on the device\n", datasetName, deleteErr);
+                        "%s (%d) - left behind on the device\n", datasetName,
+                        IedClientError_toString(deleteErr), deleteErr);
                 leakedOnStop++;
             } else {
                 fprintf(stderr, "[mms_report_client] deleted dynamic dataset '%s' on stop\n", datasetName);

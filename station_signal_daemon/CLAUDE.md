@@ -195,12 +195,45 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `src/features/mms_report_client/service/mms_report_client_api.h`. Works under every
   `AccessMode`, including `REPORT_ONLY`. Reconnects with exponential backoff via a dedicated
   supervisor thread driven by `IedConnection`'s state-changed handler.
-  **Enable behavior**: every enable sets `RptEna`, `DatSet` (always explicitly re-asserted, never
-  a server-side default), and (with one exception, next paragraph) `GI` purely to force a
+  **Enable behavior — a sequential, per-element, read-back-verified sequence.** An enable is
+  **never** one bundled `setRCBValues`; it is a series of SINGLE-element writes in strict
+  IEC 61850-7-2 order, because that spec makes `DatSet`/`OptFlds`/`TrgOps`/`BufTm`/`IntgPd`
+  writable only while `RptEna` is FALSE, and because a bundled rejection names the *request*,
+  never the *element* (see `CHANGELOG.md` for the four reverted commits that failed to diagnose
+  a real SIPROTEC without this). The dataset is resolved **first**, before any local mutation or
+  wire write — a target that resolves no dataset is left completely untouched, with no writes and
+  no report handler installed. Then, per target: **0.** `RptEna=false`, only if the device reports
+  it already enabled (so the config writes below are legal — the common buffered-reconnect case);
+  **1.** `DatSet`, always explicitly re-asserted, never a server-side default — *fatal* if
+  rejected; **2.** `OptFlds` with `RPT_OPT_ENTRY_ID` OR'd in, buffered RCBs only, only if the bit
+  isn't already set; **3.** `TrgOps` (next paragraph); **4.** `EntryID`, buffered RCBs with a
+  cached resume point; **5.** `RptEna=true`, the step that actually activates the RCB — *fatal*
+  if rejected; **6.** `GI` (with one exception, two paragraphs down) purely to force a
   deterministic snapshot — never trusted/forwarded on its own merits, it lands on the same
-  bootstrap-suppression path any first observation would. `BufTm`/`IntgPd`/`ConfRev` are left
-  untouched. A buffered RCB also gets `RPT_OPT_ENTRY_ID` OR'd into its OptFlds if not already set
-  (for EntryID resumption below).
+  bootstrap-suppression path any first observation would. Only steps 1 and 5 abort the enable;
+  a failure in 0/2/3/4/6 is logged loudly and the sequence continues, since a degraded-but-enabled
+  RCB beats no RCB. `BufTm`/`IntgPd`/`ConfRev` are never written at any step.
+  **Every executed step is verified by its own independent read-back** (`runRcbStep` →
+  `readAndLogLiveRcbState`), logging `VERIFIED` / `NOT APPLIED` / `unverifiable` — this exists for
+  the failure mode that has no error code at all, a device returning `IED_ERROR_OK` for a write it
+  then silently never applies. `OptFlds`/`TrgOps` verify by *containment*, never equality (this
+  feature only ORs bits in); `EntryID`/`GI` are write-only in effect and reported as unverifiable
+  rather than falsely confirmed; an `RptEna=true` that returns OK but reads back false is a loud
+  named warning but deliberately **not** a failure. The `TEMPORARILY_UNAVAILABLE` retry loop is
+  per-step. **The resulting log volume (and the extra read per step) is a deliberate temporary
+  diagnostic posture, not a steady state** — see `CHANGELOG.md` for what to trim first.
+  **"Not needed" is a distinct outcome from "failed", and only one of them is a problem.** A Dyn
+  RCB left with no cluster to cover (clustering ran out of clusters before it ran out of slots —
+  routine on hardware carrying dozens of redundant spare RCB instances) is logged calmly as *not
+  needed*, is left completely untouched, and deliberately fires **no** `rcbStatusCallback` at all:
+  that callback's contract is "once per enable *attempt*", and no attempt is made. An RCB that
+  genuinely needed a dataset and couldn't get one (budget exhausted, `createDataSet` rejected, no
+  wire-convertible members, malformed LN reference) is logged loudly as **FAILED** and still fires
+  `enabled=false`. `getOrCreateDynamicDataset`'s `outWasNeeded` out-param is the only signal
+  separating the two; before it they were byte-identical, which buried real failures among benign
+  spares. Each connect cycle ends with one summary line — `N enabled, N not needed, N FAILED` —
+  so the question "did anything actually break this cycle?" is answerable without counting per-RCB
+  lines by hand.
   **`TrgOps.dchg`/`qchg`/`gi` are proactively OR'd into every RCB's own current TrgOps on every
   enable** (never clearing anything already set) — a real device (via OMICRON IED Scout's
   "Simulate IED" feature) was found with an RCB's live TrgOps carrying ONLY General Interrogation,
@@ -215,7 +248,11 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   cache exists to filter out. Only written back if at least one needed bit is missing, to avoid
   touching this attribute on every single reconnect once a device has accepted it once — same
   minimal-footprint posture as the OptFlds.EntryID OR below. `BufTm`/`IntgPd`/`ConfRev` are still
-  left untouched.
+  left untouched. Written as step 3, i.e. **before** the `RptEna=true` of step 5: most servers,
+  including this repo's own `ied_simulator`, reject a TrgOps change once the RCB is enabled, and
+  `integration_tests/mms_report_client`'s `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`
+  fails with `IED_ERROR_TEMPORARILY_UNAVAILABLE` if this write is ever deferred past the enable —
+  it is the standing guard on the step order.
   **GI is skipped on a buffered RCB's (re)enable whenever it has a valid EntryID to resume from**
   (`MmsReportClientUseCases_shouldRequestGiOnEnable`) — a real device was found enqueuing its own
   GI response as a brand-new entry in that RCB's buffered backlog (fresh, ever-increasing EntryID,

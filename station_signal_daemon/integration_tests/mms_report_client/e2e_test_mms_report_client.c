@@ -68,9 +68,11 @@
 #define TEST_PORT_SIBLING_BUFFERED 10219
 #define TEST_PORT_GI_ONLY 10220
 #define TEST_PORT_DELETE_WHILE_ENABLED 10221
+#define TEST_PORT_SPARE_RCB 10222
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
 #define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
+#define FIXTURE_PATH_SPARE_RCB "fixtures/reporter1_spare_rcb.cid"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
 
@@ -2004,6 +2006,86 @@ test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * A Dyn RCB slot the device simply does not need must be left COMPLETELY
+ * alone - and, crucially, must not be reported as a failure.
+ *
+ * Whole-device clustering treats every Dyn RCB as a fungible reporting slot
+ * and hands out one cluster per slot until the clusters run out. On any real
+ * device carrying redundant spare RCB instances (a real SIPROTEC has dozens on
+ * a single LN) the slots outnumber the clusters by a wide margin, so most
+ * spares legitimately end up with nothing to cover. That is a benign,
+ * expected, "the device's data is already fully covered" outcome.
+ *
+ * It used to be indistinguishable from a real failure: an unneeded spare and
+ * an RCB whose dataset creation genuinely failed produced byte-identical log
+ * output AND the same synthesized rcbStatusCallback(false,
+ * IED_ERROR_OBJECT_ATTRIBUTE_INCONSISTENT). On a device with dozens of spares
+ * that buried the handful of real failures under a pile of benign ones,
+ * defeating the entire point of the per-RCB diagnostics.
+ *
+ * fixtures/reporter1_spare_rcb.cid (see its own header comment) declares two
+ * reportable LNs and THREE Dyn RCBs, with no <Services><DynDataSet> at all -
+ * so clustering deterministically produces exactly two clusters via
+ * groupReferencesByLn, and the last-declared Dyn RCB (brcbDyn) gets nothing.
+ * It also claims both of the simulator's startup datasets (ds1/ds2) via static
+ * RCBs, so the adoption tier cannot rescue the spare and mask the case.
+ *
+ * The assertion that matters is the pair on brcbDyn: NOT enabled (it never got
+ * a dataset) and NOT failed (it never needed one). Before the not-needed/failed
+ * split, the second half of that pair was false - brcbDyn reported a failure.
+ */
+void
+test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_SPARE_RCB);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH_SPARE_RCB, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_spare_rcb.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_SPARE_RCB,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    /* The two slots that DO get clusters must still come up normally - this is
+     * what proves the spare's outcome is about cluster supply running out, not
+     * about dynamic dataset provisioning being broken for this fixture. */
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcbEnabled),
+            "expected urcbDyn (first Dyn slot) to take the first cluster and enable");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicRcb2Enabled),
+            "expected urcbDyn2 (second Dyn slot) to take the second cluster and enable");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcbFailed, "urcbDyn had a cluster - must not fail");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicRcb2Failed, "urcbDyn2 had a cluster - must not fail");
+
+    /* The spare. waitBriefly gives the enable cycle time to reach it and do
+     * the wrong thing if the not-needed/failed split regresses - both flags
+     * are set from the same callback the two assertions above already proved
+     * is firing, so a silent "callback never ran at all" cannot pass this. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&dynamicBufferedRcbFailed),
+            "brcbDyn was simply not needed (no cluster left to cover) - it must NOT be reported as a "
+            "failed RCB, which is what the pre-split code did for every spare slot on the device");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbEnabled,
+            "brcbDyn got no dataset, so it must not have been enabled either - if this fires, the fixture "
+            "is no longer producing the not-needed case (check the cluster count vs. Dyn slot count)");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -2025,6 +2107,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances);
     RUN_TEST(test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly);
     RUN_TEST(test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable);
+    RUN_TEST(test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed);
 
     return UNITY_END();
 }
