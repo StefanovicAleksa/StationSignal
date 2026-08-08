@@ -244,7 +244,13 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   logged explicitly (`ensureLnFallbackMemberRefCache`/`refreshPulledMemberRefCache`) whenever it
   actually fires, precisely so a dataset-identity churn silently swallowing real changes (see
   `CHANGELOG.md`) is diagnosable from a log capture instead of looking identical to "nothing ever
-  changed."
+  changed." **Identity is content, not just name**: `refreshPulledMemberRefCache` (tiers 2/3) also
+  compares the freshly-fetched real member list against what's already cached
+  (`memberReferenceSetsDiffer`), forcing the same rebuild even when the dataset *name* is unchanged —
+  a same-named dataset whose real content silently changed since it was last cached (deleted and
+  recreated differently by an earlier connect cycle, another tool, or a device-side reset) is just as
+  stale as a name change, and a name-only check alone can't see it (see `CHANGELOG.md`'s
+  stale-dataset-content entry).
   **Quality pairing**: a candidate that didn't individually qualify still forwards if any other
   candidate resolving to the same "anchor" (nearest structural ancestor, an ancestor walk over
   `$`-segments, not a last-`$` strip) does — value drags quality along and vice versa; a `NULL`
@@ -281,24 +287,47 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `CHANGELOG.md`) — **4. SELF-CREATE** —
   only if nothing above worked, `getOrCreateDynamicDataset` resolves this target's own
   whole-device cluster (`buildWholeDeviceClusterPlan`, computed once per connect cycle):
-  `IedModel_getReportableAttributeReferencesForWholeDevice` walks every LD/LN in the model, then
-  `MmsReportClientUseCases_chunkReferencesAcrossWholeDevice` (maxAttributes known — DO-atomic
-  bin-packing that may legitimately span several different LNs' leaves in one dataset) or
-  `_groupReferencesByLn` (maxAttributes unknown — one dataset per LN, unbounded, the safe default
-  with no known size bound to combine LNs against) packs it into clusters assigned to Dyn slots in
-  **round-robin-by-LN order** (`roundRobinSlotsByLn`) — one slot per distinct LN before any LN gets
-  a second, not raw model-declaration order — found against a real device where one LN alone (12
-  spare Dyn RCB instances) sorted ahead of every other LN/LD in declaration order, so a linear
-  assignment exhausted the device's entire cluster budget on that one LN before any other LN, let
-  alone another logical device, ever got a slot; whichever list (clusters or round-robined slots)
-  runs out first is logged plainly, never silently dropped. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
+  `IedModel_getReportableAttributeReferencesForWholeDevice` walks every LD/LN in the model, then —
+  maxAttributes known — `MmsReportClientUseCases_buildBreadthFirstPerLnClusters` packs it into
+  per-LN, maxAttributes-bounded chunks (never spans two LNs in one dataset — unlike the
+  now-unused-here `_chunkReferencesAcrossWholeDevice`, which still exists for
+  `chunkReferencesByDoGroup`-style callers that DO want cross-LN merging), interleaved
+  breadth-first across LNs (one chunk per distinct LN before any LN gets a second) and capped by
+  `explicitClusterBudget` — this cycle's real Dyn+Conf dataset-count budget, computed *before*
+  clustering in `enableAllTargets` (an upper bound only, never the authoritative gate — that stays
+  `createAndCacheDynamicDatasetAttempt`'s own per-attempt check). Found against a real device where
+  the OLD minimal-dataset-count strategy (merge freely across LNs to use as few datasets as
+  possible) left ~164 of 178 real RCB instances permanently disabled even though the device's real
+  budget could fund far more — this spends that real headroom on breadth (distinct-LN coverage)
+  instead. maxAttributes unknown — `_groupReferencesByLn` (one dataset per LN, unbounded, the safe
+  default with no known size bound to combine LNs against), uncapped by budget too (no safe way to
+  sub-chunk an oversized LN without a known size bound). Either way, clusters are assigned to Dyn
+  slots **LN-keyed, not blind positional pairing**: each cluster first tries a still-unused slot
+  whose own `lnReference` matches the cluster's LN, falling back to any remaining slot only once
+  that LN's own slots are exhausted — so an LN's own spare RCB instance reports that LN's own data
+  whenever one's available, not whatever the two lists' orderings happen to line up with by
+  coincidence. Whichever list (clusters or slots) runs out first is logged plainly, never silently
+  dropped. A prior, simpler fairness attempt (`roundRobinSlotsByLn`, reordering only the slot side)
+  was tried and reverted — see `CHANGELOG.md` — after it exposed the stale-dataset-content bug the
+  tier-4/tier-2-3 verification fixes above now close; this breadth-first/LN-keyed/budget-aware
+  redesign landed only after those fixes. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
   on disconnect, no cleanup needed). **Buffered**: domain/VMD-scoped (`"$"`-joined, no `@` prefix,
   persists past the connection) instead — an association-scoped dataset is destroyed the instant
   the connection closes, which a real device (and the vendored reference server) rejects assigning
   to a buffered RCB outright (`IED_ERROR_OBJECT_VALUE_INVALID`/error 32 — confirmed against a real
   SIPROTEC 6MD device, see `CHANGELOG.md`). A later `createDataSet` attempt for the same
-  (deterministic, per-target) name legitimately fails with `IED_ERROR_OBJECT_EXISTS` — treated as a
-  successful reuse, not an error.
+  (deterministic, per-target) name legitimately fails with `IED_ERROR_OBJECT_EXISTS` — **verified,
+  not blindly trusted, before being treated as a successful reuse**: `verifyOrCorrectReusedDataset`
+  fetches the existing dataset's REAL member list (`IedConnection_getDataSetDirectory`, the same
+  fetch+convert shape tiers 2/3 already use) and compares it as a set against this cycle's own
+  computed intent. Equal (including a benign reorder) just corrects the local chunk in place to the
+  fetched order. Genuinely different — the real bug this closes, see `CHANGELOG.md`'s
+  stale-dataset-content entry — deletes the stale dataset (`disableUnbindAndDeleteDataset`: unbind
+  then delete, same precondition tier `Stop`'s own cleanup already needed) and retries the create
+  once, now genuinely fresh; if delete itself fails, falls back to reusing the stale dataset anyway
+  with the local chunk corrected to match its real (mismatched) content, so decode stays internally
+  consistent — logged loudly either way. A verify-directory fetch failure fails open (trusts the
+  reuse unverified, same posture as every other tier's own directory-fetch failure handling).
   **Real budget, not a blind guess**: `discoverExistingServerDatasets` (once per connect cycle,
   scoped to Dyn targets' own LDs, via `IedConnection_getLogicalDeviceDataSets`) feeds
   `MmsReportClientUseCases_computeInitialDynamicDatasetBudget`, correcting SCL's declared

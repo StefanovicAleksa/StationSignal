@@ -332,6 +332,38 @@ LinkedList
 MmsReportClientUseCases_groupReferencesByLn(const char* const* references, int count);
 
 /*
+ * Budget-aware middle ground between the two functions above: like
+ * _groupReferencesByLn, never merges two different LNs' leaves into one
+ * dataset (each resulting chunk is LN-homogeneous) - but like
+ * _chunkReferencesAcrossWholeDevice, still bounds each chunk to
+ * maxAttributes, sub-chunking any one LN's own leaf set into more than one
+ * chunk if it doesn't fit in one. The chunk ORDER is breadth-first across
+ * LNs, not grouped by LN: every LN contributes its own first chunk before any
+ * LN contributes a second, round-robin, until every LN's own chunks are
+ * exhausted or `maxClusters` chunks have been produced in total (`< 0` =
+ * uncapped) - so when the caller can only afford N total datasets, this
+ * maximizes how many DISTINCT LNs get at least one dataset of their own,
+ * instead of `_chunkReferencesAcrossWholeDevice`'s own posture of minimizing
+ * total dataset count by freely merging small LNs together (that function
+ * remains the right choice when the caller's goal is coverage-at-minimum-
+ * dataset-count rather than breadth-of-distinct-LNs-covered - see
+ * mms_report_client_connection.c's buildWholeDeviceClusterPlan for which one
+ * it actually uses and why).
+ *
+ * `references` spanning multiple LNs (e.g.
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own output),
+ * relies on the same per-LN contiguous-run ordering guarantee
+ * `_groupReferencesByLn` already depends on. `maxAttributes <= 0` or
+ * `count <= 0` returns an empty list. Same ownership contract as the other
+ * chunk/group functions above: caller owns the outer list AND must
+ * LinkedList_destroyDeep(innerList, free) each inner list before
+ * LinkedList_destroyStatic(outerList).
+ */
+LinkedList
+MmsReportClientUseCases_buildBreadthFirstPerLnClusters(const char* const* references, int count,
+        int maxAttributes, int maxClusters);
+
+/*
  * Converts one ACSI dot/bracket-form dataset member reference
  * ("LD/LN.DO[.SDO...].DA[FC]", the exact shape IedConnection_getDataSetDirectory
  * returns) into this feature's own "$"-joined member-reference convention

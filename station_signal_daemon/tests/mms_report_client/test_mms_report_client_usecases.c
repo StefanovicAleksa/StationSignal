@@ -2094,6 +2094,119 @@ test_groupReferencesByLn_nullReferences_returnsEmpty(void) {
     LinkedList_destroyStatic(groups);
 }
 
+/* ---- buildBreadthFirstPerLnClusters (budget-aware breadth-first-across-LNs
+ * clustering - unlike chunkReferencesAcrossWholeDevice, never merges two
+ * LNs' leaves into one dataset; unlike groupReferencesByLn, still bounds
+ * each LN's own chunk(s) to maxAttributes and interleaves the resulting
+ * chunk order breadth-first across LNs instead of grouping by LN) ---- */
+
+void
+test_buildBreadthFirstPerLnClusters_interleavesAcrossLnsBeforeGoingDeeper(void) {
+    /* LLN0 has 6 leaves (two DO groups of 3, so two chunks under
+     * maxAttributes=3); GGIO1 has 3 leaves (one chunk). Breadth-first means
+     * LLN0's FIRST chunk and GGIO1's only chunk both come before LLN0's
+     * SECOND chunk - proves this is not just groupReferencesByLn's own
+     * grouped-by-LN order with a size cap bolted on. */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q", "IED1LD1/LLN0$ST$Mod$t",
+        "IED1LD1/LLN0$ST$Beh$stVal", "IED1LD1/LLN0$ST$Beh$q", "IED1LD1/LLN0$ST$Beh$t",
+        "IED1LD1/GGIO1$ST$Ind1$stVal", "IED1LD1/GGIO1$ST$Ind1$q", "IED1LD1/GGIO1$ST$Ind1$t",
+    };
+    LinkedList clusters = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(refs, 9, 3, -1);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, LinkedList_size(clusters), "two LLN0 chunks + one GGIO1 chunk");
+
+    LinkedList c0 = (LinkedList) LinkedList_getData(LinkedList_getNext(clusters));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("IED1LD1/LLN0$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(c0)),
+            "LLN0's own first chunk (Mod) comes first");
+
+    LinkedList c1 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(clusters)));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("IED1LD1/GGIO1$ST$Ind1$stVal", (char*) LinkedList_getData(LinkedList_getNext(c1)),
+            "GGIO1's own only chunk comes SECOND, before LLN0 gets a second chunk - breadth-first, "
+            "not grouped-by-LN");
+
+    LinkedList c2 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(LinkedList_getNext(clusters))));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("IED1LD1/LLN0$ST$Beh$stVal", (char*) LinkedList_getData(LinkedList_getNext(c2)),
+            "LLN0's own second chunk (Beh) comes last, after every LN's first chunk");
+
+    LinkedList clusterElement = LinkedList_getNext(clusters);
+    while (clusterElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(clusterElement), free);
+        clusterElement = LinkedList_getNext(clusterElement);
+    }
+    LinkedList_destroyStatic(clusters);
+}
+
+void
+test_buildBreadthFirstPerLnClusters_neverMergesTwoLnsEvenWhenTheyWouldFit(void) {
+    /* Two tiny LNs (1 member each) that chunkReferencesAcrossWholeDevice
+     * would happily merge into one shared chunk under a generous
+     * maxAttributes - this function must keep them in separate, LN-homogeneous
+     * chunks regardless, since that's the whole point vs. the other packer. */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/blkGGIO2$ST$Ind1$stVal",
+    };
+    LinkedList clusters = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(refs, 2, 10, -1);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, LinkedList_size(clusters),
+            "two different LNs must stay in two separate chunks, never merged");
+
+    LinkedList clusterElement = LinkedList_getNext(clusters);
+    while (clusterElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(clusterElement), free);
+        clusterElement = LinkedList_getNext(clusterElement);
+    }
+    LinkedList_destroyStatic(clusters);
+}
+
+void
+test_buildBreadthFirstPerLnClusters_maxClustersCapsTotalOutput(void) {
+    /* Same 3-LLN0-plus-1-GGIO1-chunk shape as the interleave test above (3
+     * total chunks uncapped), but capped to 2 - proves the cap stops the
+     * sweep early rather than being ignored, and doesn't leak the
+     * never-emitted third chunk (ASAN/valgrind would catch a leak here if
+     * this test is ever run under one, even though the assertion itself
+     * only checks the count). */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q", "IED1LD1/LLN0$ST$Mod$t",
+        "IED1LD1/LLN0$ST$Beh$stVal", "IED1LD1/LLN0$ST$Beh$q", "IED1LD1/LLN0$ST$Beh$t",
+        "IED1LD1/GGIO1$ST$Ind1$stVal", "IED1LD1/GGIO1$ST$Ind1$q", "IED1LD1/GGIO1$ST$Ind1$t",
+    };
+    LinkedList clusters = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(refs, 9, 3, 2);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, LinkedList_size(clusters), "capped at maxClusters=2, not the uncapped 3");
+
+    LinkedList clusterElement = LinkedList_getNext(clusters);
+    while (clusterElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(clusterElement), free);
+        clusterElement = LinkedList_getNext(clusterElement);
+    }
+    LinkedList_destroyStatic(clusters);
+}
+
+void
+test_buildBreadthFirstPerLnClusters_maxAttributesZeroOrNegative_returnsEmpty(void) {
+    const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+
+    LinkedList clustersZero = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(refs, 1, 0, -1);
+    TEST_ASSERT_NOT_NULL(clustersZero);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(clustersZero));
+    LinkedList_destroyStatic(clustersZero);
+
+    LinkedList clustersNeg = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(refs, 1, -1, -1);
+    TEST_ASSERT_NOT_NULL(clustersNeg);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(clustersNeg));
+    LinkedList_destroyStatic(clustersNeg);
+}
+
+void
+test_buildBreadthFirstPerLnClusters_nullReferences_returnsEmpty(void) {
+    LinkedList clusters = MmsReportClientUseCases_buildBreadthFirstPerLnClusters(NULL, 3, 10, -1);
+    TEST_ASSERT_NOT_NULL(clusters);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(clusters));
+    LinkedList_destroyStatic(clusters);
+}
+
 /* ---- convertAcsiRefToMemberReference (tier-2 pulled-dataset ACSI -> this
  * feature's own "$"-joined member-reference conversion - the mirror image of
  * buildWireMemberReferences above, and NOT the same as
@@ -2462,6 +2575,12 @@ main(void) {
     RUN_TEST(test_groupReferencesByLn_noSizeCap_oneLnWithManyLeavesStaysOneGroup);
     RUN_TEST(test_groupReferencesByLn_countZeroOrNegative_returnsEmpty);
     RUN_TEST(test_groupReferencesByLn_nullReferences_returnsEmpty);
+
+    RUN_TEST(test_buildBreadthFirstPerLnClusters_interleavesAcrossLnsBeforeGoingDeeper);
+    RUN_TEST(test_buildBreadthFirstPerLnClusters_neverMergesTwoLnsEvenWhenTheyWouldFit);
+    RUN_TEST(test_buildBreadthFirstPerLnClusters_maxClustersCapsTotalOutput);
+    RUN_TEST(test_buildBreadthFirstPerLnClusters_maxAttributesZeroOrNegative_returnsEmpty);
+    RUN_TEST(test_buildBreadthFirstPerLnClusters_nullReferences_returnsEmpty);
 
     RUN_TEST(test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix);
     RUN_TEST(test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar);

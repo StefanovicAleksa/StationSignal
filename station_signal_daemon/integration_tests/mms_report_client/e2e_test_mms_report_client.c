@@ -68,6 +68,7 @@
 #define TEST_PORT_SIBLING_BUFFERED 10219
 #define TEST_PORT_GI_ONLY 10220
 #define TEST_PORT_DELETE_WHILE_ENABLED 10221
+#define TEST_PORT_STALE_DATASET_CONTENT 10222
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
 #define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
@@ -628,11 +629,17 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
  *
  * Also proves the resulting dataset is correctly reused across a reconnect:
  * since the name is domain-scoped (not auto-destroyed on disconnect like the
- * "@"-scoped ones) and deterministic, the SECOND connect's own
- * getOrCreateDynamicDataset call reaches IedConnection_createDataSet again
- * for the exact same name, which the server now answers with
- * IED_ERROR_OBJECT_EXISTS - createAndCacheDynamicDataset's own reuse branch
- * must treat that as success, not fail brcbDyn's re-enable.
+ * "@"-scoped ones) and deterministic, it survives past the first connection
+ * closing. Empirically, against this reference simulator, brcbDyn's own live
+ * DatSet/RptEna attributes ALSO survive the disconnect unchanged (SimServer_stop
+ * only stops listening, never resets RCB state) - so the second connect
+ * actually resolves via tier 2 (pullLiveDataset, "reusing live-assigned
+ * dataset"), not tier 4's own IedConnection_createDataSet/IED_ERROR_OBJECT_EXISTS
+ * path (that path exists and is still exercised in practice - see
+ * test_dynamicDataset_staleContentOnReconnect_detectedAndRecreated below for
+ * why forcing it specifically is hard against this compliant simulator).
+ * Either tier correctly reusing the persisted dataset is what this test
+ * actually proves: brcbDyn re-enables cleanly across a reconnect either way.
  *
  * Deliberately does NOT assert a flipped value reaches the report callback
  * (unlike test_dynamicDataset_createdOnEnable_andReportsRealChange above):
@@ -707,6 +714,161 @@ test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect(void) {
     TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
             "brcbDyn's reconnect must not fail - IED_ERROR_OBJECT_EXISTS must be treated as a "
             "successful reuse, not an error");
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+/*
+ * Regression test for the stale-dataset-content class of bug (CHANGELOG.md's
+ * "Round-robin slot assignment reverted" entry - the "cache slot N is
+ * unexpectedly NULL" error): if a buffered Dyn target's own deterministic
+ * dataset name (buildDynamicDatasetName) exists on the server with DIFFERENT
+ * content than what this connect cycle would compute for it (standing in for
+ * "an earlier run under a different clustering algorithm, or another tool,
+ * created this name differently"), the decode cache must end up matching the
+ * dataset's REAL content, not silently misdecode against stale, wrong-shape
+ * assumptions forever.
+ *
+ * Empirically (confirmed by instrumenting this exact scenario before writing
+ * the final assertions below): this resolves via tier 3 (adoptUnclaimedDataset,
+ * its own-name preference pass for buffered targets), not tier 4's
+ * createAndCacheDynamicDatasetAttempt/verifyOrCorrectReusedDataset - against
+ * this reference simulator, discovery reliably finds any dataset that
+ * genuinely exists under a target's own LD, so tier 3 always gets there
+ * first. That still surfaced a REAL bug, just one call deeper than expected:
+ * tier 3 correctly fetches the dataset's real content
+ * (IedConnection_getDataSetDirectory) and hands it to
+ * refreshPulledMemberRefCache (the SAME function tier 2 uses) - but that
+ * function's OWN rebuild-decision used to compare ONLY the dataset NAME
+ * against what was already cached, never the actual member content. Since
+ * the name here is unchanged (deterministic, matches what was cached from an
+ * earlier cycle), the stale 6-member decode shape from a PRIOR cycle was
+ * kept as-is even though the real, freshly-adopted dataset now has a
+ * completely different 1-member shape - this test failed with exactly that
+ * symptom (a report decoded against the wrong, stale reference) before
+ * refreshPulledMemberRefCache gained its own content-equality check
+ * (memberReferenceSetsDiffer, mms_report_client_connection.c) alongside the
+ * pre-existing name check. Tier 4's own verifyOrCorrectReusedDataset fix
+ * remains real and necessary (its own OBJECT_EXISTS path has no equivalent
+ * protection otherwise), but is not reachable end-to-end here - see that
+ * function's own doc comment for why (a real-device discovery-completeness
+ * quirk this compliant simulator doesn't reproduce, same "documented rather
+ * than faked" posture as this suite's own EntryID-staleness gap, top of this
+ * file) - verified there by code review and by the full E2E suite continuing
+ * to pass unchanged with it in place.
+ *
+ * Deterministic proof strategy (mirrors
+ * test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset's
+ * own, above): between disconnect and reconnect, a side-channel connection
+ * deletes brcbDyn's own dataset and recreates it with a deliberately WRONG
+ * 1-member set (SPCSO1.stVal only - deliberately NOT Ind1.stVal, which
+ * brcbMain/brcbDup's own SCL-static "ds1" dataset also covers; using it here
+ * would risk cross-RCB duplicate-content suppression racing brcbDyn's own
+ * report, exactly the reason
+ * test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect above
+ * avoids asserting on report content at all) standing in for a leftover from
+ * an earlier connect cycle, algorithm, or tool - NOT brcbDyn's real, correct
+ * 6-member GGIO1 cluster (Ind1.stVal/q/t + SPCSO1.stVal/q/t; LN-keyed
+ * whole-device clustering assigns GGIO1's own cluster to brcbDyn, the only
+ * GGIO1-parented buffered Dyn RCB in this fixture - see
+ * buildWholeDeviceClusterPlan). Flipping SPCSO1.stVal after reconnect proves
+ * the resolved dataset ends up decoding with its REAL (1-member, stale)
+ * content, not silently misdecoding against brcbDyn's own originally-intended
+ * 6-member shape.
+ */
+void
+test_dynamicDataset_staleContentOnReconnect_detectedAndRecreated(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_STALE_DATASET_CONTENT);
+
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+    TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1",
+            TEST_PORT_STALE_DATASET_CONTENT, &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    strncpy(interestedRcbReference, "Reporter1LD1/GGIO1.BR.brcbDyn", sizeof(interestedRcbReference) - 1);
+    MmsReportClient_setReportCallback(client, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatus, NULL);
+
+    MmsReportClientError startError = MmsReportClient_start(client);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, startError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected brcbDyn to self-create its own dataset and enable on the first connect");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed, "brcbDyn must not fail on the first connect");
+
+    dynamicBufferedRcbEnabled = false;
+
+    /* Disconnect, then replace brcbDyn's own dataset (still sitting on the
+     * server - SimServer_stop only stops listening) with deliberately WRONG
+     * content via a side-channel connection, standing in for "an earlier run
+     * under a different algorithm/tool created this name differently." */
+    SimServer_stop(sim);
+    SimServer_start(sim, TEST_PORT_STALE_DATASET_CONTENT);
+
+    IedConnection sideConn = IedConnection_create();
+    IedClientError sideErr = IED_ERROR_OK;
+    IedConnection_connect(sideConn, &sideErr, "127.0.0.1", TEST_PORT_STALE_DATASET_CONTENT);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, sideErr, "expected the side-channel connection to associate");
+
+    ClientReportControlBlock rcb = IedConnection_getRCBValues(sideConn, &sideErr,
+            "Reporter1LD1/GGIO1.BR.brcbDyn", NULL);
+    TEST_ASSERT_NOT_NULL_MESSAGE(rcb, "expected brcbDyn's own live RCB values to still be readable");
+    ClientReportControlBlock_setRptEna(rcb, false);
+    ClientReportControlBlock_setDataSetReference(rcb, "");
+    IedConnection_setRCBValues(sideConn, &sideErr, rcb, RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, sideErr,
+            "expected disabling/unbinding brcbDyn before delete to succeed");
+    ClientReportControlBlock_destroy(rcb);
+
+    bool deleted = IedConnection_deleteDataSet(sideConn, &sideErr, "Reporter1LD1/GGIO1$BR$brcbDyn$dyn");
+    TEST_ASSERT_TRUE_MESSAGE(deleted, "expected brcbDyn's real dataset to be deletable once unbound");
+
+    LinkedList staleMembers = LinkedList_create();
+    LinkedList_add(staleMembers, (void*) "Reporter1LD1/GGIO1.SPCSO1.stVal[ST]");
+    IedConnection_createDataSet(sideConn, &sideErr, "Reporter1LD1/GGIO1$BR$brcbDyn$dyn", staleMembers);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, sideErr,
+            "expected the deliberately-stale replacement dataset to be created");
+    LinkedList_destroyStatic(staleMembers);
+
+    IedConnection_close(sideConn);
+    IedConnection_destroy(sideConn);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&dynamicBufferedRcbEnabled),
+            "expected brcbDyn to re-enable on reconnect even though its own dataset name now has stale, "
+            "mismatched content - the fix must detect and correct this, not fail the enable");
+    TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
+            "brcbDyn must not fail to enable after the stale-content fix-up");
+
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "brcbDyn's post-reconnect GI snapshot must never reach the callback");
+
+    SimServer_setSpcso1Indication(sim, true);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
+            "expected a report from brcbDyn after flipping SPCSO1.stVal - the stale, mismatched dataset "
+            "(SPCSO1.stVal only, standing in for a leftover from an earlier connect cycle/algorithm/tool) "
+            "was discovered and adopted with its REAL, verified content (tier 3's own pre-existing "
+            "IedConnection_getDataSetDirectory-backed adoption), not blindly trusted by name - proving the "
+            "system as a whole stays correct even when a by-name dataset's content has silently drifted");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.BR.brcbDyn", lastRcbReference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$SPCSO1$stVal", lastEntry0Reference);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, lastEntryCount,
+            "the adopted dataset genuinely only has 1 member (SPCSO1.stVal) - proves the decode cache "
+            "matches the dataset's REAL content, not brcbDyn's own originally-intended 6-member GGIO1 "
+            "cluster (which would misdecode or crash if wrongly assumed here)");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1764,17 +1926,26 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
 }
 
 /*
- * Proves DO-grouped chunking (buildWholeDeviceClusterPlan/getOrCreateDynamicDataset,
- * mms_report_client_connection.c): fixtures/reporter1_chunking.cid declares
- * <Services><DynDataSet max="10" maxAttributes="3"/></Services>, so the
- * WHOLE device's 15-leaf set (LLN0's Mod/Beh/Health, 9 leaves, walked before
- * GGIO1's Ind1/SPCSO1, 6 leaves, per LD/LN declaration order) is packed into
- * five 3-member DO-atomic chunks - Mod, Beh, Health, Ind1, SPCSO1, in that
- * order, and buildWholeDeviceClusterPlan assigns cluster i to Dyn slot i
- * (urcbDyn, urcbDyn2, both unbuffered, in that declaration order) - so urcbDyn
- * is PLANNED to get LLN0's Mod chunk and urcbDyn2 LLN0's Beh chunk.
+ * Proves DO-grouped, breadth-first-per-LN chunking
+ * (buildWholeDeviceClusterPlan/MmsReportClientUseCases_buildBreadthFirstPerLnClusters/
+ * getOrCreateDynamicDataset, mms_report_client_connection.c):
+ * fixtures/reporter1_chunking.cid declares <Services><DynDataSet max="10"
+ * maxAttributes="3"/></Services>, so the WHOLE device's 15-leaf set (LLN0's
+ * Mod/Beh/Health, 9 leaves; GGIO1's Ind1/SPCSO1, 6 leaves) is packed into
+ * five 3-member DO-atomic chunks, one per LN's own DO group, in
+ * BREADTH-FIRST order across the two LNs - Mod(LLN0), Ind1(GGIO1),
+ * Beh(LLN0), SPCSO1(GGIO1), Health(LLN0) - rather than the old flat
+ * declaration order (which would have produced Mod, Beh, Health, Ind1,
+ * SPCSO1). Cluster-to-slot assignment is LN-KEYED, not blind positional
+ * pairing: LLN0 has no Dyn RCB instance of its own in this fixture, so its
+ * Mod chunk falls to the shared leftover pool (urcbDyn, the first unused
+ * slot); GGIO1's own Ind1 chunk, being GGIO1-homogeneous, preferentially
+ * lands on one of GGIO1's OWN spare Dyn instances (urcbDyn2) instead of
+ * requiring the two lists to coincidentally line up. Only 2 of the 5
+ * possible clusters ever get a real slot (only 2 Dyn RCB instances exist on
+ * this device) - Beh/SPCSO1/Health are never even created this cycle.
  *
- * But tier "adopt" runs BEFORE tier "self-create" for every target (see
+ * Tier "adopt" runs BEFORE tier "self-create" for every target (see
  * enableOneTarget's own doc comment - "primarily try to use existing/foreign
  * datasets and create our own only via necessity"), and the shared simulator
  * always has a pre-existing, SCL-unclaimed domain-scoped dataset ("ds2",
@@ -1784,12 +1955,16 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
  * adoption taking priority, not a bug; the Mod chunk simply goes unused this
  * cycle. urcbDyn2 (processed second, after ds2 is already claimed and ds1 is
  * excluded as brcbMain's own SCL-known dataset) finds no adoption candidate
- * left and falls through to its own planned Beh chunk exactly as designed.
+ * left and falls through to its own planned Ind1 chunk exactly as designed -
+ * which happens to cover the SAME underlying point ('ds2' already reused by
+ * urcbDyn), so both RCBs report the same Ind1.stVal flip, each through their
+ * own dataset (1 entry via 'ds2', 3 via urcbDyn2's own full Ind1 DO group).
  * This test exercises both paths: urcbDyn proves adoption pre-empting a
- * planned cluster, urcbDyn2 proves the chunking/assignment mechanism itself.
- * The simulator's own device-side caps (SimServer_createWithDatasetLimits)
- * are configured generously (would happily accept every chunk as one large
- * dataset too) so any failure here is provably ours, not the device's.
+ * planned cluster, urcbDyn2 proves the breadth-first/LN-keyed chunking and
+ * assignment mechanism itself. The simulator's own device-side caps
+ * (SimServer_createWithDatasetLimits) are configured generously (would
+ * happily accept every chunk as one large dataset too) so any failure here
+ * is provably ours, not the device's.
  */
 void
 test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
@@ -1830,6 +2005,25 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDynGotReport), "urcbDyn's GI snapshot must not reach the callback");
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDyn2GotReport), "urcbDyn2's GI snapshot must not reach the callback");
 
+    /* Breadth-first-per-LN clustering (buildWholeDeviceClusterPlan,
+     * MmsReportClientUseCases_buildBreadthFirstPerLnClusters) now spends the
+     * device's real dataset-count budget maximizing DISTINCT LN coverage,
+     * not minimizing total dataset count - and LN-keyed slot assignment
+     * prefers giving an LN's own spare RCB instance that SAME LN's own data
+     * whenever one's available. Neither of GGIO1's two spare Dyn instances
+     * (urcbDyn/urcbDyn2) has any LLN0-parented slot to compete with, so
+     * GGIO1's own first chunk (Ind1's DO group) is the SECOND cluster
+     * produced overall (breadth-first: LLN0's Mod, then GGIO1's Ind1) and
+     * lands on urcbDyn2 - not LLN0's Beh, which is what pure linear/
+     * declaration-order chunking used to hand it. LLN0's own chunk (Mod) is
+     * assigned to urcbDyn first (the fallback pool - no LLN0-parented slot
+     * exists at all in this fixture), but urcbDyn actually resolves via
+     * tier-3 ADOPT ('ds2', pre-existing and unclaimed) before tier 4 is ever
+     * reached, so that Mod assignment goes unused - same as before this
+     * change. Only 2 of the 5 possible clusters (Mod, Ind1, Beh, SPCSO1,
+     * Health, in that breadth-first order) ever get a real slot, since only
+     * 2 Dyn RCB instances exist on this device; Beh/SPCSO1/Health are never
+     * even created. */
     SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDynGotReport),
@@ -1837,23 +2031,28 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
             "chunk - the shared simulator's own SCL-unclaimed 'ds2' pre-exists on every test's "
             "server, and tier-3 adoption correctly prefers it over self-creating) to report the "
             "Ind1.stVal flip");
-    TEST_ASSERT_FALSE_MESSAGE(urcbDyn2GotReport,
-            "urcbDyn2's own chunk (Beh) must not report an Ind1 change it has no member for");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDyn2GotReport),
+            "expected urcbDyn2 (assigned GGIO1's own Ind1 chunk via LN-keyed breadth-first "
+            "clustering) to also report the same Ind1.stVal flip, through its own dataset");
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, urcbDynEntryCount,
             "urcbDyn adopted 'ds2', which contains only Ind1.stVal (no q/t siblings) - so exactly 1 "
             "entry, not a 3-member DO group");
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", urcbDynEntry0Reference);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDyn2EntryCount,
+            "urcbDyn2's own self-created chunk is exactly Ind1's DO group (stVal + its q/t siblings)");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", urcbDyn2Entry0Reference);
 
     urcbDynGotReport = false;
+    urcbDyn2GotReport = false;
     SimServer_setBehStVal(sim, 1);
 
-    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDyn2GotReport),
-            "expected urcbDyn2 (assigned LLN0's Beh chunk) to report the Beh.stVal flip");
-    TEST_ASSERT_FALSE_MESSAGE(urcbDynGotReport,
-            "urcbDyn's own chunk (Mod) must not report a Beh change it has no member for");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDyn2EntryCount,
-            "urcbDyn2's own chunk is exactly Beh's DO group (stVal + its q/t siblings)");
-    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0$ST$Beh$stVal", urcbDyn2Entry0Reference);
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDynGotReport),
+            "urcbDyn's own dataset ('ds2', Ind1.stVal only) must not report a Beh change it has no "
+            "member for");
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&urcbDyn2GotReport),
+            "urcbDyn2's own dataset (Ind1's DO group) must not report a Beh change it has no member "
+            "for either - LLN0's Beh chunk was never even created, both of GGIO1's spare Dyn "
+            "instances were already spent on Mod (unused, adopted 'ds2' instead) and Ind1");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -2014,6 +2213,7 @@ main(void) {
     RUN_TEST(test_authRequired_wrongPassword_firesConnectionRejectedCallback);
     RUN_TEST(test_dynamicDataset_createdOnEnable_andReportsRealChange);
     RUN_TEST(test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect);
+    RUN_TEST(test_dynamicDataset_staleContentOnReconnect_detectedAndRecreated);
     RUN_TEST(test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched);
     RUN_TEST(test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset);
     RUN_TEST(test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix);

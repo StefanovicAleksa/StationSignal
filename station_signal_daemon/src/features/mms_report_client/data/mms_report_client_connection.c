@@ -32,6 +32,13 @@
  * TEMPORARILY_UNAVAILABLE retry above without reordering the file. */
 static void interruptibleSleep(MmsReportClientHandle handle, uint32_t totalMs);
 
+/* Defined further down in this file (near cleanupOrphanedDatasets, its other
+ * call site) - forward-declared here so createAndCacheDynamicDatasetAttempt's
+ * stale-dataset-content fix can reuse it without reordering the file. See its
+ * own doc comment further down for the full reasoning. */
+static bool disableUnbindAndDeleteDataset(MmsReportClientHandle handle, const char* targetObjectReference,
+        const char* datasetName);
+
 /*
  * Fires while an internal state mutex is held (iec61850_client.h) - must not
  * call IedConnection_getState or any blocking IedConnection_* function from
@@ -426,10 +433,186 @@ logGranularCreateDataSetError(MmsReportClientHandle handle, const char* datasetN
     LinkedList_destroyDeep(specs, (LinkedListValueDeleteFunction) MmsVariableAccessSpecification_destroy);
 }
 
+/* Set-equality (order-insensitive) between a char** array (arrayCount
+ * entries) and a LinkedList of char* - shared by refreshPulledMemberRefCache's
+ * own content-staleness check (tiers 2/3) and verifyOrCorrectReusedDataset's
+ * own OBJECT_EXISTS verification (tier 4) - both need "did the real member
+ * set change under a name this client already has cached/is about to trust,"
+ * just fed different inputs (a decode cache's own current shape vs. a
+ * freshly-fetched dataset directory). Bounded by maxAttributes in practice
+ * (realistically tens of members), so an O(n^2) scan is fine - no need for a
+ * hash set here. */
+static bool
+memberReferenceSetsDiffer(const char* const* arrayRefs, int arrayCount, LinkedList listRefs) {
+    if (arrayCount != (listRefs ? LinkedList_size(listRefs) : 0)) return true;
+    for (int i = 0; i < arrayCount; i++) {
+        bool found = false;
+        LinkedList element = listRefs ? LinkedList_getNext(listRefs) : NULL;
+        while (element) {
+            if (strcmp((char*) LinkedList_getData(element), arrayRefs[i]) == 0) {
+                found = true;
+                break;
+            }
+            element = LinkedList_getNext(element);
+        }
+        if (!found) return true;
+    }
+    return false;
+}
+
+/* Forces ensureLnFallbackMemberRefCache's own needsRebuild check to fire on
+ * its very next call for this RCB, regardless of whether the dataset NAME
+ * changed - used after verifyOrCorrectReusedDataset below corrects a chunk's
+ * member list in place: since the dataset name itself is unchanged (that's
+ * the whole reason the corruption was invisible - see this feature's own
+ * CHANGELOG entry on the stale-dataset-content bug), the plain name-compare
+ * ensureLnFallbackMemberRefCache normally relies on would otherwise never
+ * re-fire once already stamped from an earlier, wrong resolution. */
+static void
+invalidateMemberRefCacheFingerprint(MmsReportClientHandle handle, const char* rcbReference) {
+    MmsReportClientMemberRefCacheEntry* entry = lookupMemberRefCacheByRcb(handle, rcbReference);
+    if (!entry) return;
+    Semaphore_wait(handle->memberRefCacheLock);
+    free(entry->resolvedDatasetReference);
+    entry->resolvedDatasetReference = NULL;
+    Semaphore_post(handle->memberRefCacheLock);
+}
+
+typedef enum {
+    STALE_DATASET_VERIFY_UNVERIFIABLE, /* couldn't fetch/convert the live directory - trust reuse unchanged,
+                                           same fail-open posture as every other tier's own directory-fetch
+                                           failure handling (pullLiveDataset/tryAdoptCandidate). */
+    STALE_DATASET_VERIFY_OK,           /* content confirmed equal (or corrected in place to match reality) -
+                                           caller proceeds exactly as today's plain reuse. */
+    STALE_DATASET_VERIFY_DELETED,      /* content genuinely differed and the stale dataset was deleted -
+                                           caller should retry createDataSet once, now genuinely fresh. */
+} StaleDatasetVerifyResult;
+
+/* The fix for this feature's one unverified reuse path: `datasetName` just
+ * came back IED_ERROR_OBJECT_EXISTS from createDataSet, about to be trusted
+ * outright on the (usually true, but NOT ALWAYS - see CHANGELOG.md)
+ * assumption that a deterministic name implies deterministic content. This
+ * fetches the dataset's REAL member list (IedConnection_getDataSetDirectory +
+ * MmsReportClientUseCases_convertAcsiRefToMemberReference - identical
+ * fetch+convert shape to tiers 2/3's own pullLiveDataset/tryAdoptCandidate)
+ * and compares it, as a SET (order-insensitive - a benign reorder from an
+ * older clustering algorithm run isn't dangerous once the cache is always
+ * rebuilt from the fetched list below), against `requestedMemberReferences`
+ * (this cycle's own locally-computed intent for this dataset).
+ *
+ * Equal: `chunkToCorrect` (may be NULL - defensive only, every real caller
+ * has one) is overwritten in place with the FETCHED list, so the downstream
+ * decode cache always matches real wire order regardless of whether it
+ * already happened to - then the cache fingerprint is invalidated (see
+ * invalidateMemberRefCacheFingerprint above) so that correction actually
+ * gets picked up even on a connect cycle after the very first one. No delete
+ * needed; caller treats this as a normal reuse.
+ *
+ * Different: this is the real bug case - some earlier connect cycle (an
+ * older code version, or just a different run) created this exact
+ * deterministic name with different content. Deletes it via
+ * disableUnbindAndDeleteDataset (unbinding first is required - see that
+ * function's own doc comment) so the caller can retry a genuinely fresh
+ * create. If the delete itself fails (device refuses, e.g. still bound to
+ * some OTHER RCB this client doesn't know about), falls back to reuse
+ * anyway - `chunkToCorrect` is still overwritten with the fetched
+ * (mismatched) list so the decode cache stays internally consistent (no
+ * NULL-slot crash), but this RCB's real coverage now differs from what
+ * clustering intended for it until a device-side reset, logged loudly.
+ *
+ * KNOWN E2E-COVERAGE GAP, documented rather than faked (same posture as
+ * integration_tests/mms_report_client/e2e_test_mms_report_client.c's own
+ * EntryID-staleness gap, see that file's top-of-file comment): reaching this
+ * function at all requires tiers 2 (pullLiveDataset) and 3 (adoptUnclaimedDataset)
+ * to BOTH miss a dataset that genuinely already exists on the server under
+ * this exact name - against the vendored reference simulator, both tiers
+ * reliably catch it first (tier 2 because RCB live state survives a
+ * disconnect there; tier 3 because discoverExistingServerDatasets reliably
+ * finds anything genuinely present), so this branch could not be forced
+ * end-to-end without patching vendored third_party_src (a Hard Rule
+ * violation). Verified instead by code review and by confirming the full
+ * E2E suite still passes unchanged with this function in place. */
+static StaleDatasetVerifyResult
+verifyOrCorrectReusedDataset(MmsReportClientHandle handle, const char* cacheKey, const char* logRcbReference,
+        const char* datasetName, const char* const* requestedMemberReferences, int requestedMemberCount,
+        DynamicDatasetChunkAssignment* chunkToCorrect) {
+    IedClientError err = IED_ERROR_OK;
+    bool isDeletable = false;
+    LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, datasetName, &isDeletable);
+    if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
+        fprintf(stderr, "[mms_report_client] could not verify existing dataset '%s' for '%s' (error %d) - "
+                "reusing it unverified, same as before this check existed\n", datasetName, logRcbReference, err);
+        if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
+        return STALE_DATASET_VERIFY_UNVERIFIABLE;
+    }
+
+    LinkedList fetchedMemberRefs = LinkedList_create();
+    LinkedList acsiElement = LinkedList_getNext(acsiMembers);
+    while (acsiElement) {
+        char* acsiRef = (char*) LinkedList_getData(acsiElement);
+        char* memberRef = MmsReportClientUseCases_convertAcsiRefToMemberReference(acsiRef);
+        if (memberRef) LinkedList_add(fetchedMemberRefs, memberRef);
+        acsiElement = LinkedList_getNext(acsiElement);
+    }
+    LinkedList_destroyDeep(acsiMembers, free);
+
+    if (LinkedList_size(fetchedMemberRefs) == 0) {
+        fprintf(stderr, "[mms_report_client] existing dataset '%s' for '%s' had no wire-convertible members "
+                "on verification - reusing it unverified, same as before this check existed\n",
+                datasetName, logRcbReference);
+        LinkedList_destroyDeep(fetchedMemberRefs, free);
+        return STALE_DATASET_VERIFY_UNVERIFIABLE;
+    }
+
+    bool setEqual = !memberReferenceSetsDiffer(requestedMemberReferences, requestedMemberCount, fetchedMemberRefs);
+
+    if (!setEqual) {
+        fprintf(stderr, "[mms_report_client] existing dataset '%s' for '%s' has %d member(s) on the server but "
+                "this cycle's own computed content has %d - stale content from an earlier connect cycle, "
+                "deleting and recreating\n", datasetName, logRcbReference, LinkedList_size(fetchedMemberRefs),
+                requestedMemberCount);
+
+        if (disableUnbindAndDeleteDataset(handle, cacheKey, datasetName)) {
+            LinkedList_destroyDeep(fetchedMemberRefs, free);
+            return STALE_DATASET_VERIFY_DELETED;
+        }
+
+        fprintf(stderr, "[mms_report_client] could not delete stale dataset '%s' for '%s' - reusing it anyway "
+                "with corrected local decode shape; this RCB's real coverage differs from what was intended "
+                "until a device-side reset\n", datasetName, logRcbReference);
+    }
+
+    /* Equal, or mismatched-but-undeletable: either way, make the local decode
+     * shape match the FETCHED reality, not just re-stamp what was already
+     * requested - covers a benign reorder too, not just the mismatch case. */
+    if (chunkToCorrect) {
+        for (int i = 0; i < chunkToCorrect->memberCount; i++) free(chunkToCorrect->memberReferences[i]);
+        free(chunkToCorrect->memberReferences);
+
+        int newCount = LinkedList_size(fetchedMemberRefs);
+        char** newArray = newCount > 0 ? calloc((size_t) newCount, sizeof(char*)) : NULL;
+        int ai = 0;
+        LinkedList moveElement = LinkedList_getNext(fetchedMemberRefs);
+        while (moveElement) {
+            if (newArray) newArray[ai++] = (char*) LinkedList_getData(moveElement);
+            else free(LinkedList_getData(moveElement));
+            moveElement = LinkedList_getNext(moveElement);
+        }
+        chunkToCorrect->memberReferences = newArray;
+        chunkToCorrect->memberCount = newArray ? newCount : 0;
+        LinkedList_destroyStatic(fetchedMemberRefs); /* strings moved into newArray above, or freed inline */
+    } else {
+        LinkedList_destroyDeep(fetchedMemberRefs, free);
+    }
+
+    invalidateMemberRefCacheFingerprint(handle, cacheKey);
+    return STALE_DATASET_VERIFY_OK;
+}
+
 static const char*
 createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
-        int memberCount, bool buffered) {
+        int memberCount, bool buffered, DynamicDatasetChunkAssignment* chunkToCorrectOnMismatch) {
     /* Which pool this attempt draws from is exactly what `buffered` already
      * means here - see DynamicDatasetSession's own doc comment. Checked
      * before any wire work so an already-exhausted pool costs nothing beyond
@@ -479,16 +662,48 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
     /* Domain-scoped names are deterministic and persist past a connection
      * (unlike the "@"-scoped ones), so a reconnect - or a prior daemon run
      * that never got to clean up - can legitimately find this exact name
-     * already on the server. Treat that as a successful reuse, not a
-     * failure: the member list is derived the same deterministic way every
-     * time (every FC=ST/MX leaf under this LN, or this target's own chunk),
-     * so an existing dataset by this name is presumed to already have the
-     * right shape. */
+     * already on the server. This USED TO be treated as a successful reuse
+     * on the bare assumption that a deterministic name implies deterministic
+     * content - proven false against a real device (see CHANGELOG.md's
+     * stale-dataset-content entry: a prior connect cycle, under a different
+     * clustering algorithm run, can leave this exact name behind with
+     * DIFFERENT content) - so this now actually verifies before trusting it,
+     * the same way tiers 2/3 already verify a pulled/adopted dataset's real
+     * content instead of just assuming it. */
     bool reusedExisting = false;
     if (err == IED_ERROR_OBJECT_EXISTS && buffered) {
-        fprintf(stderr, "[mms_report_client] dynamic dataset '%s' for LN '%s' already exists on the server - "
-                "reusing it\n", datasetName, logLnReference);
-        reusedExisting = true;
+        StaleDatasetVerifyResult verifyResult = verifyOrCorrectReusedDataset(handle, cacheKey, logRcbReference,
+                datasetName, memberReferences, memberCount, chunkToCorrectOnMismatch);
+
+        if (verifyResult == STALE_DATASET_VERIFY_DELETED) {
+            /* Stale predecessor deleted - retry the create once, now
+             * genuinely fresh (wireRefs above was already destroyed, so
+             * rebuilt fresh here; cheap and only ever reached on this rare,
+             * already-logged-loudly path). */
+            LinkedList retryWireRefs = MmsReportClientUseCases_buildWireMemberReferences(memberReferences, memberCount);
+            if (retryWireRefs && LinkedList_size(retryWireRefs) > 0) {
+                IedConnection_createDataSet(handle->connection, &err, datasetName, retryWireRefs);
+            } else {
+                err = IED_ERROR_OBJECT_VALUE_INVALID; /* couldn't even rebuild the wire form - terminal below */
+            }
+            if (retryWireRefs) LinkedList_destroyDeep(retryWireRefs, free);
+
+            if (err == IED_ERROR_OK) {
+                fprintf(stderr, "[mms_report_client] recreated dynamic dataset '%s' for LN '%s' after deleting "
+                        "its stale, mismatched-content predecessor\n", datasetName, logLnReference);
+                /* reusedExisting stays false - this is a genuinely new create, falls through to the normal
+                 * "created" bookkeeping (budget decrement, cache insert) below exactly like any other. */
+            } else {
+                fprintf(stderr, "[mms_report_client] recreate after stale-dataset delete failed for '%s': "
+                        "error %d - '%s' will not report\n", datasetName, err, logRcbReference);
+                free(datasetName);
+                return NULL;
+            }
+        } else {
+            fprintf(stderr, "[mms_report_client] dynamic dataset '%s' for LN '%s' already exists on the server - "
+                    "reusing it\n", datasetName, logLnReference);
+            reusedExisting = true;
+        }
     } else if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] dynamic dataset creation failed for LN '%s': error %d - "
                 "'%s' will not report\n", logLnReference, err, logRcbReference);
@@ -556,9 +771,9 @@ createAndCacheDynamicDatasetAttempt(MmsReportClientHandle handle, DynamicDataset
 static const char*
 createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession* session, const char* cacheKey,
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
-        int memberCount, bool buffered) {
+        int memberCount, bool buffered, DynamicDatasetChunkAssignment* chunkToCorrectOnMismatch) {
     const char* result = createAndCacheDynamicDatasetAttempt(handle, session, cacheKey, logLnReference,
-            logRcbReference, memberReferences, memberCount, buffered);
+            logRcbReference, memberReferences, memberCount, buffered, chunkToCorrectOnMismatch);
     if (result || buffered) return result;
 
     fprintf(stderr, "[mms_report_client] association-specific dataset creation failed for LN '%s' - falling "
@@ -566,7 +781,7 @@ createAndCacheDynamicDataset(MmsReportClientHandle handle, DynamicDatasetSession
             "outright, independent of quota - see CHANGELOG.md) - this dataset will NOT be cleaned up "
             "automatically and permanently consumes device quota until a device-side reset\n", logLnReference);
     return createAndCacheDynamicDatasetAttempt(handle, session, cacheKey, logLnReference, logRcbReference,
-            memberReferences, memberCount, true);
+            memberReferences, memberCount, true, chunkToCorrectOnMismatch);
 }
 
 /*
@@ -612,7 +827,7 @@ getOrCreateDynamicDataset(MmsReportClientHandle handle, ReportControlBlockTarget
      * attempt from its own Conf-budget-gated fallback. */
     return createAndCacheDynamicDataset(handle, session, target->objectReference, target->lnReference,
             target->objectReference, (const char* const*) chunk->memberReferences, chunk->memberCount,
-            target->buffered);
+            target->buffered, chunk);
 }
 
 /* Cheap, purely-local skip: true if datasetRef looks like a name
@@ -778,15 +993,28 @@ pullLiveDataset(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
 /*
  * Rebuilds (or confirms up to date) this RCB's memberRefCache entry to match
  * `liveDataset`'s real shape - called from enableOneTarget on every
- * (re)connect where pullLiveDataset (tier 2) succeeded. Compares liveDataset
+ * (re)connect where pullLiveDataset (tier 2) or adoptUnclaimedDataset (tier 3)
+ * succeeded - both feed this same function their own freshly-fetched real
+ * member list (memberRefs), never trusted blindly.
+ *
+ * Rebuild decision has TWO parts, not just one: (1) compares liveDataset
  * against the cache entry's own resolvedDatasetReference fingerprint
- * (MmsReportClientMemberRefCacheEntry's own doc comment): identical string
- * means this entry's shape (built on a PRIOR connect from this exact dataset)
- * is still correct - a no-op, the expected common case on every reconnect
- * once a stable commissioning-tool-assigned dataset has been pulled once.
- * Different (including NULL - i.e. never resolved from a live connection
- * before, this RCB's very first successful pull) means the previously-cached
- * shape can no longer be trusted: rebuilds a fresh
+ * (MmsReportClientMemberRefCacheEntry's own doc comment) - a NAME change
+ * always forces a rebuild outright; (2) even when the name is UNCHANGED,
+ * also compares `memberRefs` (this call's freshly-fetched real content)
+ * against the cache entry's own currently-cached member list
+ * (memberReferenceSetsDiffer) - a same-name dataset whose real content
+ * silently changed since it was last cached (e.g. deleted and recreated
+ * differently by an earlier connect cycle, another tool, or a device-side
+ * reset, while this client's own in-memory cache never got the memo) is
+ * just as stale as a name change, and is exactly the mechanism documented in
+ * CHANGELOG.md's stale-dataset-content entry - a name-only check alone
+ * cannot see it. Only the common case - name unchanged AND content
+ * unchanged - is a true no-op, the expected steady state on every reconnect
+ * once a stable dataset has been pulled once.
+ *
+ * Either check tripping means the previously-cached shape can no longer be
+ * trusted: rebuilds a fresh
  * MmsReportClientMemberRefCacheEntry from memberRefs via
  * MmsReportClientUseCases_buildMemberRefCacheEntry, then swaps every
  * array-shaped field into the EXISTING entry in place, under
@@ -822,11 +1050,25 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
     if (!entry) return;
 
     Semaphore_wait(handle->memberRefCacheLock);
-    bool needsRebuild = !entry->resolvedDatasetReference || strcmp(entry->resolvedDatasetReference, liveDataset) != 0;
+    bool nameChanged = !entry->resolvedDatasetReference || strcmp(entry->resolvedDatasetReference, liveDataset) != 0;
+    /* Same-name reuse is NOT automatically safe - see this function's own
+     * doc comment on the stale-dataset-content fix. Only checked when the
+     * name matches (a name CHANGE already forces a rebuild on its own,
+     * regardless of content) - cheap, since it's the common no-op case that
+     * needs to stay fast on every reconnect. */
+    bool contentChanged = !nameChanged
+            && memberReferenceSetsDiffer((const char* const*) entry->memberReferences, entry->memberCount, memberRefs);
+    bool needsRebuild = nameChanged || contentChanged;
     char* previousDatasetReference = (needsRebuild && entry->resolvedDatasetReference)
             ? MmsReportClientUtils_safeStringDup(entry->resolvedDatasetReference) : NULL;
     Semaphore_post(handle->memberRefCacheLock);
     if (!needsRebuild) return;
+
+    if (contentChanged) {
+        fprintf(stderr, "[mms_report_client] '%s' dataset '%s' content changed since it was last cached "
+                "(same name, different real member list) - rebuilding decode shape\n",
+                target->objectReference, liveDataset);
+    }
 
     int count = memberRefs ? LinkedList_size(memberRefs) : 0;
     if (count <= 0) {
@@ -1476,6 +1718,16 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
     int currentTrgOps = ClientReportControlBlock_getTrgOps(rcb);
     int neededTrgOps = TRG_OPT_DATA_CHANGED | TRG_OPT_QUALITY_CHANGED | TRG_OPT_GI;
     bool trgOpsNeedsUpdate = (currentTrgOps & neededTrgOps) != neededTrgOps;
+    /* Logged unconditionally, not just on failure - a real device was found
+     * with TrgOps reading back 0x0 at the very end of enable for some RCBs
+     * but not others, reproducibly across separate connect cycles, and
+     * nothing in this function previously logged the INITIAL value read here
+     * (before any write) or distinguished "never needed a write" from "wrote
+     * it, step 3's check passed, but it still ended up 0x0 anyway" - both
+     * looked identical from the logs alone. This line plus step 3's own
+     * now-unconditional logging (below) closes that gap. */
+    fprintf(stderr, "[mms_report_client] '%s' initial live TrgOps=0x%x, needed=0x%x, update needed=%d\n",
+            target->objectReference, currentTrgOps, neededTrgOps, trgOpsNeedsUpdate);
     if (trgOpsNeedsUpdate) {
         ClientReportControlBlock_setTrgOps(rcb, currentTrgOps | neededTrgOps);
         mask |= RCB_ELEMENT_TRG_OPS;
@@ -1816,6 +2068,13 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
      * reporting is broken outright. */
     if (trgOpsNeedsUpdate) {
         int liveTrgOps = readLiveTrgOps(handle, target->objectReference);
+        /* Logged unconditionally (both branches), not just on mismatch - see
+         * the initial-read log line above for why: without logging the
+         * MATCH case too, "step 1 write never needed a retry" and "we simply
+         * never checked because trgOpsNeedsUpdate was false" were
+         * indistinguishable from a log capture alone. */
+        fprintf(stderr, "[mms_report_client] '%s' step 3 check: live TrgOps=0x%x right after RptEna enable "
+                "(needed=0x%x)\n", target->objectReference, liveTrgOps, neededTrgOps);
         if ((liveTrgOps & neededTrgOps) != neededTrgOps) {
             fprintf(stderr, "[mms_report_client] '%s' step 1's TrgOps write reported success but the device's "
                     "live TrgOps (0x%x) doesn't reflect the requested bits (0x%x) - retrying TrgOps now that "
@@ -1881,154 +2140,80 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, 
  * just a narrow case traded for fewer datasets overall on devices where Dyn
  * creation never succeeds anyway.
  *   - KNOWN (>0): the whole device's leaf list is packed via
- *     MmsReportClientUseCases_chunkReferencesAcrossWholeDevice - a single
- *     resulting cluster may legitimately span several different (small) LNs'
- *     worth of leaves when they fit together, maximizing how much of the
- *     device fits within a tight total dataset-count budget.
+ *     MmsReportClientUseCases_buildBreadthFirstPerLnClusters, bounded both by
+ *     maxAttributes (never spans two LNs in one dataset - see that
+ *     function's own doc comment for why this changed from the old
+ *     cross-LN-merging packer) AND by `explicitClusterBudget` (this cycle's
+ *     real remaining Dyn+Conf dataset-count budget, computed by the caller
+ *     BEFORE this function runs - see enableAllTargets - so clustering
+ *     spends that real budget maximizing DISTINCT LN coverage instead of
+ *     minimizing total dataset count the way the old cross-LN packer did.
+ *     Found against a real device where the old minimal-count strategy only
+ *     ever enabled ~14 of 178 real RCBs - the device's own leaf data fit in
+ *     14 datasets, but the device's REAL dataset-count budget (SCL DynDataSet
+ *     max + ConfDataSet max) was ~45, headroom the old strategy never spent.
  *   - UNKNOWN (-1 or 0 on both caps, e.g. no <Services> at all, or a
  *     dynamically-built online-discovered model): MmsReportClientUseCases_groupReferencesByLn
- *     packs one dataset per LN instead, unbounded size - the same per-LN
- *     granularity this feature always used before whole-device clustering
- *     existed, since combining multiple LNs into one dataset without a known
- *     size bound risks an oversized, doomed createDataSet call.
+ *     packs one dataset per LN instead, unbounded size, uncapped by
+ *     explicitClusterBudget too (no known size bound to safely sub-chunk an
+ *     oversized LN against, so there is nothing this cap could safely trim
+ *     without risking splitting one LN's own atomic DO group) - the same
+ *     per-LN granularity this feature always used before whole-device
+ *     clustering existed.
  *
- * Clusters are assigned to Dyn slots in ROUND-ROBIN-BY-LN order (via
- * roundRobinSlotsByLn, just below), not raw handle->targets declaration
- * order - found against a real device: one LN alone (MDMEAS/LLN0, 12 spare
- * Dyn RCB instances) sorted ahead of every other LN in handle->targets' own
- * order, so a purely linear assignment exhausted this device's entire
- * 14-cluster budget on that ONE LN before any OTHER LN - let alone another
- * logical device entirely (MDCTRL, MDEXT) - ever got a single slot, even
- * though plenty of the device's own reportable data (on those other LNs)
- * was never packed into any cluster and had nothing to do with why they were
- * skipped. Round-robining spends the budget on BREADTH (covering as many
- * distinct LNs as possible) before DEPTH (giving an already-covered LN a
- * second slot) - this was always the stated intent ("covering LDs/LNs that
- * have zero RCBs of their own", see this function's own top doc comment)
- * but linear order could silently defeat it whenever one LN alone had
- * enough spare slots to absorb the whole budget. Whichever list (clusters or
- * round-robined slots) runs out first determines the shortfall, logged
+ * NOTE: explicitClusterBudget is a planning-time upper bound only, meant to
+ * stop wildly overplanning (e.g. building hundreds of never-fundable chunk
+ * structs) - it is NOT the authoritative budget gate. That remains
+ * createAndCacheDynamicDatasetAttempt's own per-attempt, per-pool check
+ * (buffered draws from Conf, unbuffered from Dyn falling back to Conf), which
+ * this cap can only ever overestimate (dynBudget+confBudget can't predict a
+ * specific cluster's real pool split ahead of assignment) - never read this
+ * cap as a promise that every planned cluster will actually get created.
+ *
+ * Clusters are assigned to Dyn slots LN-KEYED, not blind positional pairing:
+ * each cluster (LN-homogeneous by construction in the KNOWN branch, always
+ * was in the UNKNOWN branch) first tries to claim a still-unused slot whose
+ * OWN target->lnReference matches the cluster's LN, falling back to any
+ * remaining unused slot (any LN, handle->targets' own order) only once that
+ * LN's own slots are exhausted - so "an LN's own RCB instance reports that
+ * LN's own data" whenever that LN has a spare slot, rather than depending on
+ * two independently-ordered lists (handle->targets' declaration order vs.
+ * the leaf walk's own order) happening to line up by coincidence. Whichever
+ * list (clusters or slots) runs out first determines the shortfall, logged
  * plainly either way - never a silent drop: more clusters than slots means
  * part of the device goes unreported this cycle; more slots than clusters
  * means some RCB instances simply have nothing left to assign (the device is
- * already fully covered) - both outcomes unchanged by this reordering, only
- * WHICH specific slots land in which bucket changes.
+ * already fully covered, or explicitClusterBudget capped how much of it
+ * could be planned this cycle).
  *
  * Recomputed fresh every connect cycle rather than cached on the handle: a
  * pure function of already-static data (handle->iedModel, handle->targets,
- * both fixed for the client's whole lifetime), so recomputation is cheap
- * (string work over the model's own size, no wire calls) and idempotent -
- * not worth growing sMmsReportClientHandle for.
+ * both fixed for the client's whole lifetime) plus this cycle's own budget
+ * snapshot, so recomputation is cheap (string work over the model's own
+ * size, no wire calls) and idempotent - not worth growing
+ * sMmsReportClientHandle for.
  */
-/*
- * Reorders `slots` (every Dyn target on the whole device, in whatever order
- * buildWholeDeviceClusterPlan's own caller-facing doc comment above
- * describes) into round-robin-by-LN order: one slot from each distinct LN
- * (target->lnReference), in first-seen order, then a second slot from each
- * LN that still has one left, and so on - instead of the raw order `slots`
- * arrived in, where an LN with many spare Dyn RCB instances can otherwise
- * exhaust an entire cluster budget before any OTHER LN gets a single one.
- * See buildWholeDeviceClusterPlan's own doc comment for the real-device
- * finding this was built to fix.
- *
- * Returns a NEW LinkedList of the same BORROWED ReportControlBlockTarget*
- * pointers `slots` itself holds (destroy with LinkedList_destroyStatic,
- * exactly like `slots`) - never mutates or frees `slots`, which the caller
- * still owns and destroys separately. Falls back to `slots`' own original
- * order (still correct, just not fair) if a bucket-cursor allocation fails -
- * losing the fairness improvement on an allocation failure is preferable to
- * losing slots outright.
- */
-static LinkedList
-roundRobinSlotsByLn(LinkedList slots) {
-    LinkedList result = LinkedList_create();
-    if (!slots) return result;
-
-    /* Buckets: one LinkedList of borrowed ReportControlBlockTarget* per
-     * distinct LN, in first-seen order. `lnNames` is the parallel list of
-     * owned LN-name strings, used only for bucket-key comparison - same
-     * index/order as `buckets`. */
-    LinkedList lnNames = LinkedList_create();
-    LinkedList buckets = LinkedList_create();
-
-    LinkedList slotElement = LinkedList_getNext(slots);
-    while (slotElement) {
-        ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotElement);
-        slotElement = LinkedList_getNext(slotElement);
-
-        const char* ln = t->lnReference ? t->lnReference : "";
-
-        LinkedList nameElement = LinkedList_getNext(lnNames);
-        LinkedList bucketElement = LinkedList_getNext(buckets);
-        LinkedList targetBucket = NULL;
-        while (nameElement) {
-            if (strcmp((char*) LinkedList_getData(nameElement), ln) == 0) {
-                targetBucket = (LinkedList) LinkedList_getData(bucketElement);
-                break;
-            }
-            nameElement = LinkedList_getNext(nameElement);
-            bucketElement = LinkedList_getNext(bucketElement);
-        }
-
-        if (!targetBucket) {
-            targetBucket = LinkedList_create();
-            LinkedList_add(buckets, targetBucket);
-            LinkedList_add(lnNames, MmsReportClientUtils_safeStringDup(ln));
-        }
-        LinkedList_add(targetBucket, t);
-    }
-
-    int bucketCount = LinkedList_size(buckets);
-    LinkedList* cursors = bucketCount > 0 ? calloc((size_t) bucketCount, sizeof(LinkedList)) : NULL;
-    if (!cursors) {
-        /* Allocation failure (or zero buckets, i.e. empty `slots`) - fall
-         * back to draining buckets one at a time, in first-seen LN order,
-         * rather than losing any slots. Still correct, just not fair. */
-        LinkedList bucketElement = LinkedList_getNext(buckets);
-        while (bucketElement) {
-            LinkedList bucket = (LinkedList) LinkedList_getData(bucketElement);
-            LinkedList innerElement = LinkedList_getNext(bucket);
-            while (innerElement) {
-                LinkedList_add(result, LinkedList_getData(innerElement));
-                innerElement = LinkedList_getNext(innerElement);
-            }
-            bucketElement = LinkedList_getNext(bucketElement);
-        }
-    } else {
-        int idx = 0;
-        LinkedList bucketElement = LinkedList_getNext(buckets);
-        while (bucketElement) {
-            cursors[idx++] = LinkedList_getNext((LinkedList) LinkedList_getData(bucketElement));
-            bucketElement = LinkedList_getNext(bucketElement);
-        }
-
-        bool anyRemaining = true;
-        while (anyRemaining) {
-            anyRemaining = false;
-            for (int i = 0; i < bucketCount; i++) {
-                if (cursors[i]) {
-                    LinkedList_add(result, LinkedList_getData(cursors[i]));
-                    cursors[i] = LinkedList_getNext(cursors[i]);
-                    anyRemaining = true;
-                }
-            }
-        }
-        free(cursors);
-    }
-
-    LinkedList bucketCleanup = LinkedList_getNext(buckets);
-    while (bucketCleanup) {
-        LinkedList_destroyStatic((LinkedList) LinkedList_getData(bucketCleanup));
-        bucketCleanup = LinkedList_getNext(bucketCleanup);
-    }
-    LinkedList_destroyStatic(buckets);
-    LinkedList_destroyDeep(lnNames, free);
-
-    return result;
+/* "LD/LN" prefix only (everything before the first '$') from one "$"-joined
+ * member reference - mirrors mms_report_client_usecases.c's own file-local
+ * extractLnKey (not exported; this feature's own established convention of
+ * small, data-layer-local duplicates over cross-file sharing - see e.g.
+ * lookupMemberRefCacheByRcb's own doc comment). Used to find which LN a
+ * breadth-first cluster belongs to, for LN-keyed slot assignment below.
+ * Caller owns the returned string (free); NULL input returns NULL. */
+static char*
+extractLnKeyFromMemberReference(const char* memberReference) {
+    if (!memberReference) return NULL;
+    const char* fcStart = strchr(memberReference, '$');
+    size_t len = fcStart ? (size_t) (fcStart - memberReference) : strlen(memberReference);
+    char* key = malloc(len + 1);
+    if (!key) return NULL;
+    memcpy(key, memberReference, len);
+    key[len] = '\0';
+    return key;
 }
 
 static LinkedList
-buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
+buildWholeDeviceClusterPlan(MmsReportClientHandle handle, int explicitClusterBudget) {
     LinkedList plan = LinkedList_create();
     if (!handle->targets) return plan;
 
@@ -2073,13 +2258,16 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     /* Prefer ConfDataSet's own declared maxAttributes over DynDataSet's - see
      * this function's own doc comment for why. Falls back to DynDataSet's
      * (today's behavior) if Conf isn't declared, then to per-LN grouping
-     * (below) if neither is - same UNKNOWN posture as before this change. */
+     * (below) if neither is - same UNKNOWN posture as before this change.
+     * KNOWN case now spends explicitClusterBudget on breadth (distinct-LN
+     * coverage) rather than minimizing total dataset count - see this
+     * function's own doc comment. UNKNOWN case is uncapped, unchanged. */
     int confMaxAttributes = IedModel_getConfDataSetMaxAttributes(handle->iedModel);
     int dynMaxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
     int maxAttributes = confMaxAttributes > 0 ? confMaxAttributes : dynMaxAttributes;
     LinkedList clusterLists = (maxAttributes > 0)
-            ? MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(
-                    (const char* const*) leafArray, leafCount, maxAttributes)
+            ? MmsReportClientUseCases_buildBreadthFirstPerLnClusters(
+                    (const char* const*) leafArray, leafCount, maxAttributes, explicitClusterBudget)
             : MmsReportClientUseCases_groupReferencesByLn((const char* const*) leafArray, leafCount);
     free(leafArray);
     LinkedList_destroyDeep(wholeDeviceLeaves, free);
@@ -2088,25 +2276,60 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
     int slotCount = LinkedList_size(slots);
     int assignedClusters = 0;
 
-    /* Round-robin-by-LN, not raw declaration order - see this function's own
-     * doc comment above and roundRobinSlotsByLn's own doc comment. `slots`
-     * itself (and slotCount, already captured above) is untouched - still
-     * owned and destroyed by this function exactly as before. */
-    LinkedList roundRobinSlots = roundRobinSlotsByLn(slots);
+    /* LN-keyed slot assignment (see this function's own doc comment) - plain
+     * arrays for easy "first still-unused slot matching this LN" scanning;
+     * slotCount is realistically hundreds at most, so an O(slotCount) scan
+     * per cluster is cheap (not worth a hash map here). */
+    ReportControlBlockTarget** slotArray = calloc((size_t) slotCount, sizeof(ReportControlBlockTarget*));
+    bool* slotUsed = calloc((size_t) slotCount, sizeof(bool));
+    if (slotArray && slotUsed) {
+        int si = 0;
+        for (LinkedList el = LinkedList_getNext(slots); el; el = LinkedList_getNext(el)) {
+            slotArray[si++] = (ReportControlBlockTarget*) LinkedList_getData(el);
+        }
+    }
 
     LinkedList clusterElement = LinkedList_getNext(clusterLists);
-    LinkedList slotElement = LinkedList_getNext(roundRobinSlots);
     while (clusterElement) {
-        if (!slotElement) {
+        LinkedList clusterMembers = (LinkedList) LinkedList_getData(clusterElement);
+
+        char* clusterLnKey = NULL;
+        LinkedList firstMemberElement = clusterMembers ? LinkedList_getNext(clusterMembers) : NULL;
+        if (firstMemberElement) {
+            clusterLnKey = extractLnKeyFromMemberReference((char*) LinkedList_getData(firstMemberElement));
+        }
+
+        ReportControlBlockTarget* assignedTarget = NULL;
+        if (slotArray && slotUsed) {
+            if (clusterLnKey) {
+                for (int i = 0; i < slotCount; i++) {
+                    if (!slotUsed[i] && slotArray[i]->lnReference
+                            && strcmp(slotArray[i]->lnReference, clusterLnKey) == 0) {
+                        assignedTarget = slotArray[i];
+                        slotUsed[i] = true;
+                        break;
+                    }
+                }
+            }
+            if (!assignedTarget) {
+                for (int i = 0; i < slotCount; i++) {
+                    if (!slotUsed[i]) {
+                        assignedTarget = slotArray[i];
+                        slotUsed[i] = true;
+                        break;
+                    }
+                }
+            }
+        }
+        free(clusterLnKey);
+
+        if (!assignedTarget) {
             fprintf(stderr, "[mms_report_client] whole-device clustering produced %d dataset(s) but this "
                     "device only has %d RCB instance(s) with no SCL-assigned dataset - %d cluster(s) "
                     "(part of the device's data) will not be reported this cycle\n",
                     totalClusters, slotCount, totalClusters - assignedClusters);
             break;
         }
-
-        LinkedList clusterMembers = (LinkedList) LinkedList_getData(clusterElement);
-        ReportControlBlockTarget* assignedTarget = (ReportControlBlockTarget*) LinkedList_getData(slotElement);
 
         int memberCount = LinkedList_size(clusterMembers);
         char** memberArray = calloc((size_t) memberCount, sizeof(char*));
@@ -2130,15 +2353,17 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
 
         assignedClusters++;
         clusterElement = LinkedList_getNext(clusterElement);
-        slotElement = LinkedList_getNext(slotElement);
     }
 
-    if (!clusterElement && slotElement) {
+    if (!clusterElement && assignedClusters < slotCount) {
         fprintf(stderr, "[mms_report_client] whole-device clustering produced %d dataset(s) for %d "
                 "available RCB instance(s) - %d instance(s) have nothing left to report (the device's "
                 "own reportable data is already fully covered)\n",
-                totalClusters, slotCount, slotCount - totalClusters);
+                totalClusters, slotCount, slotCount - assignedClusters);
     }
+
+    free(slotArray);
+    free(slotUsed);
 
     LinkedList clusterCleanup = LinkedList_getNext(clusterLists);
     while (clusterCleanup) {
@@ -2146,7 +2371,6 @@ buildWholeDeviceClusterPlan(MmsReportClientHandle handle) {
         clusterCleanup = LinkedList_getNext(clusterCleanup);
     }
     LinkedList_destroyStatic(clusterLists);
-    LinkedList_destroyStatic(roundRobinSlots);
     LinkedList_destroyStatic(slots);
 
     return plan;
@@ -2183,6 +2407,64 @@ cacheContainsDatasetName(LinkedList cache, const char* datasetName) {
         element = LinkedList_getNext(element);
     }
     return false;
+}
+
+/*
+ * Shared single-pair disable-unbind-delete primitive: if `target`'s CURRENT
+ * live DatSet is `datasetName`, disables RptEna and clears DatSet on it first
+ * (both required before deletion - disabling RptEna alone is not enough,
+ * confirmed against the reference server, IED_ERROR_OBJECT_CONSTRAINT_CONFLICT/35,
+ * see test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable), then
+ * attempts IedConnection_deleteDataSet. Best-effort throughout: any failure
+ * just leaves the dataset behind, logged via the returned false, never fatal
+ * to the caller.
+ *
+ * Extracted from cleanupOrphanedDatasets' own per-candidate body (still its
+ * only other reasoning source below) - MmsReportClientConnection_stop's own
+ * bulk two-pass version (disable+unbind EVERY target against EVERY tracked
+ * name in one pass, then delete every tracked name in a second) is a
+ * different enough shape (bulk vs. single pair) that folding it into this
+ * same single-pair primitive isn't attempted here; this repo's own
+ * convention already tolerates this class of small duplication (see e.g.
+ * lookupMemberRefCacheByRcb's own doc comment on the ACSE-auth-setup
+ * duplication precedent).
+ *
+ * Takes the target's own objectReference directly (not a whole
+ * ReportControlBlockTarget*) - the only field either caller actually needs,
+ * and the stale-dataset-content fix in createAndCacheDynamicDatasetAttempt
+ * only has that string on hand, not a target pointer.
+ */
+static bool
+disableUnbindAndDeleteDataset(MmsReportClientHandle handle, const char* targetObjectReference,
+        const char* datasetName) {
+    IedClientError disableErr = IED_ERROR_OK;
+    ClientReportControlBlock rcb = IedConnection_getRCBValues(handle->connection, &disableErr,
+            targetObjectReference, NULL);
+    if (rcb) {
+        const char* liveDataSet = ClientReportControlBlock_getDataSetReference(rcb);
+        if (liveDataSet && strcmp(liveDataSet, datasetName) == 0) {
+            ClientReportControlBlock_setRptEna(rcb, false);
+            ClientReportControlBlock_setDataSetReference(rcb, "");
+            IedConnection_setRCBValues(handle->connection, &disableErr, rcb,
+                    RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
+            if (disableErr != IED_ERROR_OK) {
+                fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
+                        "before delete: error %d\n", targetObjectReference, datasetName, disableErr);
+            } else {
+                fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from dataset '%s' before delete\n",
+                        targetObjectReference, datasetName);
+            }
+        }
+        ClientReportControlBlock_destroy(rcb);
+    }
+
+    IedClientError deleteErr = IED_ERROR_OK;
+    if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
+        fprintf(stderr, "[mms_report_client] could not delete dataset '%s': error %d - left behind\n",
+                datasetName, deleteErr);
+        return false;
+    }
+    return true;
 }
 
 /*
@@ -2252,52 +2534,18 @@ cleanupOrphanedDatasets(MmsReportClientHandle handle, DynamicDatasetSession* ses
         if (!isOurs) continue;
 
         /* Same fix as MmsReportClientConnection_stop's own graceful cleanup:
-         * disabling RptEna alone is not enough to unblock deletion
-         * (confirmed against the reference server -
-         * IED_ERROR_OBJECT_CONSTRAINT_CONFLICT/35, see
-         * test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable) -
-         * the RCB's own DatSet attribute continuing to point at this orphan
-         * is itself the constraint. A crashed daemon never reached
-         * MmsReportClientConnection_stop's own disable+unbind at all, so
+         * a crashed daemon never reached that code path at all, so
          * matchedTarget's RptEna/DatSet may genuinely still be live
          * server-side here exactly as if this were the graceful path - this
-         * proactive pass needs the identical two-step sequence before its
-         * own delete attempt below. Scoped the same way too: only touches
-         * matchedTarget's RCB if its CURRENT live DatSet actually is this
-         * candidate, never blind. */
-        IedClientError disableErr = IED_ERROR_OK;
-        ClientReportControlBlock orphanRcb = IedConnection_getRCBValues(handle->connection, &disableErr,
-                matchedTarget->objectReference, NULL);
-        if (orphanRcb) {
-            const char* liveDataSet = ClientReportControlBlock_getDataSetReference(orphanRcb);
-            if (liveDataSet && strcmp(liveDataSet, candidate) == 0) {
-                ClientReportControlBlock_setRptEna(orphanRcb, false);
-                ClientReportControlBlock_setDataSetReference(orphanRcb, "");
-                IedConnection_setRCBValues(handle->connection, &disableErr, orphanRcb,
-                        RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
-                if (disableErr != IED_ERROR_OK) {
-                    fprintf(stderr, "[mms_report_client] could not disable/unbind '%s' (dataset '%s') "
-                            "before orphan cleanup: error %d\n", matchedTarget->objectReference, candidate,
-                            disableErr);
-                } else {
-                    fprintf(stderr, "[mms_report_client] disabled/unbound '%s' from orphaned dataset '%s' "
-                            "before cleanup\n", matchedTarget->objectReference, candidate);
-                }
-            } else {
-                fprintf(stderr, "[mms_report_client] orphan candidate '%s' matches '%s's own deterministic "
-                        "name but its live DatSet is '%s' - not currently bound to it, skipping disable/"
-                        "unbind\n", candidate, matchedTarget->objectReference, liveDataSet ? liveDataSet : "(none)");
-            }
-            ClientReportControlBlock_destroy(orphanRcb);
-        }
-
-        IedClientError deleteErr = IED_ERROR_OK;
-        if (IedConnection_deleteDataSet(handle->connection, &deleteErr, candidate)) {
+         * proactive pass needs the identical disable+unbind before its own
+         * delete attempt, now shared via disableUnbindAndDeleteDataset (see
+         * that function's own doc comment). Scoped the same way too: only
+         * touches matchedTarget's RCB if its CURRENT live DatSet actually is
+         * this candidate, never blind - handled internally by the helper. */
+        if (disableUnbindAndDeleteDataset(handle, matchedTarget->objectReference, candidate)) {
             fprintf(stderr, "[mms_report_client] cleaned up orphaned dataset '%s' - not needed by any "
                     "target this cycle, reclaiming budget\n", candidate);
         } else {
-            fprintf(stderr, "[mms_report_client] could not clean up orphaned dataset '%s': error %d - "
-                    "left behind\n", candidate, deleteErr);
             if (outLeakedCount) (*outLeakedCount)++;
         }
     }
@@ -2315,17 +2563,32 @@ enableAllTargets(MmsReportClientHandle handle) {
 
     /* Fresh per connect cycle, never carried across reconnects - see
      * DynamicDatasetSession's own doc comment. Two independent pools - see
-     * that same doc comment for why only Conf gets a discovery correction. */
+     * that same doc comment for why only Conf gets a discovery correction.
+     * Computed as plain locals, BEFORE the session initializer below, rather
+     * than inline within it (as this used to do for chunkAssignments) - C
+     * gives no evaluation-order guarantee between two initializer
+     * expressions in the same struct literal, and buildWholeDeviceClusterPlan
+     * below now genuinely needs both budgets already computed (its own
+     * explicitClusterBudget argument), not just DynamicDatasetSession's own
+     * fields - relying on coincidental evaluation order here would be fragile
+     * either way. */
     int sclDynMax = IedModel_getDynDataSetMax(handle->iedModel);
     int sclConfMax = IedModel_getConfDataSetMax(handle->iedModel);
     int existingCount = LinkedList_size(existingServerDatasets);
+    int dynBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclDynMax, 0);
+    int confBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclConfMax, existingCount);
+    /* Upper bound only, not the real gate - see buildWholeDeviceClusterPlan's
+     * own doc comment. -1 (either pool uncapped) must stay uncapped here too,
+     * never accidentally become a real 0/negative cap via arithmetic. */
+    int explicitClusterBudget = (dynBudget < 0 || confBudget < 0) ? -1 : dynBudget + confBudget;
+
     DynamicDatasetSession session = {
         .cache = LinkedList_create(),
-        .remainingDynBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclDynMax, 0),
+        .remainingDynBudget = dynBudget,
         .dynBudgetExhaustedLogged = false,
-        .remainingConfBudget = MmsReportClientUseCases_computeInitialDynamicDatasetBudget(sclConfMax, existingCount),
+        .remainingConfBudget = confBudget,
         .confBudgetExhaustedLogged = false,
-        .chunkAssignments = buildWholeDeviceClusterPlan(handle),
+        .chunkAssignments = buildWholeDeviceClusterPlan(handle, explicitClusterBudget),
         .existingServerDatasets = existingServerDatasets,
         .claimedDatasetNames = LinkedList_create(),
     };

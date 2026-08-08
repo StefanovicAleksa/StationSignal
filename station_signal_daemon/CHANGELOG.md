@@ -1016,7 +1016,155 @@ assignment directly. No fixture in this repo has enough distinct LNs with enough
 instances to reproduce the actual starvation scenario, so the fairness improvement itself remains
 unproven end-to-end here; confirming it requires the real device the original report came from.
 
-## `ipc_dispatcher` quality/label/CODEDENUM history
+## Round-robin slot assignment reverted — it triggered a latent stale-dataset-content bug on the real device
+
+Deployed against the same real SIPROTEC 6MD the round-robin fix above targeted, and within the
+first live session it produced a new, repeating symptom that hadn't been seen before:
+`[mms_report_client] ERROR: cache slot N (reference '...') for RCB '...' is unexpectedly NULL
+after this RCB was already populated once - this should never happen, investigate`, firing
+continuously for RCBs under `C5_6MDMEAS` (`LPHD1.RP.urcbA01`, `MMXN2.RP.urcbA01`) and
+`C5_6MDCTRL` (`blkGGIO6.RP.urcbA01`).
+
+Root cause is **not** a bug in `roundRobinSlotsByLn` itself or in chunk-assignment lookup — those
+resolve by RCB `objectReference` string (`lookupChunkAssignment`/`getOrCreateDynamicDataset`), not
+by list position, so reordering `slots` can't cross-wire one RCB's assignment with another's. The
+actual bug is a **pre-existing, latent one** that round-robin happened to trigger for the first
+time: a domain-scoped Dyn dataset's server-side name is 100% deterministic
+(`buildDynamicDatasetName`), but when `createDataSet` for that name returns
+`IED_ERROR_OBJECT_EXISTS`, the existing dataset is reused outright — **its actual member list is
+never re-fetched or verified against what the current run computed** (this exact assumption is
+already called out earlier in this file, in the `mms_report_client` dynamic dataset creation
+section). `resolvedDatasetReference`'s identity check only fingerprints the dataset *name*, never
+its *content*, so a name-content divergence is invisible to the one safety net designed to catch
+dataset-identity churn. Domain-scoped datasets persist across reconnects (that's the whole point
+of using them for buffered/fallback targets), so any dataset created by an *earlier* connect
+cycle — under a *different* cluster-assignment algorithm or even just a different run of the same
+one — has content baked in at creation time that a *later* run's local decode cache has no way to
+know about. Changing `buildWholeDeviceClusterPlan`'s assignment order (round-robin-by-LN vs.
+linear) changes which member list gets attached to which RCB's deterministic dataset name — on a
+device with datasets left over from before the change, this reliably desyncs on-wire content from
+local cache shape, and every report after the aligned prefix produces `everPopulated`-but-`NULL`
+trailing slots forever, until that specific dataset is deleted device-side.
+
+Reverted `buildWholeDeviceClusterPlan` back to simple model-declaration order (removed
+`roundRobinSlotsByLn` entirely) — this makes cluster assignment stable/reproducible run-to-run
+again on a given device, which removes the trigger for *this* incident. It does **not** fix the
+underlying reuse-without-content-verification bug, which remains latent: anything that changes
+cluster/slot assignment order in the future (including trying round-robin again) is unsafe to
+introduce while stale domain-scoped datasets from a prior algorithm may still exist server-side on
+a real device. The LN-starvation problem the round-robin change was fixing is therefore reopened
+and unfixed as of this entry. A real fix needs `createDataSet`'s `OBJECT_EXISTS` reuse path to
+verify the existing dataset's actual member list (e.g. via `IedConnection_getDataSetDirectory`)
+against what was computed this cycle, not just its name — out of scope here.
+
+Operationally: any domain-scoped dataset already created on a live device during the window
+round-robin was active may keep producing the cache-slot-NULL error even after this revert, since
+`cleanupOrphanedDatasets` only matches by exact deterministic name (never content) and won't
+recognize or clean up a name/content mismatch — clearing it requires a device-side dataset
+delete/reset, same as any other permanently-consumed leftover domain-scoped dataset.
+
+## Stale-dataset-content fixed for real, then most RCBs still not enabling fixed too — round-robin's breadth-first redesign, done safely this time
+
+Two follow-on user requests against the same real device, after the round-robin revert above: (1)
+actually fix the stale-dataset-content bug the revert only worked around, and (2) fix the deeper
+complaint the revert reopened — "the RCBs aren't getting properly enabled," i.e. only ~14 of 178
+real RCB instances on this device ever go live.
+
+**Fix 1 — stale-dataset-content, in TWO places, not the one originally suspected.**
+`createAndCacheDynamicDatasetAttempt`'s tier-4 `IED_ERROR_OBJECT_EXISTS` reuse (`connection.c`) was
+the originally-diagnosed unverified path — fixed by `verifyOrCorrectReusedDataset`: fetches the
+existing dataset's real member list (`IedConnection_getDataSetDirectory`, same fetch+convert shape
+tiers 2/3 already use) and compares it as a set against this cycle's own computed intent before
+trusting the reuse. Equal (including a benign reorder) corrects the local chunk in place to the
+fetched order and invalidates the decode-cache's own name-only fingerprint
+(`invalidateMemberRefCacheFingerprint`) so the correction is actually picked up even on a
+reconnect after the first. Genuinely different content: deletes the stale dataset
+(`disableUnbindAndDeleteDataset` — a new shared helper, extracted from `cleanupOrphanedDatasets`'s
+own per-candidate body: unbind, RptEna=false + DatSet="", then delete — the same two-step sequence
+`MmsReportClientConnection_stop`'s own cleanup already needed, confirmed required by
+`test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable`) and retries the create once, now
+genuinely fresh. If delete itself fails, falls back to reusing the stale dataset anyway with the
+local chunk corrected to its real (mismatched) content, so decode stays internally consistent
+(no NULL-slot crash) even though this RCB's real coverage differs from what was intended until a
+device-side reset — logged loudly either way. A verify-directory fetch failure fails open (trusts
+the reuse unverified, same posture as every other tier's own directory-fetch failure handling).
+
+Writing an E2E test for this fix surfaced a SECOND, more commonly-reachable instance of the exact
+same bug class, one call deeper: `refreshPulledMemberRefCache` (`connection.c`) — the function
+tiers 2 (`pullLiveDataset`) AND 3 (`adoptUnclaimedDataset`) both feed their own freshly-fetched
+real member list into — decided whether to rebuild the decode cache using ONLY a dataset-NAME
+comparison (`resolvedDatasetReference` fingerprint), never comparing the actual member content it
+had just fetched. A dataset whose real content silently changed since it was last cached (deleted
+and recreated differently by an earlier connect cycle, another tool, or a device-side reset) while
+keeping the SAME name was therefore invisible to this check — the stale, wrong-shape decode cache
+from a prior cycle stayed in place even though tier 2/3 had *already fetched the correct content
+that cycle and simply never used it*. This is a real, independently-triggerable instance of the
+same "name implies content" assumption the round-robin incident diagnosed for tier 4 — confirmed by
+building an E2E test (`test_dynamicDataset_staleContentOnReconnect_detectedAndRecreated`,
+`integration_tests/mms_report_client`) that recreates a buffered Dyn target's own deterministic
+dataset with different (1-member) content via a side-channel connection between disconnect and
+reconnect: it resolves via tier 3 adoption (not tier 4, see below), and the test failed with a
+report correctly received but decoded against the WRONG, stale 6-member-cycle reference, before the
+fix. Fixed by adding a content check (`memberReferenceSetsDiffer` — set-equality between a cached
+`char**` array and a freshly-fetched `LinkedList`, shared with `verifyOrCorrectReusedDataset`
+above) alongside the existing name check in `refreshPulledMemberRefCache`: a name match no longer
+short-circuits the rebuild decision on its own, only a name match AND a content match together do.
+
+Known E2E-coverage gap, documented rather than faked (same posture as this suite's own
+EntryID-staleness gap): forcing tier 4's own `verifyOrCorrectReusedDataset` specifically (as
+opposed to tier 2/3's `refreshPulledMemberRefCache`, which the E2E test above does reach) requires
+tiers 2 AND 3 to both miss a dataset that genuinely exists on the server — against the vendored
+reference simulator, tier 2 reliably finds a target's own live `DatSet` surviving a disconnect, and
+tier 3's `discoverExistingServerDatasets` reliably finds anything genuinely present, so tier 4's own
+branch could not be forced end-to-end without patching vendored `third_party_src` (a Hard Rule
+violation). Verified instead by code review and by the full E2E suite continuing to pass unchanged
+with it in place.
+
+**Fix 2 — most RCBs not enabling: `buildWholeDeviceClusterPlan` redesigned to spend the real
+budget on breadth, not just minimize dataset count.** Confirmed first that this was never a
+data-loss bug — `IedModel_getReportableAttributeReferencesForWholeDevice` walks the ENTIRE device's
+leaves with no cap, and the old `MmsReportClientUseCases_chunkReferencesAcrossWholeDevice`
+consumed that entire list into `ceil(totalLeafCount / maxAttributes)` clusters with no early exit —
+so on the real device, "14 datasets" was genuinely `totalLeafCount / maxAttributes`, and all of the
+device's own reportable data really was already covered by those 14. The real problem: this
+minimizes total dataset COUNT by freely merging small LNs together, with no regard for which
+specific LN each cluster ends up on — so a handful of big/early LNs can (and did) consume the
+entire minimal-count plan before most of the device's 178 real Dyn RCB slots, each tied to a
+specific, individually-meaningful LN, ever got a turn — while the device's REAL dataset-count
+budget (SCL `DynDataSet max=15` + `ConfDataSet max=34`, minus 4 already on the server ≈ 45 total)
+sat mostly unused, since clustering never tried to use more than the mathematically-minimal 14.
+
+Fixed with a genuinely different clustering strategy, not just fairer reordering of the same
+minimal plan (which is all the reverted `roundRobinSlotsByLn` ever did — see the entry above; this
+redesign only landed after the stale-content fixes made it safe to change cluster/slot assignment
+again). New domain function `MmsReportClientUseCases_buildBreadthFirstPerLnClusters`
+(`mms_report_client_usecases.c`): reuses `_groupReferencesByLn`'s own per-LN split, then reuses
+`_chunkReferencesAcrossWholeDevice` to sub-chunk each LN's own leaves to `maxAttributes` (fed one
+LN at a time, so its cross-LN-merging behavior never actually triggers — each resulting chunk stays
+LN-homogeneous), then interleaves the per-LN chunk lists breadth-first (one chunk per LN per sweep)
+up to an explicit `maxClusters` cap. `buildWholeDeviceClusterPlan` now computes that cap itself,
+before clustering, from the SAME budget `computeInitialDynamicDatasetBudget` already produces
+(`dynBudget + confBudget`, `-1`/uncapped propagated through if either pool is itself uncapped) —
+an explicit local in `enableAllTargets` now, not relying on C's unspecified evaluation order
+between two initializer expressions in the same struct literal (a latent fragility already present
+before this change, just never triggered until `buildWholeDeviceClusterPlan` genuinely needed both
+budgets computed first). This cap is a planning-time upper bound only, never the authoritative
+gate — that stays `createAndCacheDynamicDatasetAttempt`'s own per-attempt, per-pool check, since
+`dynBudget + confBudget` can overestimate what a specific buffered/unbuffered pool split can
+actually fund. Slot assignment is now LN-keyed too: each cluster (LN-homogeneous by construction)
+first tries a still-unused slot whose own `lnReference` matches, falling back to any remaining slot
+only once that LN's own slots are exhausted — replacing blind positional pairing between two
+independently-ordered lists.
+
+`test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances`
+(`integration_tests/mms_report_client`) needed its hardcoded expected-chunk assertions updated —
+under breadth-first interleaving, `urcbDyn2`'s own self-created chunk changed from LLN0's `Beh` DO
+group to GGIO1's own `Ind1` DO group (GGIO1-parented, matching `urcbDyn2`'s own parent LN via the
+new LN-keyed assignment — arguably a MORE representative demonstration of the fix's own intent than
+the old cross-LN assignment it replaced). `test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly`
+needed no change (traced through: both budgets already `max="0"` there, so `explicitClusterBudget`
+becomes 0 either way). Full unit suite and the `mms_report_client` E2E suite (18 tests, up from 17
+— the new stale-content test above) both pass.
 
 Quality (`q`) pairing — flagged as unbuilt for a long time — was eventually solved in
 `ipc_dispatcher`: `domain/ipc_dispatcher_usecases.c`'s `IpcDispatcherUseCases_pairQuality`

@@ -1325,6 +1325,118 @@ MmsReportClientUseCases_groupReferencesByLn(const char* const* references, int c
     return groups;
 }
 
+/* Budget-aware breadth-first-across-LNs clustering - see this function's own
+ * doc comment in the header for the strategy/rationale. Built entirely on top
+ * of the two existing functions above rather than duplicating packing logic:
+ * _groupReferencesByLn does the per-LN split, _chunkReferencesAcrossWholeDevice
+ * (fed one LN's own leaves at a time, so its cross-LN-merging behavior never
+ * actually triggers) does the maxAttributes-bounded sub-chunking within each
+ * LN. */
+LinkedList
+MmsReportClientUseCases_buildBreadthFirstPerLnClusters(const char* const* references, int count,
+        int maxAttributes, int maxClusters) {
+    LinkedList clusters = LinkedList_create();
+    if (!references || count <= 0 || maxAttributes <= 0) return clusters;
+
+    LinkedList lnGroups = MmsReportClientUseCases_groupReferencesByLn(references, count);
+    int lnCount = LinkedList_size(lnGroups);
+    if (lnCount == 0) {
+        LinkedList_destroyStatic(lnGroups);
+        return clusters;
+    }
+
+    /* Per-LN sub-chunk lists, as plain arrays for easy round-robin indexing -
+     * chunkArrays[i] is LN i's own ordered chunk list (each element a
+     * LinkedList of owned char*, exactly _chunkReferencesAcrossWholeDevice's
+     * own per-chunk shape), chunkCounts[i]/chunkCursors[i] its size/current
+     * round-robin position. */
+    LinkedList** chunkArrays = calloc((size_t) lnCount, sizeof(LinkedList*));
+    int* chunkCounts = calloc((size_t) lnCount, sizeof(int));
+    int* chunkCursors = calloc((size_t) lnCount, sizeof(int));
+    if (!chunkArrays || !chunkCounts || !chunkCursors) {
+        free(chunkArrays);
+        free(chunkCounts);
+        free(chunkCursors);
+        LinkedList groupCleanup = LinkedList_getNext(lnGroups);
+        while (groupCleanup) {
+            LinkedList_destroyDeep((LinkedList) LinkedList_getData(groupCleanup), free);
+            groupCleanup = LinkedList_getNext(groupCleanup);
+        }
+        LinkedList_destroyStatic(lnGroups);
+        return clusters;
+    }
+
+    int lnIdx = 0;
+    LinkedList groupElement = LinkedList_getNext(lnGroups);
+    while (groupElement) {
+        LinkedList group = (LinkedList) LinkedList_getData(groupElement);
+        groupElement = LinkedList_getNext(groupElement);
+
+        int groupSize = LinkedList_size(group);
+        char** groupArray = groupSize > 0 ? calloc((size_t) groupSize, sizeof(char*)) : NULL;
+        if (groupArray) {
+            int gi = 0;
+            for (LinkedList el = LinkedList_getNext(group); el; el = LinkedList_getNext(el)) {
+                groupArray[gi++] = (char*) LinkedList_getData(el);
+            }
+        }
+
+        /* Chunker reads/dups groupArray's strings while they're still owned
+         * by `group` - must run BEFORE group is freed below, not after. */
+        LinkedList subChunks = groupArray
+                ? MmsReportClientUseCases_chunkReferencesAcrossWholeDevice(
+                        (const char* const*) groupArray, groupSize, maxAttributes)
+                : LinkedList_create();
+        free(groupArray); /* the pointer array only - strings still owned by `group` until the next line */
+        LinkedList_destroyDeep(group, free);
+
+        int subCount = LinkedList_size(subChunks);
+        LinkedList* subArray = subCount > 0 ? calloc((size_t) subCount, sizeof(LinkedList)) : NULL;
+        if (subArray) {
+            int si = 0;
+            for (LinkedList el = LinkedList_getNext(subChunks); el; el = LinkedList_getNext(el)) {
+                subArray[si++] = (LinkedList) LinkedList_getData(el);
+            }
+        }
+        LinkedList_destroyStatic(subChunks); /* container only - data ptrs now owned by subArray */
+
+        chunkArrays[lnIdx] = subArray;
+        chunkCounts[lnIdx] = subArray ? subCount : 0;
+        chunkCursors[lnIdx] = 0;
+        lnIdx++;
+    }
+    LinkedList_destroyStatic(lnGroups);
+
+    int emitted = 0;
+    bool anyRemaining = true;
+    while (anyRemaining && (maxClusters < 0 || emitted < maxClusters)) {
+        anyRemaining = false;
+        for (int i = 0; i < lnCount; i++) {
+            if (maxClusters >= 0 && emitted >= maxClusters) break;
+            if (chunkCursors[i] < chunkCounts[i]) {
+                LinkedList_add(clusters, chunkArrays[i][chunkCursors[i]]);
+                chunkCursors[i]++;
+                emitted++;
+                anyRemaining = true;
+            }
+        }
+    }
+
+    /* Anything left un-emitted (maxClusters cut the sweep short) was never
+     * transferred into `clusters` - still ours to free. */
+    for (int i = 0; i < lnCount; i++) {
+        for (int j = chunkCursors[i]; j < chunkCounts[i]; j++) {
+            LinkedList_destroyDeep(chunkArrays[i][j], free);
+        }
+        free(chunkArrays[i]);
+    }
+    free(chunkArrays);
+    free(chunkCounts);
+    free(chunkCursors);
+
+    return clusters;
+}
+
 /* Removes any "(...)" array-index annotation from one dot-separated path
  * segment (e.g. "item(1)component" -> "itemcomponent") - mirrors
  * ied_model_online_loader's own stripArrayIndexAnnotation (a small helper
