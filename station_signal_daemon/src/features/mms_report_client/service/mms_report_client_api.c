@@ -156,7 +156,7 @@ buildMemberRefCache(MmsReportClientHandle client) {
              * IedModel_getReportableAttributeReferencesForLogicalNode's own
              * doc comment - "all the variables" for that LN) as this entry's
              * PROVISIONAL shape. This is the exact same member list
-             * getOrCreateDynamicDataset (mms_report_client_connection.c) uses
+             * mms_dataset_manager's own self-create tier uses
              * to actually create a dataset on connect if tier 3 (self-create)
              * ends up being used - but if tier 2 (pull a live-assigned
              * dataset) succeeds instead, this provisional shape gets replaced
@@ -203,6 +203,23 @@ MmsReportClient_start(MmsReportClientHandle client) {
 
     client->memberRefCache = buildMemberRefCache(client);
 
+    /* Created here rather than in _create because it borrows client->targets,
+     * which only exist as of this call. It also borrows client->connection
+     * (already built by MmsReportClientConnection_create) - deliberately the
+     * SAME association this client enables its RCBs on, never a second one:
+     * an association-specific dataset created on a different connection would
+     * be unassignable to the RCBs being enabled here. A failure is
+     * non-fatal-shaped only in that every call site is NULL-safe; report it as
+     * out-of-memory rather than starting a client that can resolve no
+     * datasets at all. */
+    MmsDatasetManagerError datasetErr = MMS_DATASET_MANAGER_OK;
+    client->datasetManager = MmsDatasetManager_create(client->iedModel, client->connection,
+            client->targets, &datasetErr);
+    if (!client->datasetManager) {
+        return datasetErr == MMS_DATASET_MANAGER_ERR_INVALID_ARGUMENT
+                ? MMS_REPORT_CLIENT_ERR_INVALID_ARGUMENT : MMS_REPORT_CLIENT_ERR_OUT_OF_MEMORY;
+    }
+
     return MmsReportClientConnection_start(client);
 }
 
@@ -218,6 +235,13 @@ MmsReportClient_destroy(MmsReportClientHandle client) {
 
     MmsReportClientConnection_stop(client);
     MmsReportClientConnection_destroy(client);
+
+    /* After the connection is torn down (the manager's own server-side
+     * cleanup already ran inside _stop, while the association was still live)
+     * but BEFORE client->targets is freed below - the manager borrows that
+     * list and must not outlive it. */
+    MmsDatasetManager_destroy(client->datasetManager);
+    client->datasetManager = NULL;
 
     if (client->targets) {
         LinkedList_destroyDeep(client->targets, IedModel_destroyReportControlBlockTarget);

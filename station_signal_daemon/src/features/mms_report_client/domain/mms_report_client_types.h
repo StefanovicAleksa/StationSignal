@@ -8,6 +8,7 @@
 #include "mms_value.h"
 #include "hal_thread.h"
 #include "features/ied_model/service/ied_model_api.h"
+#include "features/mms_dataset_manager/service/mms_dataset_manager_api.h"
 
 /*
  * Domain vocabulary for this feature IS libiec61850's MMS-client reporting
@@ -254,8 +255,8 @@ typedef struct {
      * of truth for whether this entry's current shape is still valid on a
      * (re)connect: enableOneTarget (mms_report_client_connection.c) compares
      * the dataset name it actually ends up using this enable - whatever
-     * pullLiveDataset returned (tier 2), or getOrCreateDynamicDataset's
-     * deterministic "@dyn_<lnReference>" (tier 3) - against this field.
+     * mms_dataset_manager resolved for it this cycle (a pulled live/adopted
+     * dataset, or its own deterministic self-created name) - against this field.
      * Equal means this entry's shape already matches (the common case on
      * every reconnect: the same live-assigned dataset stays put, or the same
      * deterministic self-created name is regenerated) - no rebuild needed.
@@ -396,26 +397,20 @@ struct sMmsReportClientHandle {
                                    MmsReportClient_create (NULL rcbReference means "nothing
                                    forwarded yet") - see its own doc comment above */
 
-    /* Owned: char* list of domain/VMD-scoped ("$"-joined, no "@" prefix)
-     * dynamic dataset names self-created for buffered RCBs whose SCL declared
-     * no datSet - see getOrCreateDynamicDataset's own doc comment
-     * (mms_report_client_connection.c) for why a buffered RCB can't use the
-     * ordinary association-scoped ("@"-prefixed) self-created dataset an
-     * unbuffered RCB gets: an association-scoped dataset is destroyed the
-     * instant this connection closes, which is incompatible with a buffered
-     * RCB's whole purpose of surviving one. Unlike that "@"-scoped scheme,
-     * these names are NOT auto-cleaned by the server on disconnect, so
-     * MmsReportClientConnection_stop explicitly IedConnection_deleteDataSet's
-     * every name here before closing the connection, to avoid leaking into
-     * the device's own total dataset-count budget across repeated
-     * start/stop cycles. Deliberately persists across reconnects (unlike
-     * DynamicDatasetSession's own per-connect-cycle cache in
-     * mms_report_client_connection.c) precisely so stop can find every name
-     * ever created for this client's whole lifetime, not just the current
-     * cycle's - deduped on insert, since naming is deterministic per LN and a
-     * reconnect's getOrCreateDynamicDataset re-derives the same name rather
-     * than a new one. */
-    LinkedList domainScopedDynamicDatasetNames;
+    /* Owned. Everything about WHICH dataset each RCB should report on lives
+     * behind this handle - discovering what already exists on the device
+     * (SCL-static, live-assigned, foreign/leftover), planning whole-device
+     * coverage, creating what's still missing, budgeting all of it against
+     * SCL's declared capacity, and cleaning up its own leftovers. This feature
+     * only consumes the answer: bind the resolved dataset to the RCB, enable
+     * it, decode its reports.
+     *
+     * Created in MmsReportClient_start (once targets are known), destroyed in
+     * MmsReportClient_destroy. It BORROWS this handle's iedModel, connection
+     * and targets, so it must not outlive any of them. NULL if _start was
+     * never called - every call site is NULL-safe, matching the pre-existing
+     * "stop/destroy on a never-started client is a no-op" contract. */
+    MmsDatasetManagerHandle datasetManager;
 
     MmsReportClientCallback reportCallback;
     void* reportCallbackParam;

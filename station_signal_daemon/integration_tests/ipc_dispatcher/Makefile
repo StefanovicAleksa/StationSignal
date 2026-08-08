@@ -16,6 +16,7 @@ THIRD_PARTY_INCLUDE := $(ROOT)/third_party/include
 THIRD_PARTY_LIB      := $(ROOT)/third_party/lib
 IED_MODEL   := $(SRC)/features/ied_model
 MMS_REPORT_CLIENT := $(SRC)/features/mms_report_client
+MMS_DATASET_MANAGER := $(SRC)/features/mms_dataset_manager
 GOOSE_SUBSCRIBER := $(SRC)/features/goose_subscriber
 IPC_DISPATCHER := $(SRC)/features/ipc_dispatcher
 
@@ -45,6 +46,12 @@ $(BIN): e2e_test_ipc_dispatcher.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \

@@ -367,7 +367,7 @@ buildReportControlBlocks(IedConnection conn, const char* lnRef, LogicalNode* ln,
          * writes these live either way (see CLAUDE.md's own note on why),
          * they only matter for a server's own behavior, not a client-side
          * discovered model. dataSetRefCopy NULL is exactly the "Dyn" case -
-         * mms_report_client's existing getOrCreateDynamicDataset handles it
+         * mms_dataset_manager's existing self-create tier handles it
          * unchanged, no special-casing needed here. */
         ReportControlBlock_create(rcbName, ln, NULL, buffered,
                 dataSetRefCopy ? bareDatasetName(dataSetRefCopy) : NULL, confRev, 0, 0, 0, 0);

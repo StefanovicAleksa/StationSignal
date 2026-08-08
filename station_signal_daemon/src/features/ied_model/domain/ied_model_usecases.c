@@ -844,7 +844,7 @@ IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle h
  * whole-device dynamic-dataset clustering: a "Dyn" RCB's own parent LN does
  * NOT restrict what a dataset assigned to it can report on (verified: neither
  * IedConnection_createDataSet's wire format nor this codebase's own
- * MmsReportClientUseCases_buildWireMemberReferences ties a dataset member to
+ * MmsDatasetManagerUseCases_buildWireMemberReferences ties a dataset member to
  * any particular LN - each member reference is independently addressed), so
  * the daemon can cover the ENTIRE device's reportable data through however
  * many spare RCB "slots" exist anywhere in the model, not just the slots that

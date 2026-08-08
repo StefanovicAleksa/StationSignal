@@ -16,6 +16,7 @@ THIRD_PARTY_LIB      := $(ROOT)/third_party/lib
 IED_MODEL   := $(SRC)/features/ied_model
 IED_MODEL_ONLINE_LOADER := $(SRC)/features/ied_model_online_loader
 MMS_REPORT_CLIENT := $(SRC)/features/mms_report_client
+MMS_DATASET_MANAGER := $(SRC)/features/mms_dataset_manager
 GOOSE_SUBSCRIBER := $(SRC)/features/goose_subscriber
 SCL_BOOTSTRAP := $(SRC)/features/scl_bootstrap
 ORCHESTRATION := $(SRC)/orchestration
@@ -33,6 +34,7 @@ LDFLAGS := -L$(THIRD_PARTY_LIB) -lunity
 TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
          test_ied_model_online_loader_usecases \
          test_mms_report_client_utils test_mms_report_client_usecases test_mms_report_client_api \
+         test_mms_dataset_manager_usecases \
          test_goose_subscriber_utils test_goose_subscriber_usecases test_goose_subscriber_api \
          test_scl_bootstrap_usecases test_scl_bootstrap_utils \
          test_orchestration_staging test_orchestration_usecases test_orchestration_utils test_orchestration_api \
@@ -104,11 +106,26 @@ test_mms_report_client_api: mms_report_client/test_mms_report_client_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
+
+# usecases.c here is pure string manipulation and arithmetic over plain
+# reference strings - no IedConnection, no MmsValue, no mxml. Needs LinkedList
+# (declared in a vendored header but implemented entirely in libiec61850.a,
+# hence still -liec61850), same situation as test_scl_bootstrap_usecases.
+test_mms_dataset_manager_usecases: mms_dataset_manager/test_mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
 
 # utils.c only touches MmsValue construction/cloning - needs iec61850+hal, no mxml.
 test_goose_subscriber_utils: goose_subscriber/test_goose_subscriber_utils.c \
@@ -214,6 +231,12 @@ test_orchestration_api: orchestration/test_orchestration_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
@@ -272,6 +295,12 @@ test_ipc_dispatcher_api: ipc_dispatcher/test_ipc_dispatcher_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
@@ -445,6 +474,12 @@ test_device_manager_api: device_manager/test_device_manager_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
@@ -543,6 +578,12 @@ test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_use
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \
@@ -620,6 +661,12 @@ test_control_dispatcher_api: control_dispatcher/test_control_dispatcher_api.c \
 		$(MMS_REPORT_CLIENT)/data/mms_report_client_report_adapter.c \
 		$(MMS_REPORT_CLIENT)/domain/mms_report_client_usecases.c \
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
+		$(MMS_DATASET_MANAGER)/service/mms_dataset_manager_api.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_discovery.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_provisioning.c \
+		$(MMS_DATASET_MANAGER)/data/mms_dataset_manager_naming.c \
+		$(MMS_DATASET_MANAGER)/domain/mms_dataset_manager_usecases.c \
+		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(GOOSE_SUBSCRIBER)/service/goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_connection.c \
 		$(GOOSE_SUBSCRIBER)/data/goose_subscriber_frame_adapter.c \

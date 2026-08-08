@@ -11,7 +11,7 @@ file only describes current-state facts.
 - Build daemon: **TODO — no CMakeLists.txt or root Makefile exists yet.** `src/main.c` can be
   built manually (same throwaway-linkage-probe convention as the smoke tests below) by
   compiling it together with every `.c` file under `src/orchestration/`,
-  `src/scan_orchestration/`, and `src/device_manager/`, and all nine `src/features/<feature>/`
+  `src/scan_orchestration/`, and `src/device_manager/`, and all ten `src/features/<feature>/`
   directories (`service`/`data`/`domain`/`utils`), e.g.:
   `gcc -g -Wall -Isrc -idirafter third_party/include src/main.c
   src/orchestration/*/*.c src/scan_orchestration/*/*.c src/device_manager/*/*.c
@@ -97,7 +97,7 @@ file only describes current-state facts.
 ## Current State (update as this evolves)
 `main.c` takes zero arguments (`int main(void)`) and only creates `device_manager` +
 `scan_orchestration` + `control_dispatcher`, starts the control websocket, and blocks on
-`SIGINT`/`SIGTERM` until torn down in reverse order. All nine `src/features/` plus
+`SIGINT`/`SIGTERM` until torn down in reverse order. All ten `src/features/` plus
 `src/orchestration/`, `src/scan_orchestration/`, and `src/device_manager/` are implemented (see
 Architecture below). There is no boot-time device, no argv, and no interactive discovery
 prompt — `control_dispatcher`'s four JSON commands (see Commands above) are the daemon's only
@@ -126,6 +126,12 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `tests/scan_orchestration/`/`tests/device_manager/` cover seen-set dedup/port allocation and
   their own two-phase-locked registries against fake handles/a nonexistent interface — never a
   real scan/`Orchestration_run*` call (each feature's own `integration_tests/` job).
+  `tests/mms_dataset_manager/` covers only that feature's **pure** layer (reference conversion,
+  DO-atomic/whole-device chunking, budget arithmetic) — its data layer is deliberately not
+  unit-tested, since every path in it needs a live server and is already proven end-to-end
+  through `integration_tests/mms_report_client/`, which exercises the whole dataset lifecycle
+  through the new boundary (same "prove it E2E rather than duplicate coverage" call as
+  `ied_model`'s loader). There is deliberately **no** `integration_tests/mms_dataset_manager/`.
 - `integration_tests/<feature>/` — E2E tests of a real feature's public API against a real,
   self-authored fixture file, also Unity-based. Unlike `ied_simulator/` (below), these
   intentionally link against real `src/` code — the decoupling rule is about the IED simulator
@@ -141,9 +147,10 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `domain/`/`data/`/`utils/`/`service/` subfolders: `domain/` holds pure logic with no
   third-party includes, `data/` holds third-party/file/library integration, `service/*_api.h` is
   still the one public header other features may include. Simple features skip the subfolders.
-- `src/main.c` wires dependencies only — no business logic. Nine `src/features/`: `scl_bootstrap/`,
+- `src/main.c` wires dependencies only — no business logic. Ten `src/features/`: `scl_bootstrap/`,
   `ied_model/`, `goose_subscriber/`, `mms_report_client/`, `ipc_dispatcher/`, `ied_discovery/`,
-  `ied_model_online_loader/`, `scan_dispatcher/`, `control_dispatcher/` — all implemented. Don't
+  `ied_model_online_loader/`, `scan_dispatcher/`, `control_dispatcher/`,
+  `mms_dataset_manager/` — all implemented. Don't
   invent unrelated features without being asked; each addition beyond the original five was an
   explicit user request (see `CHANGELOG.md`). `src/orchestration/`, `src/scan_orchestration/`, and
   `src/device_manager/` are three top-level siblings of `src/features/` that each sequence a
@@ -246,7 +253,7 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   that callback's contract is "once per enable *attempt*", and no attempt is made. An RCB that
   genuinely needed a dataset and couldn't get one (budget exhausted, `createDataSet` rejected, no
   wire-convertible members, malformed LN reference) is logged loudly as **FAILED** and still fires
-  `enabled=false`. `getOrCreateDynamicDataset`'s `outWasNeeded` out-param is the only signal
+  `enabled=false`. `MmsDatasetManagerProvisioning_getOrCreateDataset`'s `outWasNeeded` out-param is the only signal
   separating the two; before it they were byte-identical, which buried real failures among benign
   spares. Each connect cycle ends with one summary line — `N enabled, N not needed, N FAILED` —
   so the question "did anything actually break this cycle?" is answerable without counting per-RCB
@@ -303,82 +310,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   candidate resolving to the same "anchor" (nearest structural ancestor, an ancestor walk over
   `$`-segments, not a last-`$` strip) does — value drags quality along and vice versa; a `NULL`
   value is excluded from being dragged in. `IpcDispatcherUseCases_pairQuality` mirrors this.
-  **Dynamic dataset creation — whole-device clustering**: for every "Dyn" RCB (SCL declares no
-  `datSet`), dataset provisioning is planned device-WIDE, not per-RCB/per-LN — a Dyn RCB's own
-  parent LN does not restrict what a dataset assigned to it can report on (a dataset's FCDA
-  members are independently addressed, confirmed against `IedConnection_createDataSet`'s own wire
-  format, `MmsReportClientUseCases_buildWireMemberReferences`, and this repo's own
-  `integration_tests/ied_model/fixtures/breaker1.cid`, whose single `LLN0`-parented dataset already
-  spans three different LNs). Every Dyn RCB anywhere on the device is therefore treated as one
-  fungible reporting slot in a single combined pool, so a device with lots of nominally-redundant
-  spare RCB instances on one LN (e.g. `urcbA01`..`urcbJ01`, previously all just duplicating that
-  LN's own tiny dataset) can instead cover the entire device's reportable data — including LDs/LNs
-  that have zero RCBs of their own.
-  Four-tier resolution order per target (`enableOneTarget`): **1. STATIC** (SCL `datSet`,
-  unchanged) → **2. PULL LIVE** (already assigned to *this* RCB, unchanged) — `looksLikeOurOwnDynamicDatasetName`'s
-  "dangling reference to a prior connection's own destroyed dataset" rejection only ever applies
-  to an *unbuffered* target (an association-scoped name is what's actually destroyed on
-  disconnect); a buffered target's own domain/VMD-scoped dataset genuinely persists past a
-  connection close, so its own live value here is the expected, common reconnect case, not a
-  dangling one — see `CHANGELOG.md` for the real bug this used to be. On success, the reused name
-  is registered into this cycle's claim-tracking so proactive orphan cleanup (below) never deletes
-  it out from under the RCB actively reusing it that same cycle → **3. ADOPT** — an
-  existing, not-yet-claimed dataset already on the server under this target's own LD
-  (`discoverExistingServerDatasets`, `adoptUnclaimedDataset`) is reused outright, no `createDataSet`
-  call at all — "primarily use existing/foreign datasets, create our own only via necessity," per
-  explicit product direction; assignment is non-destructive/shareable, so this applies to *any*
-  existing dataset regardless of who created it, not just this client's own. A buffered target
-  first checks specifically for a candidate matching its *own* deterministic name
-  (`buildDynamicDatasetName(target->objectReference, true)`) before the general LD-wide scan —
-  without this, two buffered targets sharing an LD, each with their own pre-existing leftover
-  dataset, could cross-adopt each other's leftover depending on server enumeration order (see
-  `CHANGELOG.md`) — **4. SELF-CREATE** —
-  only if nothing above worked, `getOrCreateDynamicDataset` resolves this target's own
-  whole-device cluster (`buildWholeDeviceClusterPlan`, computed once per connect cycle):
-  `IedModel_getReportableAttributeReferencesForWholeDevice` walks every LD/LN in the model, then
-  `MmsReportClientUseCases_chunkReferencesAcrossWholeDevice` (maxAttributes known — DO-atomic
-  bin-packing that may legitimately span several different LNs' leaves in one dataset) or
-  `_groupReferencesByLn` (maxAttributes unknown — one dataset per LN, unbounded, the safe default
-  with no known size bound to combine LNs against) packs it into clusters assigned to Dyn slots in
-  simple model-declaration order; whichever list (clusters or slots) runs out first is logged
-  plainly, never silently dropped. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
-  on disconnect, no cleanup needed). **Buffered**: domain/VMD-scoped (`"$"`-joined, no `@` prefix,
-  persists past the connection) instead — an association-scoped dataset is destroyed the instant
-  the connection closes, which a real device (and the vendored reference server) rejects assigning
-  to a buffered RCB outright (`IED_ERROR_OBJECT_VALUE_INVALID`/error 32 — confirmed against a real
-  SIPROTEC 6MD device, see `CHANGELOG.md`). A later `createDataSet` attempt for the same
-  (deterministic, per-target) name legitimately fails with `IED_ERROR_OBJECT_EXISTS` — treated as a
-  successful reuse, not an error. **Once that domain-scoped fallback has actually worked once in a
-  connect cycle, the association-specific attempt is skipped for every remaining unbuffered target**
-  (`DynamicDatasetSession.associationSpecificCreateRejected`): on a device that rejects the form
-  structurally it never succeeds for any target, so retrying per-target only spends a doomed
-  ~100-member round-trip each time (nine wasted large PDUs in one real connect cycle). Latched only
-  on a fallback that succeeded — if both scopes fail, the association-specific form isn't
-  demonstrably the problem — and per-cycle only, never persisted.
-  **Real budget, not a blind guess**: `discoverExistingServerDatasets` (once per connect cycle,
-  scoped to Dyn targets' own LDs, via `IedConnection_getLogicalDeviceDataSets`) feeds
-  `MmsReportClientUseCases_computeInitialDynamicDatasetBudget`, correcting SCL's declared
-  `<Services><DynDataSet max="N" maxAttributes="M"/>` for datasets that already exist server-side
-  (leftover domain-scoped ones from an earlier ungracefully-terminated run, another tool's own
-  datasets, etc.) — confirmed on a real device that a naive blind-reset counter believed budget
-  remained while a pile of leftovers had already exhausted the real one. A discovered name already
-  known to be SCL-claimed by a *different* target's own static `datSet` is excluded from the
-  adoption pool (never redundantly adopted instead of covering new device data).
-  **Proactive orphan cleanup** (`cleanupOrphanedDatasets`, end of every `enableAllTargets`): any
-  domain-scoped dataset that exactly reconstructs via `buildDynamicDatasetName(target->objectReference,
-  true)` for some real buffered Dyn target right now, but wasn't claimed (adopted or
-  self-created/reused) by any target this cycle, is deleted to reclaim budget — closing the
-  ungraceful-restart gap `MmsReportClientConnection_stop`'s own cleanup-on-stop can't reach (a
-  killed/crashed daemon never gets there). Strict, conservative match only — never a name that
-  merely looks like it might be ours, and a foreign dataset is never deleted, only ever adopted.
-  `handle->domainScopedDynamicDatasetNames` still tracks every domain-scoped name this client
-  itself created or adopted, for `MmsReportClientConnection_stop`'s own graceful-stop deletion pass
-  (unchanged, the other half of this lifecycle).
-  Entirely inert (identical to pre-existing per-LN behavior) whenever SCL doesn't declare
-  `<DynDataSet>` at all, beyond the discovery/adoption/cleanup passes, which apply regardless. The
-  no-SCL empirical/adaptive-discovery case (*inferring* an unknown `maxAttributes`/`max` cap from
-  `createDataSet` failure patterns, as opposed to *discovering already-existing datasets*, which is
-  now implemented) remains unimplemented — deferred, see `GAP3_DYNAMIC_DATASET_NOTES.md`.
+  **Which dataset each RCB reports on is NOT decided here** — that is entirely
+  `mms_dataset_manager/`'s job (see its own bullet below): discovery of what already exists on the
+  device, whole-device cluster planning, self-creation, budgets, adoption and cleanup all live
+  there. This feature calls `MmsDatasetManager_beginCycle` once per connect, asks
+  `MmsDatasetManager_resolveForTarget` per RCB, binds whatever comes back as step 1 below, and
+  calls `_endCycle` when the loop finishes (plus `_cleanupOnStop` on the way down, before
+  `IedConnection_close`). It keeps only the *decode-shape reconciliation* that follows a
+  resolution (`refreshPulledMemberRefCache`/`ensureLnFallbackMemberRefCache`), because that
+  mutates this feature's own member-ref/value-diff cache under its own lock. A resolution's
+  `wasNeeded` flag is what separates a benign unused spare RCB slot from a real failure.
   **EntryID resumption**: the last observed `ClientReport_getEntryId` per buffered RCB is
   persisted and reused on re-enable so a reconnect resumes instead of a full backlog redelivery.
   **Gap-4 decomposition**: a structured attribute's wire value is flattened, then reordered
@@ -405,6 +346,99 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   Proven end-to-end in `integration_tests/mms_report_client/`. Full incident history (rollback
   races, reconnect storms, GI removal-then-reinstatement, three real-hardware bugs) is in
   `CHANGELOG.md`.
+- `mms_dataset_manager/` — owns everything about an IED's report DATASETS, split out of
+  `mms_report_client/` (which had grown to a 3300-line connection file carrying two unrelated
+  jobs). Runs against an already-loaded `ied_model` and an already-connected `IedConnection`
+  (**borrowed** — it deliberately never opens an association of its own: an association-specific
+  dataset created on a different connection would be unassignable to the RCB being enabled).
+  Public boundary: `src/features/mms_dataset_manager/service/mms_dataset_manager_api.h` —
+  `_create`/`_destroy`, plus a strictly sequential per-connect-cycle lifecycle:
+  `MmsDatasetManager_beginCycle` (discovery + budgets + cluster plan) →
+  `_resolveForTarget` (once per RCB) → `_endCycle` (orphan cleanup + session teardown), with
+  `_cleanupOnStop` for the graceful-stop path. Not internally synchronized — `mms_report_client`'s
+  own supervisor thread is the single caller and satisfies that by construction. Knows nothing
+  about enabling RCBs, report handlers, value-diff caching or reconnect supervision.
+  `MmsDatasetResolution` carries the resolved reference, which tier produced it, the member list
+  for decode-shape reconciliation (NULL and EMPTY mean different things — see its own doc comment),
+  and `wasNeeded`, the only signal separating "this spare RCB slot was never needed" from "this RCB
+  needed a dataset and couldn't get one".
+  **Dynamic dataset creation — whole-device clustering**: for every "Dyn" RCB (SCL declares no
+  `datSet`), dataset provisioning is planned device-WIDE, not per-RCB/per-LN — a Dyn RCB's own
+  parent LN does not restrict what a dataset assigned to it can report on (a dataset's FCDA
+  members are independently addressed, confirmed against `IedConnection_createDataSet`'s own wire
+  format, `MmsDatasetManagerUseCases_buildWireMemberReferences`, and this repo's own
+  `integration_tests/ied_model/fixtures/breaker1.cid`, whose single `LLN0`-parented dataset already
+  spans three different LNs). Every Dyn RCB anywhere on the device is therefore treated as one
+  fungible reporting slot in a single combined pool, so a device with lots of nominally-redundant
+  spare RCB instances on one LN (e.g. `urcbA01`..`urcbJ01`, previously all just duplicating that
+  LN's own tiny dataset) can instead cover the entire device's reportable data — including LDs/LNs
+  that have zero RCBs of their own.
+  Four-tier resolution order per target (`enableOneTarget`): **1. STATIC** (SCL `datSet`,
+  unchanged) → **2. PULL LIVE** (already assigned to *this* RCB, unchanged) — `MmsDatasetManagerNaming_looksLikeOurOwnName`'s
+  "dangling reference to a prior connection's own destroyed dataset" rejection only ever applies
+  to an *unbuffered* target (an association-scoped name is what's actually destroyed on
+  disconnect); a buffered target's own domain/VMD-scoped dataset genuinely persists past a
+  connection close, so its own live value here is the expected, common reconnect case, not a
+  dangling one — see `CHANGELOG.md` for the real bug this used to be. On success, the reused name
+  is registered into this cycle's claim-tracking so proactive orphan cleanup (below) never deletes
+  it out from under the RCB actively reusing it that same cycle → **3. ADOPT** — an
+  existing, not-yet-claimed dataset already on the server under this target's own LD
+  (`MmsDatasetManagerDiscovery_findExistingServerDatasets`, `MmsDatasetManagerDiscovery_adoptUnclaimedDataset`) is reused outright, no `createDataSet`
+  call at all — "primarily use existing/foreign datasets, create our own only via necessity," per
+  explicit product direction; assignment is non-destructive/shareable, so this applies to *any*
+  existing dataset regardless of who created it, not just this client's own. A buffered target
+  first checks specifically for a candidate matching its *own* deterministic name
+  (`MmsDatasetManagerNaming_buildDatasetName(target->objectReference, true)`) before the general LD-wide scan —
+  without this, two buffered targets sharing an LD, each with their own pre-existing leftover
+  dataset, could cross-adopt each other's leftover depending on server enumeration order (see
+  `CHANGELOG.md`) — **4. SELF-CREATE** —
+  only if nothing above worked, `MmsDatasetManagerProvisioning_getOrCreateDataset` resolves this target's own
+  whole-device cluster (`MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan`, computed once per connect cycle):
+  `IedModel_getReportableAttributeReferencesForWholeDevice` walks every LD/LN in the model, then
+  `MmsDatasetManagerUseCases_chunkReferencesAcrossWholeDevice` (maxAttributes known — DO-atomic
+  bin-packing that may legitimately span several different LNs' leaves in one dataset) or
+  `MmsDatasetManagerUseCases_groupReferencesByLn` (maxAttributes unknown — one dataset per LN, unbounded, the safe default
+  with no known size bound to combine LNs against) packs it into clusters assigned to Dyn slots in
+  simple model-declaration order; whichever list (clusters or slots) runs out first is logged
+  plainly, never silently dropped. **Unbuffered**: association-scoped (`@`-prefixed, auto-destroyed
+  on disconnect, no cleanup needed). **Buffered**: domain/VMD-scoped (`"$"`-joined, no `@` prefix,
+  persists past the connection) instead — an association-scoped dataset is destroyed the instant
+  the connection closes, which a real device (and the vendored reference server) rejects assigning
+  to a buffered RCB outright (`IED_ERROR_OBJECT_VALUE_INVALID`/error 32 — confirmed against a real
+  SIPROTEC 6MD device, see `CHANGELOG.md`). A later `createDataSet` attempt for the same
+  (deterministic, per-target) name legitimately fails with `IED_ERROR_OBJECT_EXISTS` — treated as a
+  successful reuse, not an error. **Once that domain-scoped fallback has actually worked once in a
+  connect cycle, the association-specific attempt is skipped for every remaining unbuffered target**
+  (`MmsDatasetManagerSession.associationSpecificCreateRejected`): on a device that rejects the form
+  structurally it never succeeds for any target, so retrying per-target only spends a doomed
+  ~100-member round-trip each time (nine wasted large PDUs in one real connect cycle). Latched only
+  on a fallback that succeeded — if both scopes fail, the association-specific form isn't
+  demonstrably the problem — and per-cycle only, never persisted.
+  **Real budget, not a blind guess**: `MmsDatasetManagerDiscovery_findExistingServerDatasets` (once per connect cycle,
+  scoped to Dyn targets' own LDs, via `IedConnection_getLogicalDeviceDataSets`) feeds
+  `MmsDatasetManagerUseCases_computeInitialDynamicDatasetBudget`, correcting SCL's declared
+  `<Services><DynDataSet max="N" maxAttributes="M"/>` for datasets that already exist server-side
+  (leftover domain-scoped ones from an earlier ungracefully-terminated run, another tool's own
+  datasets, etc.) — confirmed on a real device that a naive blind-reset counter believed budget
+  remained while a pile of leftovers had already exhausted the real one. A discovered name already
+  known to be SCL-claimed by a *different* target's own static `datSet` is excluded from the
+  adoption pool (never redundantly adopted instead of covering new device data).
+  **Proactive orphan cleanup** (`MmsDatasetManagerProvisioning_cleanupOrphaned`, run from
+  `MmsDatasetManager_endCycle`): any domain-scoped dataset that exactly reconstructs via
+  `MmsDatasetManagerNaming_buildDatasetName(target->objectReference,
+  true)` for some real buffered Dyn target right now, but wasn't claimed (adopted or
+  self-created/reused) by any target this cycle, is deleted to reclaim budget — closing the
+  ungraceful-restart gap `MmsDatasetManager_cleanupOnStop` can't reach (a
+  killed/crashed daemon never gets there). Strict, conservative match only — never a name that
+  merely looks like it might be ours, and a foreign dataset is never deleted, only ever adopted.
+  the dataset manager's own `domainScopedDynamicDatasetNames` still tracks every domain-scoped name this client
+  itself created or adopted, for `MmsDatasetManager_cleanupOnStop`'s own graceful-stop deletion pass
+  (unchanged, the other half of this lifecycle).
+  Entirely inert (identical to pre-existing per-LN behavior) whenever SCL doesn't declare
+  `<DynDataSet>` at all, beyond the discovery/adoption/cleanup passes, which apply regardless. The
+  no-SCL empirical/adaptive-discovery case (*inferring* an unknown `maxAttributes`/`max` cap from
+  `createDataSet` failure patterns, as opposed to *discovering already-existing datasets*, which is
+  now implemented) remains unimplemented — deferred, see `GAP3_DYNAMIC_DATASET_NOTES.md`.
 - `goose_subscriber/` — subscribes to every GOOSE Control Block on one IED via `ied_model`
   (never re-parses SCL, never discovers GoCBs over the wire), applying
   `GooseSubscriber_setDstMac`/`setAppId` filters from SCL addressing when present, and delivers

@@ -1639,3 +1639,90 @@ the ordering invariant still guarded by
 report `device had 0x… after the DatSet write` (e.g. `urcbGiOnly`: `device had 0x10 after the DatSet
 write`), and the next hardware capture, where the three named RCBs must show step 3 *running* and
 end at `TrgOps=0x13 VERIFIED`.
+
+## Dataset provisioning split out of `mms_report_client` into `mms_dataset_manager`
+
+**A pure refactor with no behavior change.** No wire calls added, removed or reordered; no
+resolution-tier logic, budget arithmetic, cleanup rule or log message altered. The only
+intentional observable difference is the log *prefix* on moved lines
+(`[mms_report_client]` → `[mms_dataset_manager]`), agreed explicitly before the work started.
+
+### Why
+
+`mms_report_client` had grown two unrelated responsibilities, with
+`data/mms_report_client_connection.c` alone at **3297 lines**:
+
+1. **Reporting** — connect/reconnect supervision, the sequential read-back-verified RCB enable
+   sequence, report decoding, the value-diff cache, EntryID resumption, cross-RCB dedup.
+2. **Datasets** — discovering what already exists on the device (SCL-static, live-assigned,
+   foreign/leftover), whole-device cluster planning, self-creation, `<DynDataSet>`/`<ConfDataSet>`
+   budget accounting, adoption, orphan cleanup and stop-time deletion.
+
+Responsibility 2 moved wholesale to `src/features/mms_dataset_manager/`, in the same
+`domain`/`data`/`service`/`utils` layering every other feature uses. `connection.c` is now
+**1503 lines** and the feature's name matches what it does again.
+
+### The boundary
+
+The four-tier resolution ladder that used to be inlined in `enableOneTarget` is now one call:
+
+```c
+MmsDatasetResolution resolution;
+MmsDatasetManager_resolveForTarget(handle->datasetManager, target, rcb, &resolution);
+```
+
+`rcb` is passed already-fetched and only read (tier 2 needs its live `DatSet`), so resolution
+costs no extra round-trip. Around it, `enableAllTargets` calls `_beginCycle`/`_endCycle`, and
+`MmsReportClientConnection_stop` calls `_cleanupOnStop` at exactly the point its two inline
+dataset passes used to run — before `IedConnection_close`, which both passes still require.
+
+The manager **borrows** `mms_report_client`'s `IedConnection` and never opens one of its own: an
+association-specific (`@`-prefixed) dataset created on a different association would be
+unassignable to the RCB being enabled, and a second association is exactly the extra device load
+this codebase avoids.
+
+### What deliberately did NOT move
+
+`refreshPulledMemberRefCache`/`ensureLnFallbackMemberRefCache` stayed in `mms_report_client` —
+they mutate its own member-ref/value-diff cache under its own `memberRefCacheLock`, against the
+report-adapter thread. Only `ensureLnFallbackMemberRefCache`'s signature changed: it takes the
+resolved member-reference list instead of reaching into the session's chunk assignments. Its two
+distinct early-return branches are preserved by `MmsDatasetResolution.memberReferences`
+distinguishing **NULL** ("no cluster assigned — nothing to reconcile, stamp nothing") from
+**EMPTY** ("cluster exists but holds no members — stamp the fingerprint so the rebuild isn't
+retried every enable"). `MmsReportClientUseCases_buildMemberRefCacheEntry` also stayed: it builds
+the *decode* cache, not a dataset.
+
+`MmsDatasetResolution.wasNeeded` carries forward the one signal that separates a benign unused
+spare Dyn RCB slot from a real failure to obtain a needed dataset — the distinction that keeps
+the per-cycle `N enabled, N not needed, N FAILED` summary trustworthy.
+
+### One ordering detail worth recording
+
+The per-RCB `'<rcb>' dataset resolved via <tier>` summary line is deliberately emitted by
+`enableOneTarget` **after** it runs decode-shape reconciliation, not by the dataset manager at the
+end of resolution. Logging it inside the manager was the obvious placement and was tried first —
+it silently reordered that line ahead of reconciliation's own `dataset identity changed` line,
+which had always preceded it. Caught by diffing a full E2E log capture against a pre-split
+baseline; `MmsDatasetResolution.tierName` exists so the caller can emit the line without a switch
+of its own.
+
+### Verification
+
+Baseline captured before any edit, compared after: **582 unit tests, 0 failures** (unchanged;
+`test_mms_report_client_usecases` 105 → 65, new `test_mms_dataset_manager_usecases` 40, total
+identical) and **18 E2E, 0 failures** in `integration_tests/mms_report_client`, which exercises
+the whole dataset lifecycle — dynamic creation, the domain-scoped buffered path, adoption, the
+enable step-order guard `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`, and
+`test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable` — through the new boundary, with
+no test edits beyond Makefile source lists.
+
+Behavior-neutrality was checked directly: both E2E runs' full stderr captures were normalized
+(feature prefix folded, heap addresses masked) and diffed. The result is identical apart from one
+line pair whose order flips run-to-run because the report-adapter thread races the supervisor
+thread's own output — an interleaving in code this change never touched.
+
+Nine Makefiles are hand-maintained and needed the new sources: `tests/Makefile` (7 existing rules
+plus one new `test_mms_dataset_manager_usecases` rule) and six `integration_tests/*/Makefile`
+(`mms_report_client`, `ipc_dispatcher`, `device_manager`, `control_dispatcher`, `orchestration`,
+`orchestration_local_file`). Nothing auto-discovers; a future feature split needs the same sweep.

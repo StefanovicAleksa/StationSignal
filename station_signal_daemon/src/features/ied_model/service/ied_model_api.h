@@ -181,7 +181,7 @@ LinkedList IedModel_getReportableAttributeReferencesForLogicalNode(IedModelHandl
  * own parent LN does not restrict what a dataset assigned to it can report on
  * (dataset members are independently addressed per-element, not tied to any
  * one LN - confirmed against IedConnection_createDataSet's own wire format and
- * this codebase's own MmsReportClientUseCases_buildWireMemberReferences), so
+ * this codebase's own MmsDatasetManagerUseCases_buildWireMemberReferences), so
  * mms_report_client uses this to cluster the ENTIRE device's reportable data
  * across however many spare "Dyn" RCB slots exist anywhere in the model, not
  * just slots parented on the same LN as the data. Purely local, never touches

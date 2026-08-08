@@ -4,7 +4,7 @@
 /*
  * Pure reference-format conversion logic - no third-party includes, no
  * IedConnection, no IedModel. This is the mirror image of mms_report_client's
- * own MmsReportClientUseCases_buildWireMemberReferences (which converts this
+ * own MmsDatasetManagerUseCases_buildWireMemberReferences (which converts this
  * codebase's "$"-joined wire form INTO IedConnection_createDataSet's required
  * dot/bracket form); this feature needs the OPPOSITE direction, since
  * IedConnection_getDataSetDirectory hands back member references already in
