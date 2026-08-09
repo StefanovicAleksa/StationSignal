@@ -24,6 +24,12 @@ type StartParams struct {
 	SCLFilePath      string     `json:"sclFilePath,omitempty"`
 	ACSEAuthPassword string     `json:"acseAuthPassword,omitempty"`
 	AccessMode       AccessMode `json:"accessMode,omitempty"`
+	// LnCategories filters which IEC 61850 Logical Node categories the daemon subscribes to
+	// ("CONTROL"/"MEASUREMENT"/"PROTECTION"/"OTHER") - nil/empty means unfiltered (the daemon's
+	// own default). Passed straight through to the daemon, which is the source of truth for
+	// valid values - it rejects an empty (non-nil) array or an unrecognized name as
+	// INVALID_PARAMS, so this layer doesn't duplicate that validation.
+	LnCategories []string `json:"lnCategories,omitempty"`
 }
 
 // EffectiveMMSPort returns mmsPort, or DefaultMMSPort if mmsPort is unset.

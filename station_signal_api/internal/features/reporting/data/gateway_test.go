@@ -32,9 +32,10 @@ func TestGateway_Start_MapsParamsAndResult(t *testing.T) {
 	gw := NewGateway(caller, ctx, nil)
 
 	params := domain.StartParams{
-		Host:        "10.0.0.5",
-		InterfaceID: "eth0",
-		AccessMode:  domain.AccessModeReadOnly,
+		Host:         "10.0.0.5",
+		InterfaceID:  "eth0",
+		AccessMode:   domain.AccessModeReadOnly,
+		LnCategories: []string{"CONTROL", "OTHER"},
 	}
 	device, hub, err := gw.Start(context.Background(), params)
 	defer hub.Close()
@@ -47,6 +48,7 @@ func TestGateway_Start_MapsParamsAndResult(t *testing.T) {
 	assert.Equal(t, "10.0.0.5", wireParams.Host)
 	assert.Equal(t, "eth0", wireParams.InterfaceID)
 	assert.Equal(t, "READ_ONLY", wireParams.AccessMode)
+	assert.Equal(t, []string{"CONTROL", "OTHER"}, wireParams.LnCategories)
 
 	assert.Equal(t, 7, device.ID)
 	assert.Equal(t, 9007, device.WSPort)

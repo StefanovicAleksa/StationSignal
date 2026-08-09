@@ -84,13 +84,14 @@ func (e *Error) Error() string {
 
 // StartReportingParams is the params object for a START_REPORTING request.
 type StartReportingParams struct {
-	Host             string `json:"host"`
-	MMSPort          int    `json:"mmsPort,omitempty"`
-	IEDName          string `json:"iedName,omitempty"`
-	InterfaceID      string `json:"interfaceId"`
-	SCLFilePath      string `json:"sclFilePath,omitempty"`
-	ACSEAuthPassword string `json:"acseAuthPassword,omitempty"`
-	AccessMode       string `json:"accessMode,omitempty"`
+	Host             string   `json:"host"`
+	MMSPort          int      `json:"mmsPort,omitempty"`
+	IEDName          string   `json:"iedName,omitempty"`
+	InterfaceID      string   `json:"interfaceId"`
+	SCLFilePath      string   `json:"sclFilePath,omitempty"`
+	ACSEAuthPassword string   `json:"acseAuthPassword,omitempty"`
+	AccessMode       string   `json:"accessMode,omitempty"`
+	LnCategories     []string `json:"lnCategories,omitempty"`
 }
 
 // StartReportingResult is the result object on a successful START_REPORTING response.

@@ -55,7 +55,8 @@ after the API itself has just started.
   "interfaceId": "eth0",
   "sclFilePath": null,
   "acseAuthPassword": null,
-  "accessMode": "REPORT_ONLY"
+  "accessMode": "REPORT_ONLY",
+  "lnCategories": null
 }
 ```
 
@@ -68,6 +69,7 @@ after the API itself has just started.
 | `sclFilePath` | no | a path on the **daemon's own filesystem**. Either a path you already know exists there, or — more commonly — the `path` returned by `POST /api/structure-files` (§2a) after uploading a file from the browser |
 | `acseAuthPassword` | no | omit for no ACSE-level auth |
 | `accessMode` | no | one of `"REPORT_ONLY"`, `"READ_ONLY"`, `"READ_AND_WRITE"` — defaults to `"REPORT_ONLY"` |
+| `lnCategories` | no | array of `"CONTROL"`, `"MEASUREMENT"`, `"PROTECTION"`, `"OTHER"` — filters which IEC 61850 Logical Node categories get subscribed to (e.g. `["CONTROL", "OTHER"]` skips measurement/protection data entirely). Omit (or `null`) for unfiltered — every LN, the previous/default behavior. An **empty array `[]` is rejected** with `400 INVALID_ARGUMENT` rather than treated as "unfiltered" — omit the field entirely if you want everything. An unrecognized category name is rejected the same way |
 
 **Success (`201 Created`):**
 

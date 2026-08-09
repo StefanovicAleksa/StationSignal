@@ -47,6 +47,7 @@ func (g *daemonGateway) Start(ctx context.Context, params domain.StartParams) (d
 		SCLFilePath:      params.SCLFilePath,
 		ACSEAuthPassword: params.ACSEAuthPassword,
 		AccessMode:       string(params.AccessMode),
+		LnCategories:     params.LnCategories,
 	}
 
 	raw, err := g.client.Call(ctx, daemonproto.ActionStartReporting, wireParams)

@@ -160,6 +160,46 @@ func TestReporting_InvalidParamsRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, testutil.BodyString(resp))
 }
 
+// TestReporting_EmptyLnCategoriesRejected proves the daemon's own fail-closed rule for an
+// explicit empty lnCategories array (as opposed to omitting the field, which means unfiltered)
+// surfaces through this API as the same 400 INVALID_ARGUMENT every other malformed START_REPORTING
+// request gets - the passthrough field doesn't need its own bespoke validation here because the
+// daemon already rejects it, and that rejection reaches the caller unchanged.
+func TestReporting_EmptyLnCategoriesRejected(t *testing.T) {
+	requireRoot(t)
+	daemonBin := testutil.BuildDaemon(t)
+	h := testutil.StartAPI(t, daemonBin)
+
+	resp, err := h.Post("/devices", map[string]any{
+		"host":         "127.0.0.1",
+		"interfaceId":  "lo",
+		"lnCategories": []string{},
+	})
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, testutil.BodyString(resp))
+}
+
+// TestReporting_UnrecognizedLnCategoryRejected mirrors the above for an unrecognized category
+// name rather than an empty array - both are the daemon's own INVALID_PARAMS, both must surface
+// identically here.
+func TestReporting_UnrecognizedLnCategoryRejected(t *testing.T) {
+	requireRoot(t)
+	daemonBin := testutil.BuildDaemon(t)
+	h := testutil.StartAPI(t, daemonBin)
+
+	resp, err := h.Post("/devices", map[string]any{
+		"host":         "127.0.0.1",
+		"interfaceId":  "lo",
+		"lnCategories": []string{"NOT_A_REAL_CATEGORY"},
+	})
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, testutil.BodyString(resp))
+}
+
 func TestReporting_StopUnknownDeviceReturnsNotFound(t *testing.T) {
 	requireRoot(t)
 	daemonBin := testutil.BuildDaemon(t)
