@@ -12,7 +12,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  connect: [host: string, mmsPort: number]
+  connect: [host: string, mmsPort: number, bypassCategoryModal: boolean]
 }>()
 
 const newestFirst = computed(() => [...props.results].reverse())
@@ -41,7 +41,12 @@ function formatTime(ms: number): string {
         <Td muted>{{ result.mmsPort }}</Td>
         <Td muted>{{ formatTime(result.discoveredAtMs) }}</Td>
         <Td align="right">
-          <Button variant="ghost" size="sm" :icon="Plug" @click="emit('connect', result.host, result.mmsPort)">
+          <Button
+            variant="ghost"
+            size="sm"
+            :icon="Plug"
+            @click="(e: MouseEvent) => emit('connect', result.host, result.mmsPort, e.shiftKey)"
+          >
             Connect
           </Button>
         </Td>

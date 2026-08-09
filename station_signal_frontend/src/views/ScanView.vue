@@ -35,10 +35,16 @@ function handleStart(interfaceId: string, mmsPort: number) {
   store.start(interfaceId, mmsPort)
 }
 
-function connectToDevice(host: string, mmsPort: number, interfaceId: string, sessionKey: string) {
+function connectToDevice(
+  host: string,
+  mmsPort: number,
+  interfaceId: string,
+  sessionKey: string,
+  bypassCategoryModal: boolean,
+) {
   connectError.value = null
   pendingSession = { sessionKey, host, mmsPort }
-  connectPrompt.value?.connect(host, mmsPort, interfaceId)
+  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, undefined, undefined, bypassCategoryModal)
 }
 
 function handleConnected(key: string) {

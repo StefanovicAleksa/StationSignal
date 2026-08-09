@@ -20,6 +20,7 @@ const emit = defineEmits<{
     interfaceId: string,
     iedName: string | undefined,
     sclFilePath: string | undefined,
+    bypassCategoryModal: boolean,
   ]
 }>()
 
@@ -33,6 +34,15 @@ const interfaceId = ref('')
 const iedName = ref('')
 const sclFilePath = ref('')
 const touched = ref(false)
+
+// Captured from the Connect button's own click (a form 'submit' event carries no modifier-key
+// state) - click fires before submit, so this is always up to date by the time handleSubmit runs.
+// Holding Shift while clicking Connect skips the category picker and connects unfiltered.
+const lastClickShiftHeld = ref(false)
+
+function captureShiftKey(event: MouseEvent) {
+  lastClickShiftHeld.value = event.shiftKey
+}
 
 onMounted(async () => {
   if (!settingsStore.status) {
@@ -93,6 +103,7 @@ function handleSubmit() {
     interfaceId.value.trim(),
     iedName.value.trim() || undefined,
     sclFilePath.value.trim() || undefined,
+    lastClickShiftHeld.value,
   )
 }
 
@@ -161,6 +172,8 @@ function handleStructureFilePath(path: string | undefined) {
       <p v-if="iedNameError" class="text-xs text-red-600 dark:text-red-400">{{ iedNameError }}</p>
     </div>
 
-    <Button type="submit" variant="primary" :icon="Plug" :disabled="props.disabled">Connect</Button>
+    <Button type="submit" variant="primary" :icon="Plug" :disabled="props.disabled" @click="captureShiftKey">
+      Connect
+    </Button>
   </form>
 </template>

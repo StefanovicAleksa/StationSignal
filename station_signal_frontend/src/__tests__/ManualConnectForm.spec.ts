@@ -57,7 +57,17 @@ describe('ManualConnectForm', () => {
     await fill(wrapper, 'manualHost', '10.0.0.5')
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined]])
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, false]])
+  })
+
+  it('emits bypassCategoryModal=true when the Connect button is clicked while holding Shift', async () => {
+    const wrapper = await mountForm()
+    await fill(wrapper, 'manualHost', '10.0.0.5')
+
+    await wrapper.find('button[type="submit"]').trigger('click', { shiftKey: true })
+    await wrapper.find('form').trigger('submit.prevent')
+
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, true]])
   })
 
   it('emits connect with iedName and the uploaded structure file path when both are provided', async () => {
@@ -71,7 +81,7 @@ describe('ManualConnectForm', () => {
 
     expect(uploadStructureFile).toHaveBeenCalledWith(expect.objectContaining({ name: 'device.icd' }))
     expect(wrapper.emitted('connect')).toEqual([
-      ['10.0.0.5', 102, 'eth0', 'IED1', '/data/structure_files/abc-device.icd'],
+      ['10.0.0.5', 102, 'eth0', 'IED1', '/data/structure_files/abc-device.icd', false],
     ])
   })
 
@@ -96,6 +106,6 @@ describe('ManualConnectForm', () => {
     await selectStructureFile(wrapper, new File(['<SCL/>'], 'device.icd', { type: 'text/xml' }))
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', 'IED1', undefined]])
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', 'IED1', undefined, false]])
   })
 })

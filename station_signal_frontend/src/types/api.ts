@@ -85,6 +85,18 @@ export interface ScanResultMessage {
 
 export type AccessMode = 'REPORT_ONLY' | 'READ_ONLY' | 'READ_AND_WRITE'
 
+// Mirrors the daemon's own IEC 61850 Logical Node category buckets (see
+// station_signal_api's FRONTEND_API_GUIDE.md §2). Omitting `lnCategories` entirely on
+// StartDeviceRequest means unfiltered - every LN, the historical default.
+export type LnCategory = 'CONTROL' | 'MEASUREMENT' | 'PROTECTION' | 'OTHER'
+
+// Control + Other, not Control alone - real devices very commonly parent their report/GOOSE
+// control blocks on LLN0, which classifies as Other, not Control. Defaulting to Control-only
+// would silently connect to such a device and show zero data. Shared between
+// ConnectCategoryModal.vue (its own pre-checked selection) and DeviceConnectPrompt.vue (what a
+// Shift-click connect uses to skip the modal) so the two stay in lockstep.
+export const DEFAULT_LN_CATEGORIES: LnCategory[] = ['CONTROL', 'OTHER']
+
 export interface StartDeviceRequest {
   host: string
   mmsPort?: number
@@ -93,6 +105,7 @@ export interface StartDeviceRequest {
   sclFilePath?: string
   acseAuthPassword?: string
   accessMode?: AccessMode
+  lnCategories?: LnCategory[]
 }
 
 export interface UploadStructureFileResponse {

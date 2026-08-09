@@ -3,8 +3,9 @@ import { ref } from 'vue'
 import { Plug } from '@lucide/vue'
 
 import { useDevicesStore } from '@/stores/devices'
-import { ApiError, formatApiErrorDetail, isAuthRequiredError } from '@/types/api'
+import { ApiError, DEFAULT_LN_CATEGORIES, formatApiErrorDetail, isAuthRequiredError, type LnCategory } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
+import ConnectCategoryModal from '@/components/device/ConnectCategoryModal.vue'
 
 const emit = defineEmits<{
   connected: [key: string]
@@ -19,6 +20,7 @@ interface PendingPasswordPrompt {
   interfaceId: string
   iedName?: string
   sclFilePath?: string
+  lnCategories?: LnCategory[]
 }
 
 const pendingPasswordPrompt = ref<PendingPasswordPrompt | null>(null)
@@ -26,16 +28,18 @@ const passwordInput = ref('')
 const passwordSubmitting = ref(false)
 const passwordTouched = ref(false)
 
-// Exposed so callers (ScanView, DevicesView) can trigger a connect attempt from wherever they
-// get host/mmsPort/interfaceId (a scan result, a manual form, ...) without this component
-// needing to know where that came from.
-async function connect(
+// Actually calls the API. Separated from connect() below so a password retry
+// (submitPassword) can re-invoke this directly without re-showing the category picker -
+// the categories for this connect attempt were already decided once, either by the modal
+// or by a Shift-bypass.
+async function doStart(
   host: string,
   mmsPort: number,
   interfaceId: string,
-  acseAuthPassword?: string,
-  iedName?: string,
-  sclFilePath?: string,
+  acseAuthPassword: string | undefined,
+  iedName: string | undefined,
+  sclFilePath: string | undefined,
+  lnCategories: LnCategory[] | undefined,
 ) {
   try {
     const key = await devicesStore.startDevice({
@@ -45,18 +49,77 @@ async function connect(
       acseAuthPassword,
       iedName,
       sclFilePath,
+      lnCategories,
     })
     pendingPasswordPrompt.value = null
     passwordInput.value = ''
     emit('connected', key)
   } catch (err) {
     if (isAuthRequiredError(err)) {
-      pendingPasswordPrompt.value = { host, mmsPort, interfaceId, iedName, sclFilePath }
+      pendingPasswordPrompt.value = { host, mmsPort, interfaceId, iedName, sclFilePath, lnCategories }
       return
     }
     pendingPasswordPrompt.value = null
     emit('error', err instanceof ApiError ? formatApiErrorDetail(err) : 'Failed to connect to device.')
   }
+}
+
+interface PendingCategoryPrompt {
+  host: string
+  mmsPort: number
+  interfaceId: string
+  acseAuthPassword?: string
+  iedName?: string
+  sclFilePath?: string
+}
+
+const pendingCategoryPrompt = ref<PendingCategoryPrompt | null>(null)
+const categoryModalOpen = ref(false)
+
+// Exposed so callers (ScanView, DevicesView) can trigger a connect attempt from wherever they
+// get host/mmsPort/interfaceId (a scan result, a manual form, ...) without this component
+// needing to know where that came from.
+//
+// bypassCategoryModal is true when the user held Shift while clicking Connect - skips the
+// category picker entirely and connects straight away with the same default categories the
+// picker itself would have pre-checked (DEFAULT_LN_CATEGORIES), a shortcut for the common case,
+// not an "unfiltered" escape hatch.
+async function connect(
+  host: string,
+  mmsPort: number,
+  interfaceId: string,
+  acseAuthPassword?: string,
+  iedName?: string,
+  sclFilePath?: string,
+  bypassCategoryModal = false,
+) {
+  if (bypassCategoryModal) {
+    await doStart(host, mmsPort, interfaceId, acseAuthPassword, iedName, sclFilePath, DEFAULT_LN_CATEGORIES)
+    return
+  }
+  pendingCategoryPrompt.value = { host, mmsPort, interfaceId, acseAuthPassword, iedName, sclFilePath }
+  categoryModalOpen.value = true
+}
+
+async function onCategoryConfirm(categories: LnCategory[] | undefined) {
+  categoryModalOpen.value = false
+  const pending = pendingCategoryPrompt.value
+  pendingCategoryPrompt.value = null
+  if (!pending) return
+  await doStart(
+    pending.host,
+    pending.mmsPort,
+    pending.interfaceId,
+    pending.acseAuthPassword,
+    pending.iedName,
+    pending.sclFilePath,
+    categories,
+  )
+}
+
+function onCategoryCancel() {
+  categoryModalOpen.value = false
+  pendingCategoryPrompt.value = null
 }
 
 async function submitPassword() {
@@ -66,13 +129,14 @@ async function submitPassword() {
 
   passwordSubmitting.value = true
   try {
-    await connect(
+    await doStart(
       pending.host,
       pending.mmsPort,
       pending.interfaceId,
       passwordInput.value,
       pending.iedName,
       pending.sclFilePath,
+      pending.lnCategories,
     )
   } finally {
     passwordSubmitting.value = false
@@ -90,6 +154,8 @@ defineExpose({ connect })
 </script>
 
 <template>
+  <ConnectCategoryModal :open="categoryModalOpen" @confirm="onCategoryConfirm" @cancel="onCategoryCancel" />
+
   <form
     v-if="pendingPasswordPrompt"
     class="flex flex-wrap items-end gap-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-900/30"

@@ -15,13 +15,13 @@ const props = defineProps<{
 const emit = defineEmits<{
   stop: []
   retryNow: []
-  connect: [host: string, mmsPort: number, interfaceId: string, sessionKey: string]
+  connect: [host: string, mmsPort: number, interfaceId: string, sessionKey: string, bypassCategoryModal: boolean]
 }>()
 
 const isBusy = computed(() => props.session.phase === 'starting' || props.session.phase === 'stopping')
 
-function handleConnect(host: string, mmsPort: number) {
-  emit('connect', host, mmsPort, props.session.interfaceId, props.session.key)
+function handleConnect(host: string, mmsPort: number, bypassCategoryModal: boolean) {
+  emit('connect', host, mmsPort, props.session.interfaceId, props.session.key, bypassCategoryModal)
 }
 </script>
 

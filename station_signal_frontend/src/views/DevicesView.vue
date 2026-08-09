@@ -25,9 +25,10 @@ function handleConnect(
   interfaceId: string,
   iedName?: string,
   sclFilePath?: string,
+  bypassCategoryModal = false,
 ) {
   connectError.value = null
-  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, iedName, sclFilePath)
+  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, iedName, sclFilePath, bypassCategoryModal)
 }
 
 function handleConnected(key: string) {
