@@ -69,6 +69,7 @@
 #define TEST_PORT_GI_ONLY 10220
 #define TEST_PORT_DELETE_WHILE_ENABLED 10221
 #define TEST_PORT_SPARE_RCB 10222
+#define TEST_PORT_CATEGORY_FILTER 10223
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
 #define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
@@ -328,7 +329,7 @@ test_dataChangeOnServer_triggersReportWithNewValue(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -405,7 +406,7 @@ test_authRequired_correctPassword_connectsAndEnablesRcb(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -447,7 +448,7 @@ test_authRequired_wrongPassword_neverConnects(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -492,7 +493,7 @@ test_authRequired_wrongPassword_firesConnectionRejectedCallback(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -589,7 +590,7 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -684,7 +685,7 @@ test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -866,7 +867,7 @@ test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched(void) 
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1001,7 +1002,7 @@ test_siblingBufferedDynRcbs_reconnectDoesNotCrossAdoptEachOthersLeftoverDataset(
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH_SIBLING_BUFFERED, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_sibling_buffered.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1099,7 +1100,7 @@ test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH_GI_ONLY, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_gi_only.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1227,7 +1228,7 @@ test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated(voi
      * dataset the setup connection left behind. ---- */
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1320,7 +1321,7 @@ test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreserve
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1502,7 +1503,7 @@ test_crossRcbDuplicateContent_bothIdenticalRcbsReachCallback_dedupMovedDownstrea
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1614,7 +1615,7 @@ test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1747,7 +1748,7 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1851,7 +1852,7 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile("fixtures/reporter1_chunking.cid", "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_chunking.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -1950,7 +1951,7 @@ test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile("fixtures/reporter1_budget.cid", "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_budget.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -2093,7 +2094,7 @@ test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH_SPARE_RCB, "Reporter1",
-            IED_MODEL_ACCESS_READ_AND_WRITE, &modelError);
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1_spare_rcb.cid to load successfully");
 
     MmsReportClientConfig config;
@@ -2137,6 +2138,114 @@ test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed(void) {
     SimServer_destroy(sim);
 }
 
+/*
+ * Proves the category filter's redesigned behavior end-to-end against a real
+ * MMS association, not just in unit tests against a dynamically-built model:
+ * RCB VISIBILITY no longer depends on category at all (categoryFilter was
+ * removed from IedModel_getReportSubscriptionTargets's own gating - see that
+ * function's doc comment in ied_model_usecases.c), while individual DATA
+ * POINTS are still filtered by their own LN's category, downstream in
+ * mms_report_client's own collectCandidates.
+ *
+ * This fixture's real LN classes are LLN0/GGIO1 (this simulator's own fixed
+ * model, shared across every E2E suite in this repo - see
+ * integration_tests/ied_simulator/'s own "fully decoupled from src/" note,
+ * not modified here to avoid destabilizing every other suite that depends on
+ * its exact shape) - both classify as OTHER (group letters L and G). A
+ * CONTROL-only filter therefore now: (a) still enables brcbMain normally -
+ * MmsReportClient_start returns MMS_REPORT_CLIENT_OK, not
+ * MMS_REPORT_CLIENT_ERR_NO_TARGETS, proving the daemon still knows exactly
+ * where this RCB's dataset lives - but (b) a real value change on GGIO1.Ind1
+ * (OTHER-category) never reaches the report callback, since none of this
+ * fixture's data belongs to CONTROL. An OTHER-only filter, by contrast,
+ * matches everything here and must both enable brcbMain AND deliver a real
+ * change, exactly like the unfiltered case proven at the top of this file.
+ */
+void
+test_categoryFilter_rcbAlwaysEnabled_butNonMatchingDataPointsNeverDelivered(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_CATEGORY_FILTER);
+
+    IedModelLoadError modelError;
+    IedModelHandle controlOnlyModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_CONTROL, &modelError);
+    TEST_ASSERT_NOT_NULL(controlOnlyModel);
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle controlOnlyClient = MmsReportClient_create(controlOnlyModel, "127.0.0.1",
+            TEST_PORT_CATEGORY_FILTER, &config, &clientError);
+    TEST_ASSERT_NOT_NULL(controlOnlyClient);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, clientError);
+
+    strncpy(interestedRcbReference, "Reporter1LD1/LLN0.BR.brcbMain", sizeof(interestedRcbReference) - 1);
+    MmsReportClient_setReportCallback(controlOnlyClient, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(controlOnlyClient, onRcbStatus, NULL);
+
+    MmsReportClientError controlOnlyStartError = MmsReportClient_start(controlOnlyClient);
+    TEST_ASSERT_EQUAL_MESSAGE(MMS_REPORT_CLIENT_OK, controlOnlyStartError,
+            "RCB visibility must no longer depend on category - brcbMain must still enable "
+            "successfully even though this fixture's only data (LLN0/GGIO1) is entirely OTHER, "
+            "never CONTROL");
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
+            "brcbMain must enable normally under a CONTROL-only filter - only its data points, "
+            "not the RCB itself, are subject to the filter");
+
+    /* GI snapshot is bootstrap-suppressed regardless of category. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "the GI snapshot must never reach the callback, same as the unfiltered case");
+
+    SimServer_setIndication(sim, true);
+
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
+            "a real value change on OTHER-category data (GGIO1.Ind1) must never reach the "
+            "callback under a CONTROL-only filter - the RCB stays enabled and healthy the whole "
+            "time, only its individual data points are filtered");
+
+    MmsReportClient_destroy(controlOnlyClient);
+    IedModel_release(controlOnlyModel);
+
+    /* Same device, OTHER-only filter this time - must behave exactly like
+     * the unfiltered case (LLN0/GGIO1 are both OTHER): enables AND delivers. */
+    IedModelHandle otherOnlyModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_OTHER, &modelError);
+    TEST_ASSERT_NOT_NULL(otherOnlyModel);
+
+    MmsReportClientHandle otherOnlyClient = MmsReportClient_create(otherOnlyModel, "127.0.0.1",
+            TEST_PORT_CATEGORY_FILTER, &config, &clientError);
+    TEST_ASSERT_NOT_NULL(otherOnlyClient);
+
+    MmsReportClient_setReportCallback(otherOnlyClient, onReport, NULL);
+    MmsReportClient_setRcbStatusCallback(otherOnlyClient, onRcbStatus, NULL);
+    MmsReportClientError otherOnlyStartError = MmsReportClient_start(otherOnlyClient);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, otherOnlyStartError);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&rcbEnabled),
+            "an OTHER-only filter must still enable brcbMain, since LLN0/GGIO1 classify as OTHER");
+
+    /* brcbMain is buffered, and the earlier flip (made while the CONTROL-only
+     * client was connected) was buffered server-side regardless of this
+     * client's own category filter - this fresh client has no EntryID to
+     * resume from, so its own enable may replay that backlog directly
+     * (arriving before any explicit flip here) rather than a clean GI-then-
+     * flip sequence. Either ordering equally proves delivery works under a
+     * matching filter, so only force a fresh flip if nothing arrived yet. */
+    if (!waitBriefly(&reportReceived)) {
+        SimServer_setIndication(sim, false);
+    }
+
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
+            "an OTHER-only filter must still deliver a real change on OTHER-category data");
+
+    MmsReportClient_destroy(otherOnlyClient);
+    IedModel_release(otherOnlyModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -2159,6 +2268,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly);
     RUN_TEST(test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable);
     RUN_TEST(test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed);
+    RUN_TEST(test_categoryFilter_rcbAlwaysEnabled_butNonMatchingDataPointsNeverDelivered);
 
     return UNITY_END();
 }

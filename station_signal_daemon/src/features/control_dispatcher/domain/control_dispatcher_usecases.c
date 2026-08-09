@@ -125,7 +125,8 @@ ControlDispatcherUseCases_processRequest(const ControlRequest* request, DeviceMa
             DeviceManagerErrorDetail detail;
             DeviceManagerError err = DeviceManager_startReporting(deviceManager, request->host, request->mmsPort,
                     request->iedName, request->interfaceId, request->sclFilePath, request->acseAuthPassword,
-                    request->accessMode, &deviceId, &wsPort, &detail, &mmsAvailable, &gooseAvailable);
+                    request->accessMode, request->lnCategoryFilter, &deviceId, &wsPort, &detail, &mmsAvailable,
+                    &gooseAvailable);
 
             return buildStartResponse(request->requestId, err, deviceId, wsPort, &detail, mmsAvailable,
                     gooseAvailable);

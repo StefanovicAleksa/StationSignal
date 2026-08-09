@@ -35,7 +35,7 @@ tearDown(void) {}
 void
 test_loadsFixtureSuccessfully(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_AND_WRITE, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected breaker1.cid to load successfully");
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -46,7 +46,7 @@ test_loadsFixtureSuccessfully(void) {
 void
 test_gooseSubscriptionTarget_resolvesCorrectReference(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList goose = IedModel_getGooseSubscriptionTargets(handle);
@@ -72,7 +72,7 @@ test_gooseSubscriptionTarget_resolvesCorrectReference(void) {
 void
 test_reportSubscriptionTarget_resolvesCorrectReference(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList report = IedModel_getReportSubscriptionTargets(handle);
@@ -92,7 +92,7 @@ test_reportSubscriptionTarget_resolvesCorrectReference(void) {
 void
 test_readTargets_matchExpectedCount_andExcludeConfigAndControlAttributes(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList read = IedModel_getReadTargets(handle);
@@ -121,7 +121,7 @@ test_readTargets_matchExpectedCount_andExcludeConfigAndControlAttributes(void) {
 void
 test_controlTargets_includeOnlyThePosDataObject(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_AND_WRITE, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList control = IedModel_getControlTargets(handle);
@@ -140,7 +140,7 @@ test_gooseControlBlock_hasPhyComAddressAttached_fromCommunicationSection(void) {
      * API contract) to verify the <Communication>-derived GOOSE transport
      * addressing actually attached, not just that a reference string exists. */
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     GSEControlBlock* gcb = handle->model->gseCBs;
@@ -164,7 +164,7 @@ test_gooseControlBlock_hasPhyComAddressAttached_fromCommunicationSection(void) {
 void
 test_reportOnlyMode_deniesReadAndControlTargets(void) {
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(FIXTURE_PATH, "Breaker1", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList read = IedModel_getReadTargets(handle);
@@ -190,7 +190,7 @@ void
 test_hardening_hexAppidVlanId_parsedCorrectly(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile(HARDENING_FIXTURE_PATH, "HardeningIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     GSEControlBlock* gcb = handle->model->gseCBs;
@@ -210,7 +210,7 @@ void
 test_hardening_sdiWrappedOverride_appliesNestedValue(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile(HARDENING_FIXTURE_PATH, "HardeningIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LogicalDevice* ld = IedModel_getDeviceByInst(handle->model, "ED1");
@@ -236,7 +236,7 @@ void
 test_hardening_nonNumericEnumOverride_resolvesRealOrdinal(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile(HARDENING_FIXTURE_PATH, "HardeningIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LogicalDevice* ld = IedModel_getDeviceByInst(handle->model, "ED1");
@@ -262,7 +262,7 @@ void
 test_hardening_ldNameFunctionalNaming_resolvesFcdaAndRoundTrips(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile(HARDENING_FIXTURE_PATH, "HardeningIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL(handle);
 
     LogicalDevice* ld = IedModel_getDeviceByInst(handle->model, "ED1");
@@ -295,7 +295,7 @@ void
 test_privateOnly_parsesEscapedReportControl(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/private_only.icd", "PrivateOnlyIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected private_only.icd to still load successfully");
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -327,7 +327,7 @@ void
 test_privateControlBlockStorage_malformedPayloads_loadSuccessfullyWithNoTargets(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/private_control_block_storage_malformed.icd",
-            "MalformedPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            "MalformedPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected malformed Private payloads to still load successfully");
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -350,7 +350,7 @@ void
 test_privateControlBlockStorage_multipleEntries_allDiscovered(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/private_control_block_storage_multi.icd",
-            "MultiPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            "MultiPrivateIED", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected private_control_block_storage_multi.icd to load successfully");
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -402,7 +402,7 @@ test_leadingComment_doesNotDerailSclRootResolution(void) {
     LinkedList_destroyDeep(names, free);
 
     IedModelHandle handle = IedModel_loadFromFile("fixtures/leading_comment.icd", "LeadingCommentIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected a leading top-level comment to not break SCL root resolution");
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
 
@@ -420,7 +420,7 @@ void
 test_services_dynDataSet_parsesMaxAndMaxAttributes(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/services_dyn_dataset.icd", "ServicesDynDatasetIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -440,7 +440,7 @@ void
 test_services_selfClosingEmpty_reportsUnknown(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/services_empty.icd", "ServicesEmptyIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -460,12 +460,182 @@ void
 test_services_absent_reportsUnknown(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("fixtures/private_only.icd", "PrivateOnlyIED",
-            IED_MODEL_ACCESS_REPORT_ONLY, &error);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
     TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMax(handle));
     TEST_ASSERT_EQUAL_INT(-1, IedModel_getDynDataSetMaxAttributes(handle));
+
+    IedModel_release(handle);
+}
+
+/* ---- categoryFilter (real SCL lnClass/desc parsing - see fixtures/category_filter.cid) ----
+ *
+ * Fixture shape: IED "CatFilterIED", LDevice "CB1": LLN0 (OTHER, hosts
+ * buffered RCB "brcbMain" + GoCB "gcbStatus", both on dataset "ds1" spanning
+ * all four LNs) + XCBR1 (CONTROL, also hosts its OWN unbuffered RCB
+ * "urcbXcbr" on a private dataset "dsXcbr") + MMXU1 (MEASUREMENT) + PTOC1
+ * (PROTECTION). XCBR1's Pos.stVal carries desc="Circuit breaker position",
+ * PTOC1's Str.general carries desc="Protection general start" - both at the
+ * DA-template level, proving the real mxml attribute-reading path (not just
+ * the dynamic-model unit tests, which never touch SCL parsing at all). */
+
+#define CATEGORY_FIXTURE_PATH "fixtures/category_filter.cid"
+
+static int
+countLinkedListMatching(LinkedList list, bool (*predicate)(const char*)) {
+    int count = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        if (predicate((const char*) LinkedList_getData(element))) count++;
+        element = LinkedList_getNext(element);
+    }
+    return count;
+}
+
+static bool
+alwaysTrue(const char* ref) {
+    (void) ref;
+    return true;
+}
+
+/* RCB/GoCB visibility is deliberately NOT gated by categoryFilter - the
+ * daemon always needs every RCB/GoCB visible to know where every dataset
+ * lives, regardless of the category filter in effect. Category filtering
+ * happens per-point instead, downstream in mms_report_client/goose_subscriber
+ * - see their own integration suites for that proof. */
+void
+test_categoryFilter_reportTargets_alwaysIncludedRegardlessOfParentLn(void) {
+    IedModelLoadError error;
+
+    /* Unfiltered: both brcbMain (parent LLN0) and urcbXcbr (parent XCBR1). */
+    IedModelHandle allHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(allHandle);
+    LinkedList allTargets = IedModel_getReportSubscriptionTargets(allHandle);
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(allTargets));
+    LinkedList_destroyDeep(allTargets, IedModel_destroyReportControlBlockTarget);
+    IedModel_release(allHandle);
+
+    /* CONTROL-only: both RCBs still present, including brcbMain (parent LLN0,
+     * category OTHER) - a narrow filter must never hide it, since the daemon
+     * still needs to know its dataset exists regardless of the active filter. */
+    IedModelHandle controlHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_CONTROL, &error);
+    TEST_ASSERT_NOT_NULL(controlHandle);
+    LinkedList controlTargets = IedModel_getReportSubscriptionTargets(controlHandle);
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(controlTargets));
+    LinkedList_destroyDeep(controlTargets, IedModel_destroyReportControlBlockTarget);
+    IedModel_release(controlHandle);
+
+    /* MEASUREMENT-only: still both RCBs, even though neither RCB's own
+     * parent LN (LLN0/XCBR1) is MEASUREMENT. */
+    IedModelHandle measurementHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_MEASUREMENT, &error);
+    TEST_ASSERT_NOT_NULL(measurementHandle);
+    LinkedList measurementTargets = IedModel_getReportSubscriptionTargets(measurementHandle);
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(measurementTargets));
+    LinkedList_destroyDeep(measurementTargets, IedModel_destroyReportControlBlockTarget);
+    IedModel_release(measurementHandle);
+}
+
+void
+test_categoryFilter_gooseTargets_alwaysIncludedRegardlessOfParentLn(void) {
+    IedModelLoadError error;
+
+    /* gcbStatus is parented on LLN0 (group L -> OTHER) - still present under
+     * a CONTROL-only filter. */
+    IedModelHandle controlHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_CONTROL, &error);
+    TEST_ASSERT_NOT_NULL(controlHandle);
+    LinkedList controlTargets = IedModel_getGooseSubscriptionTargets(controlHandle);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(controlTargets));
+    LinkedList_destroyDeep(controlTargets, IedModel_destroyGooseSubscriptionTarget);
+    IedModel_release(controlHandle);
+
+    IedModelHandle otherHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_OTHER, &error);
+    TEST_ASSERT_NOT_NULL(otherHandle);
+    LinkedList otherTargets = IedModel_getGooseSubscriptionTargets(otherHandle);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(otherTargets));
+    LinkedList_destroyDeep(otherTargets, IedModel_destroyGooseSubscriptionTarget);
+    IedModel_release(otherHandle);
+}
+
+void
+test_categoryFilter_wholeDeviceReportableAttributes_filteredByEachLeafsOwnLn(void) {
+    IedModelLoadError error;
+    IedModelHandle allHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(allHandle);
+    LinkedList allLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(allHandle);
+    int allCount = countLinkedListMatching(allLeaves, alwaysTrue);
+    TEST_ASSERT_TRUE_MESSAGE(allCount > 0, "expected at least one reportable leaf across the whole device");
+    LinkedList_destroyDeep(allLeaves, free);
+    IedModel_release(allHandle);
+
+    /* CONTROL-only must include XCBR1's own leaves and exclude every other LN's. */
+    IedModelHandle controlHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_CONTROL, &error);
+    TEST_ASSERT_NOT_NULL(controlHandle);
+    LinkedList controlLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(controlHandle);
+    int controlCount = LinkedList_size(controlLeaves);
+    TEST_ASSERT_TRUE_MESSAGE(controlCount > 0, "expected XCBR1's own leaves to survive a CONTROL-only filter");
+    TEST_ASSERT_TRUE_MESSAGE(controlCount < allCount,
+            "a CONTROL-only filter must exclude at least the MEASUREMENT/PROTECTION/OTHER leaves");
+
+    bool foundNonXcbrLeaf = false;
+    LinkedList element = LinkedList_getNext(controlLeaves);
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        if (!strstr(ref, "/XCBR1")) foundNonXcbrLeaf = true;
+        element = LinkedList_getNext(element);
+    }
+    TEST_ASSERT_FALSE_MESSAGE(foundNonXcbrLeaf, "a CONTROL-only filter must exclude every non-XCBR1 leaf");
+    LinkedList_destroyDeep(controlLeaves, free);
+    IedModel_release(controlHandle);
+
+    /* PROTECTION-only must include only PTOC1's own leaves. */
+    IedModelHandle protectionHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_PROTECTION, &error);
+    TEST_ASSERT_NOT_NULL(protectionHandle);
+    LinkedList protectionLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(protectionHandle);
+    TEST_ASSERT_TRUE(LinkedList_size(protectionLeaves) > 0);
+    bool foundNonPtocLeaf = false;
+    element = LinkedList_getNext(protectionLeaves);
+    while (element) {
+        const char* ref = (const char*) LinkedList_getData(element);
+        if (!strstr(ref, "/PTOC1")) foundNonPtocLeaf = true;
+        element = LinkedList_getNext(element);
+    }
+    TEST_ASSERT_FALSE_MESSAGE(foundNonPtocLeaf, "a PROTECTION-only filter must exclude every non-PTOC1 leaf");
+    LinkedList_destroyDeep(protectionLeaves, free);
+    IedModel_release(protectionHandle);
+}
+
+void
+test_categoryFilter_descCapturedFromRealScl_bothTemplateLevelLeaves(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    TEST_ASSERT_EQUAL_STRING("Circuit breaker position",
+            IedModel_getDescriptionForMemberReference(handle, "CatFilterIEDCB1/XCBR1$ST$Pos$stVal"));
+    TEST_ASSERT_EQUAL_STRING("Protection general start",
+            IedModel_getDescriptionForMemberReference(handle, "CatFilterIEDCB1/PTOC1$ST$Str$general"));
+    /* MMXU1's TotW$mag$f leaf carries no desc anywhere in the fixture. */
+    TEST_ASSERT_NULL(IedModel_getDescriptionForMemberReference(handle, "CatFilterIEDCB1/MMXU1$MX$TotW$mag$f"));
+
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_CONTROL,
+            IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/XCBR1$ST$Pos$stVal"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_MEASUREMENT,
+            IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/MMXU1$MX$TotW$mag$f"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_PROTECTION,
+            IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/PTOC1$ST$Str$general"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER,
+            IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/LLN0$ST$Mod$stVal"));
 
     IedModel_release(handle);
 }
@@ -494,6 +664,11 @@ main(void) {
     RUN_TEST(test_services_dynDataSet_parsesMaxAndMaxAttributes);
     RUN_TEST(test_services_selfClosingEmpty_reportsUnknown);
     RUN_TEST(test_services_absent_reportsUnknown);
+
+    RUN_TEST(test_categoryFilter_reportTargets_alwaysIncludedRegardlessOfParentLn);
+    RUN_TEST(test_categoryFilter_gooseTargets_alwaysIncludedRegardlessOfParentLn);
+    RUN_TEST(test_categoryFilter_wholeDeviceReportableAttributes_filteredByEachLeafsOwnLn);
+    RUN_TEST(test_categoryFilter_descCapturedFromRealScl_bothTemplateLevelLeaves);
 
     return UNITY_END();
 }

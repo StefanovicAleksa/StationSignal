@@ -38,11 +38,15 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
     const char** pointLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
     bool* pointHasPreviousLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(bool)) : NULL;
     const char** pointPreviousLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
+    const char** pointCategory = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
+    bool* pointHasDescription = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(bool)) : NULL;
+    const char** pointDescription = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
 
     int builtCount = 0;
     if (valueCount > 0 && pointRefs && pointValues && pointHasQuality && pointQuality
             && pointHasPreviousValue && pointPreviousValue && pointHasPreviousQuality && pointPreviousQuality
-            && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel) {
+            && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel
+            && pointCategory && pointHasDescription && pointDescription) {
         int out = 0;
         for (int k = 0; k < valueCount; k++) {
             int vi = valueIdx[k];
@@ -84,6 +88,12 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
                 }
             }
 
+            /* category is never absent; description is genuinely optional -
+             * see the MMS adapter's identical block for the full rationale. */
+            pointCategory[out] = IedModel_categoryToString(record->entries[vi].category);
+            pointHasDescription[out] = record->entries[vi].description != NULL;
+            if (pointHasDescription[out]) pointDescription[out] = record->entries[vi].description;
+
             /* Cross-GoCB dedup, same protocol only - catches the SAME real
              * change already forwarded by a DIFFERENT GoCB this instant. See
              * IpcDispatcherUseCases_shouldForwardWithinProtocol's own doc
@@ -111,6 +121,9 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
         .pointLabel = pointLabel,
         .pointHasPreviousLabel = pointHasPreviousLabel,
         .pointPreviousLabel = pointPreviousLabel,
+        .pointCategory = pointCategory,
+        .pointHasDescription = pointHasDescription,
+        .pointDescription = pointDescription,
     };
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
@@ -142,6 +155,9 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
     free(pointLabel);
     free(pointHasPreviousLabel);
     free(pointPreviousLabel);
+    free(pointCategory); /* pointer table only - contents are static/borrowed */
+    free(pointHasDescription);
+    free(pointDescription); /* pointer table only - contents are borrowed (record->entries[].description) */
     free(pointRefs);
     free(refs);
     free(valueIdx);

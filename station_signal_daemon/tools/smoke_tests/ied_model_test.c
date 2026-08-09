@@ -29,7 +29,7 @@ runCase(const char* path, const char* iedName) {
 
     for (int i = 0; i < 3; i++) {
         IedModelLoadError err;
-        IedModelHandle handle = IedModel_loadFromFile(path, iedName, modes[i], &err);
+        IedModelHandle handle = IedModel_loadFromFile(path, iedName, modes[i], IED_MODEL_LN_CATEGORY_ALL, &err);
         if (!handle) {
             printf("  [%s] load failed, error=%d\n", modeNames[i], err);
             continue;

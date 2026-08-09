@@ -3,6 +3,7 @@
 #include <string.h>
 #include "features/ied_model/data/ied_model_scl_loader.h"
 #include "features/ied_model/utils/ied_model_utils.h"
+#include "features/ied_model/utils/ied_model_ln_category.h"
 #include "iec61850_dynamic_model.h"
 #include "mms_value.h"
 #include "mxml.h"
@@ -12,8 +13,13 @@ typedef struct {
     mxml_node_t* sclRoot;
     mxml_node_t* templates; /* may be NULL - every lookup against it must handle that */
     const char* iedName;
-    LinkedList daSemantics; /* model-scoped (unlike enumAttrs, which is LN-scoped and
-                                created/destroyed per-LN) - see buildDataAttribute */
+    LinkedList daSemantics;   /* model-scoped (unlike enumAttrs, which is LN-scoped and
+                                  created/destroyed per-LN) - see buildDataAttribute */
+    LinkedList lnCategories;  /* model-scoped, one IedModelLnCategoryEntry* per LN - see
+                                  buildLogicalNodeStructure */
+    LinkedList daDescriptions; /* model-scoped, one IedModelDaDescEntry* per DA with a desc -
+                                   see buildDataAttribute (template level) and
+                                   applyOverridesUnderDataObject (DAI instance level, wins) */
 } LoaderContext;
 
 /*
@@ -78,11 +84,45 @@ resolveFc(const char* fcStr) {
 /* ---- recursive DataObject/DataAttribute construction from DataTypeTemplates ---- */
 
 static void buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_node_t* templates,
-        LinkedList enumAttrs, LinkedList daSemantics);
+        LinkedList enumAttrs, LinkedList daSemantics, LinkedList daDescriptions);
+
+/* Appends {da, strdup(desc)} to daDescriptions - used both for a DA/BDA
+ * template's own desc (buildDataAttribute) and, later, a <DAI> instance
+ * override (applyOverridesUnderDataObject) which must instead REPLACE
+ * whatever template-level entry already exists for the same `da` (instance
+ * wins over template - same precedence Val overrides already use). Two
+ * separate helpers, not one shared upsert, since the template pass never
+ * needs to check for an existing entry (each DataAttribute is only built
+ * once) while the override pass always does. */
+static void
+appendDaDescription(LinkedList daDescriptions, DataAttribute* da, const char* desc) {
+    if (!daDescriptions || !desc) return;
+    IedModelDaDescEntry* entry = malloc(sizeof(IedModelDaDescEntry));
+    if (!entry) return;
+    entry->da = da;
+    entry->desc = strdup(desc);
+    if (!entry->desc) {
+        free(entry);
+        return;
+    }
+    LinkedList_add(daDescriptions, entry);
+}
+
+/* LinkedListValueDeleteFunction-compatible: frees a boxed IedModelDaDescEntry
+ * AND its owned `desc` string - plain `free` (used for daSemantics/
+ * lnCategories entries, which own nothing beyond the box itself) would leak
+ * `desc` here. */
+static void
+freeDaDescEntry(void* entry) {
+    if (!entry) return;
+    IedModelDaDescEntry* descEntry = (IedModelDaDescEntry*) entry;
+    free(descEntry->desc);
+    free(descEntry);
+}
 
 static void
 buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc, mxml_node_t* templates,
-        LinkedList enumAttrs, LinkedList daSemantics) {
+        LinkedList enumAttrs, LinkedList daSemantics, LinkedList daDescriptions) {
     const char* name = IedModelUtils_attrRequired(node, "name");
     const char* bType = IedModelUtils_attrRequired(node, "bType");
     if (!name || !bType) {
@@ -116,6 +156,11 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
         }
     }
 
+    /* Template-level desc="..." - may be overwritten later by a <DAI>
+     * instance-level desc for this same `da` (applyOverridesUnderDataObject),
+     * which takes precedence, same as Val overrides already do. */
+    appendDaDescription(daDescriptions, da, IedModelUtils_attrOrDefault(node, "desc", NULL));
+
     if (type == IEC61850_ENUMERATED && enumAttrs) {
         /* type= here is the EnumType/@id (schema overloads the same "type"
          * attribute DAType/DOType references use) - captured now so a later
@@ -142,7 +187,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
         }
         for (mxml_node_t* bda = firstElementChild(daType); bda; bda = nextElementSibling(bda)) {
             if (isElement(bda, "BDA")) {
-                buildDataAttribute(bda, (ModelNode*) da, fcStr, templates, enumAttrs, daSemantics);
+                buildDataAttribute(bda, (ModelNode*) da, fcStr, templates, enumAttrs, daSemantics, daDescriptions);
             }
         }
     }
@@ -150,7 +195,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
 
 static void
 buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_node_t* templates,
-        LinkedList enumAttrs, LinkedList daSemantics) {
+        LinkedList enumAttrs, LinkedList daSemantics, LinkedList daDescriptions) {
     DataObject* dobj = DataObject_create(name, parent, 0);
 
     mxml_node_t* doType = findTemplateById(templates, "DOType", doTypeId);
@@ -162,7 +207,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
 
     for (mxml_node_t* child = firstElementChild(doType); child; child = nextElementSibling(child)) {
         if (isElement(child, "DA")) {
-            buildDataAttribute(child, (ModelNode*) dobj, NULL, templates, enumAttrs, daSemantics);
+            buildDataAttribute(child, (ModelNode*) dobj, NULL, templates, enumAttrs, daSemantics, daDescriptions);
         } else if (isElement(child, "SDO")) {
             const char* sdoName = IedModelUtils_attrRequired(child, "name");
             const char* sdoTypeId = IedModelUtils_attrRequired(child, "type");
@@ -170,7 +215,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
                 fprintf(stderr, "[ied_model] WARN: skipping malformed SDO under DOType '%s'\n", doTypeId);
                 continue;
             }
-            buildDataObject(sdoName, sdoTypeId, (ModelNode*) dobj, templates, enumAttrs, daSemantics);
+            buildDataObject(sdoName, sdoTypeId, (ModelNode*) dobj, templates, enumAttrs, daSemantics, daDescriptions);
         }
     }
 }
@@ -283,6 +328,27 @@ applyValueOverride(DataAttribute* da, const char* valText, mxml_node_t* template
     }
 }
 
+/* Replaces the desc for `da` in daDescriptions if an entry already exists
+ * (the template-level one from buildDataAttribute), else appends a new one.
+ * Instance-level (<DAI>) desc always wins over template-level - same
+ * precedence Val overrides already use in applyValueOverride. */
+static void
+upsertDaDescription(LinkedList daDescriptions, DataAttribute* da, const char* desc) {
+    if (!daDescriptions || !desc) return;
+    for (LinkedList element = LinkedList_getNext(daDescriptions); element; element = LinkedList_getNext(element)) {
+        IedModelDaDescEntry* entry = (IedModelDaDescEntry*) LinkedList_getData(element);
+        if (entry->da == da) {
+            char* replacement = strdup(desc);
+            if (replacement) {
+                free(entry->desc);
+                entry->desc = replacement;
+            }
+            return;
+        }
+    }
+    appendDaDescription(daDescriptions, da, desc);
+}
+
 /*
  * Recursively applies <DAI>/<SDI> value overrides under one DO (or nested
  * structured child), mirroring buildDataObject's own SDO recursion shape.
@@ -293,7 +359,7 @@ applyValueOverride(DataAttribute* da, const char* valText, mxml_node_t* template
  */
 static void
 applyOverridesUnderDataObject(mxml_node_t* container, ModelNode* doNode, mxml_node_t* templates,
-        LinkedList enumAttrs) {
+        LinkedList enumAttrs, LinkedList daDescriptions) {
     for (mxml_node_t* child = firstElementChild(container); child; child = nextElementSibling(child)) {
         if (isElement(child, "DAI")) {
             const char* daName = IedModelUtils_attrRequired(child, "name");
@@ -309,6 +375,12 @@ applyOverridesUnderDataObject(mxml_node_t* container, ModelNode* doNode, mxml_no
                         daName, doNode->name);
                 continue;
             }
+
+            /* Instance-level desc, independent of whether this DAI also carries
+             * a Val override below - a DAI can exist purely to attach a
+             * human-readable label with no value override at all. */
+            upsertDaDescription(daDescriptions, (DataAttribute*) daNode,
+                    IedModelUtils_attrOrDefault(child, "desc", NULL));
 
             mxml_node_t* valNode = findFirstChildElement(child, "Val");
             if (!valNode) continue; /* legal: DAI with no Val (e.g. just sAddr/ix) - not an error */
@@ -332,13 +404,21 @@ applyOverridesUnderDataObject(mxml_node_t* container, ModelNode* doNode, mxml_no
                 continue;
             }
 
-            applyOverridesUnderDataObject(child, nested, templates, enumAttrs);
+            applyOverridesUnderDataObject(child, nested, templates, enumAttrs, daDescriptions);
         }
     }
 }
 
+/* Note: <DOI desc="..."> itself (a DO-level description, sibling to whatever
+ * DAI/SDI children it has) is deliberately NOT captured anywhere in this
+ * pass - it describes the whole DataObject, not any single terminal
+ * DataAttribute, and IedModelDaDescEntry is keyed by DataAttribute* with no
+ * single principled leaf to attribute it to (which child DA is "the" value
+ * varies by CDC). Only DA/BDA template-level and DAI instance-level desc are
+ * captured, since both map onto exactly one DataAttribute each. */
 static void
-applyDoiDaiOverrides(mxml_node_t* lnNode, LogicalNode* ln, mxml_node_t* templates, LinkedList enumAttrs) {
+applyDoiDaiOverrides(mxml_node_t* lnNode, LogicalNode* ln, mxml_node_t* templates, LinkedList enumAttrs,
+        LinkedList daDescriptions) {
     for (mxml_node_t* doi = firstElementChild(lnNode); doi; doi = nextElementSibling(doi)) {
         if (!isElement(doi, "DOI")) continue;
         const char* doName = IedModelUtils_attrRequired(doi, "name");
@@ -351,7 +431,7 @@ applyDoiDaiOverrides(mxml_node_t* lnNode, LogicalNode* ln, mxml_node_t* template
             continue;
         }
 
-        applyOverridesUnderDataObject(doi, doNode, templates, enumAttrs);
+        applyOverridesUnderDataObject(doi, doNode, templates, enumAttrs, daDescriptions);
     }
 }
 
@@ -798,6 +878,20 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
     LogicalNode* ln = LogicalNode_create(lnName, ld);
     LinkedList enumAttrs = LinkedList_create();
 
+    /* lnClass is read again here (lnInstanceName already read it once, but
+     * discarded it after concatenating lnName) purely to classify the LN by
+     * its own SCL-declared class - cheap (one more mxmlElementGetAttr) and
+     * keeps lnInstanceName's own signature/contract unchanged. */
+    if (ctx->lnCategories) {
+        const char* lnClass = IedModelUtils_attrRequired(lnNode, "lnClass");
+        IedModelLnCategoryEntry* entry = malloc(sizeof(IedModelLnCategoryEntry));
+        if (entry) {
+            entry->ln = ln;
+            entry->category = IedModelLnCategory_forLnClass(lnClass);
+            LinkedList_add(ctx->lnCategories, entry);
+        }
+    }
+
     mxml_node_t* lNodeType = findTemplateById(ctx->templates, "LNodeType", lnType);
     if (!lNodeType) {
         fprintf(stderr, "[ied_model] WARN: unresolved LNodeType '%s' for LN '%s'\n", lnType, lnName);
@@ -811,11 +905,12 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
                 fprintf(stderr, "[ied_model] WARN: skipping malformed DO under LNodeType '%s'\n", lnType);
                 continue;
             }
-            buildDataObject(doName, doTypeId, (ModelNode*) ln, ctx->templates, enumAttrs, ctx->daSemantics);
+            buildDataObject(doName, doTypeId, (ModelNode*) ln, ctx->templates, enumAttrs, ctx->daSemantics,
+                    ctx->daDescriptions);
         }
     }
 
-    applyDoiDaiOverrides(lnNode, ln, ctx->templates, enumAttrs);
+    applyDoiDaiOverrides(lnNode, ln, ctx->templates, enumAttrs, ctx->daDescriptions);
     LinkedList_destroyDeep(enumAttrs, free);
 
     free(lnName);
@@ -1003,9 +1098,12 @@ IedModelSclLoader_listIedNames(const char* path, IedModelLoadError* outError) {
 
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
+        LinkedList* outDaSemantics, LinkedList* outLnCategories, LinkedList* outDaDescriptions,
+        int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
         int* outConfDataSetMax, int* outConfDataSetMaxAttributes) {
     if (outDaSemantics) *outDaSemantics = NULL;
+    if (outLnCategories) *outLnCategories = NULL;
+    if (outDaDescriptions) *outDaDescriptions = NULL;
     if (outDynDataSetMax) *outDynDataSetMax = -1;
     if (outDynDataSetMaxAttributes) *outDynDataSetMaxAttributes = -1;
     if (outConfDataSetMax) *outConfDataSetMax = -1;
@@ -1054,9 +1152,11 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
      * per-LN inside buildLogicalNodeStructure) - lives for this whole load,
      * handed back to the caller at the end. */
     LinkedList daSemantics = LinkedList_create();
+    LinkedList lnCategories = LinkedList_create();
+    LinkedList daDescriptions = LinkedList_create();
 
     LoaderContext ctx = { .model = model, .sclRoot = sclRoot, .templates = templates, .iedName = iedName,
-        .daSemantics = daSemantics };
+        .daSemantics = daSemantics, .lnCategories = lnCategories, .daDescriptions = daDescriptions };
 
     for (mxml_node_t* apNode = firstElementChild(iedNode); apNode; apNode = nextElementSibling(apNode)) {
         if (!isElement(apNode, "AccessPoint")) continue;
@@ -1080,5 +1180,9 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
     mxmlDelete(tree);
     if (outDaSemantics) *outDaSemantics = daSemantics;
     else LinkedList_destroyDeep(daSemantics, free); /* caller doesn't want it - don't leak */
+    if (outLnCategories) *outLnCategories = lnCategories;
+    else LinkedList_destroyDeep(lnCategories, free);
+    if (outDaDescriptions) *outDaDescriptions = daDescriptions;
+    else LinkedList_destroyDeep(daDescriptions, freeDaDescEntry);
     return model;
 }

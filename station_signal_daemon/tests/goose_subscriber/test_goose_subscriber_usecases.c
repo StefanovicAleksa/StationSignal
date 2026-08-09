@@ -844,6 +844,123 @@ test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
     GooseSubscriberUseCases_freeRecord(record);
 }
 
+/* ---- buildRecord: per-point category filtering ----
+ * categoryFilter no longer gates GoCB visibility (see
+ * ied_model_usecases.c's getGooseSubscriptionTargets doc comment) - it gates
+ * individual candidates instead, in collectCandidates, BEFORE they ever reach
+ * the value-diff cache or group-anchor logic. Mirrors
+ * test_mms_report_client_usecases.c's own categoryFilter tests exactly. */
+
+void
+test_buildRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { NULL };
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_MEASUREMENT };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL; /* does not include MEASUREMENT */
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a candidate whose own LN category isn't in the filter must never become an entry");
+    TEST_ASSERT_NULL_MESSAGE(cache.lastForwardedValues[0],
+            "an excluded candidate must never even reach the value-diff cache");
+
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_categoryFilter_matchingCategoryStillForwardsNormally(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) }; /* prior cache, genuinely differs */
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_CONTROL };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL;
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a candidate whose own LN category IS in the filter must forward exactly like an "
+            "unfiltered candidate would");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
+void
+test_buildRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether(void) {
+    /* Same shape as test_buildRecord_valueForwarded_dragsUnchangedQualitySibling -
+     * both share one excluded category (q is always the same LN as its value
+     * sibling), so the filter must drop BOTH, never leaving one orphaned. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    LnCategory leafCategories[2] = { IED_MODEL_LN_CATEGORY_CONTROL, IED_MODEL_LN_CATEGORY_CONTROL };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_MEASUREMENT; /* excludes CONTROL */
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "value and quality always share one LN and therefore one category - an excluded "
+            "category must drop both together, never forward one without the other");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
 /* ---- value-diff cache persistence across a simulated liveness recovery ----
  * The cache is now NEVER reset (the old resetValueDiffCache function and its
  * every-recovery call site in the frame adapter are both gone) - it's
@@ -1188,6 +1305,10 @@ main(void) {
     RUN_TEST(test_buildRecord_decomposedGroup_changedLeafDragsUnchangedSiblingLeaf);
     RUN_TEST(test_buildRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
     RUN_TEST(test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
+
+    RUN_TEST(test_buildRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache);
+    RUN_TEST(test_buildRecord_categoryFilter_matchingCategoryStillForwardsNormally);
+    RUN_TEST(test_buildRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether);
 
     RUN_TEST(test_buildRecord_firstFrame_seedsCache_andSetsEverPopulated);
     RUN_TEST(test_buildRecord_simulatedRecovery_genuineChangeForwards_withRealPreviousValue);

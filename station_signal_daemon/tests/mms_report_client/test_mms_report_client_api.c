@@ -50,7 +50,8 @@ void
 test_create_error_whenHostNull(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     MmsReportClientError error;
@@ -64,7 +65,8 @@ void
 test_create_error_whenPortNotPositive(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     MmsReportClientError error;
@@ -78,7 +80,8 @@ void
 test_create_success_withValidArguments(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     MmsReportClientError error;
@@ -96,7 +99,8 @@ void
 test_start_error_whenNoReportTargets(void) {
     fixtureModel = buildBareModel(); /* no RCBs */
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     MmsReportClientHandle client = MmsReportClient_create(fixtureIedModelHandle, "127.0.0.1", 102, NULL, NULL);
@@ -145,7 +149,8 @@ void
 test_create_takesOwnedCopy_ofAcseAuthPassword_notAliased(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     char password[] = "s3cret";
@@ -172,7 +177,8 @@ void
 test_create_leavesOwnedAuthPasswordNull_whenNotConfigured(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     MmsReportClientHandle client = MmsReportClient_create(fixtureIedModelHandle, "127.0.0.1", 102, NULL, NULL);

@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "features/ied_model/domain/ied_model_usecases.h"
+#include "features/ied_model/utils/ied_model_ln_category.h"
 #include "iec61850_dynamic_model.h"
 #include "iec61850_common.h"
 #include "mms_common.h"
@@ -229,12 +230,60 @@ resolveDoLevelMemberReference(IedModel* model, const char* memberReference, Mode
     return ok;
 }
 
+/*
+ * Looks up `ln`'s classified LnCategory in handle->lnCategories (small N - a
+ * linear scan once per target getter call, not a hot path - same posture as
+ * the existing `da ==` semantic lookup at getSemanticForMemberReference
+ * below). Degrades to IED_MODEL_LN_CATEGORY_OTHER, never crashes/guesses, if
+ * `ln` has no entry (shouldn't happen in practice - every LN built by either
+ * loader gets one - but a missing entry must never silently pass every
+ * filter, which OTHER alone as a lone bit would risk if a caller filtered on
+ * exactly OTHER; treating "not found" as "matches nothing but OTHER" is the
+ * conservative choice).
+ */
+static LnCategory
+categoryForLn(IedModelHandle handle, LogicalNode* ln) {
+    for (int i = 0; i < handle->lnCategoryCount; i++) {
+        if (handle->lnCategories[i].ln == ln) return handle->lnCategories[i].category;
+    }
+    return IED_MODEL_LN_CATEGORY_OTHER;
+}
+
+/* "|"-joins every set category bit's own name into buf, e.g.
+ * "CONTROL|MEASUREMENT" - diagnostic-only (the whole-device filter exclusion
+ * log below), never a wire format, so a fixed-size stack buffer is fine (at
+ * most "CONTROL|MEASUREMENT|PROTECTION|OTHER" ever needs to fit). */
+static void
+formatCategoryMask(LnCategoryMask mask, char* buf, size_t bufSize) {
+    static const LnCategory kAllCategories[] = { IED_MODEL_LN_CATEGORY_CONTROL, IED_MODEL_LN_CATEGORY_MEASUREMENT,
+        IED_MODEL_LN_CATEGORY_PROTECTION, IED_MODEL_LN_CATEGORY_OTHER };
+    buf[0] = '\0';
+    bool first = true;
+    for (size_t i = 0; i < sizeof(kAllCategories) / sizeof(kAllCategories[0]); i++) {
+        if (!(mask & kAllCategories[i])) continue;
+        if (!first) strncat(buf, "|", bufSize - strlen(buf) - 1);
+        strncat(buf, IedModelLnCategory_toString(kAllCategories[i]), bufSize - strlen(buf) - 1);
+        first = false;
+    }
+    if (first) strncat(buf, "(none)", bufSize - strlen(buf) - 1);
+}
+
 /* ---- public use-cases ---- */
 
 LinkedList
 IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle) {
     LinkedList result = LinkedList_create();
 
+    /* categoryFilter deliberately does NOT gate GoCB visibility - the daemon
+     * always needs to know where every GoCB/dataset lives regardless of
+     * category, since filtering here would make an entire GoCB disappear
+     * whenever its PARENT LN's category didn't match, even though its
+     * dataset commonly carries other LNs' data (real devices very often
+     * parent every GoCB on LLN0, which has nothing to do with what its
+     * dataset actually reports on). The filter instead applies per-point,
+     * downstream in goose_subscriber's own candidate collection, against
+     * each individual value's OWN LN category - see
+     * GooseSubscriberMemberRefCache.categoryFilter. */
     for (GSEControlBlock* gcb = handle->model->gseCBs; gcb; gcb = gcb->sibling) {
         char* lnRef = ModelNode_getObjectReference((ModelNode*) gcb->parent, NULL);
         if (!lnRef) {
@@ -300,6 +349,17 @@ LinkedList
 IedModelUseCases_getReportSubscriptionTargets(IedModelHandle handle) {
     LinkedList result = LinkedList_create();
 
+    /* categoryFilter deliberately does NOT gate RCB visibility - same
+     * rationale as getGooseSubscriptionTargets above. Real SCL very commonly
+     * parents every RCB on LLN0 (category OTHER) regardless of what its
+     * dataset actually reports on (confirmed against a real DIGSI 5/SIPROTEC
+     * 6MD85 station file: 100% of RCBs/GoCBs parented on LLN0, dataset
+     * members spanning XCBR/MMXU/PTRC/etc.) - gating the whole RCB here would
+     * make the filter useless on that hardware. The daemon always needs
+     * every RCB visible so it always knows where every dataset lives and can
+     * enable reporting normally; the filter applies per-point instead, in
+     * mms_report_client's own candidate collection, against each value's OWN
+     * LN category - see MmsReportClientMemberRefCacheEntry.categoryFilter. */
     for (ReportControlBlock* rcb = handle->model->rcbs; rcb; rcb = rcb->sibling) {
         char* lnRef = ModelNode_getObjectReference((ModelNode*) rcb->parent, NULL);
         if (!lnRef) {
@@ -556,6 +616,140 @@ IedModelUseCases_getSemanticForMemberReference(IedModelHandle handle, const char
     return semantic;
 }
 
+/*
+ * Member-reference-keyed LN category lookup - resolves only as far as the
+ * "LD/LN" prefix (category is constant across every leaf under one LN,
+ * unlike a Dbpos semantic), then defers to categoryForLn. Returns
+ * IED_MODEL_LN_CATEGORY_OTHER on any resolution failure - never a guess into
+ * a real category.
+ */
+LnCategory
+IedModelUseCases_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference) {
+    if (!handle || !memberReference) return IED_MODEL_LN_CATEGORY_OTHER;
+
+    char* copy = strdup(memberReference);
+    if (!copy) return IED_MODEL_LN_CATEGORY_OTHER;
+
+    LnCategory category = IED_MODEL_LN_CATEGORY_OTHER;
+    char* slash = strchr(copy, '/');
+    if (slash) {
+        *slash = '\0';
+        char* lnToken = strtok(slash + 1, "$");
+        LogicalDevice* ld = IedModel_getDevice(handle->model, copy);
+        LogicalNode* ln = (ld && lnToken) ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+        if (ln) category = categoryForLn(handle, ln);
+    }
+
+    free(copy);
+    return category;
+}
+
+/* ---- desc lookup (see IedModelDaDescEntry's own doc comment) ---- */
+
+static const char*
+lookupDaDescription(IedModelHandle handle, DataAttribute* da) {
+    if (!da) return NULL;
+    for (int i = 0; i < handle->daDescriptionCount; i++) {
+        if (handle->daDescriptions[i].da == da) return handle->daDescriptions[i].desc;
+    }
+    return NULL;
+}
+
+/*
+ * Member-reference-keyed counterpart of IedModelUseCases_getDataSetMemberSemantics'
+ * per-entry resolution, mirroring getSemanticForMemberReference's own shape
+ * exactly (same "LD/LN$FC$DO$DA" parse, same resolveTerminalDataAttribute
+ * call) but looking up a captured desc string instead of a Dbpos semantic.
+ * Returns NULL (borrowed - never free) if memberReference is NULL, malformed,
+ * DO-level (no daToken), doesn't resolve, or genuinely has no captured desc.
+ */
+const char*
+IedModelUseCases_getDescriptionForMemberReference(IedModelHandle handle, const char* memberReference) {
+    if (!memberReference) return NULL;
+
+    char* copy = strdup(memberReference);
+    if (!copy) return NULL;
+
+    const char* desc = NULL;
+    char* slash = strchr(copy, '/');
+    if (slash) {
+        *slash = '\0';
+        char* lnToken = strtok(slash + 1, "$");
+        char* fcToken = lnToken ? strtok(NULL, "$") : NULL;
+        char* doToken = fcToken ? strtok(NULL, "$") : NULL;
+        char* daToken = doToken ? strtok(NULL, "$") : NULL;
+
+        if (doToken && daToken) {
+            DataAttribute* da = resolveTerminalDataAttribute(handle->model, copy, lnToken, doToken, daToken);
+            desc = lookupDaDescription(handle, da);
+        }
+    }
+
+    free(copy);
+    return desc;
+}
+
+/* Description-lookup sibling of collectLeafSemanticsByFc - identical
+ * traversal, but appends this handle's captured desc (borrowed, possibly
+ * NULL) for each genuinely terminal leaf instead of a semantic. Order
+ * matches collectLeafReferencesByFc's own traversal exactly, so results stay
+ * index-aligned with IedModelUseCases_getLeafReferencesForMemberReference's
+ * own output for the same memberReference. Elements are raw (possibly NULL)
+ * char* - no boxing needed, unlike the enum-valued semantics list, since a
+ * string pointer already fits LinkedList's void* payload directly. */
+static void
+collectLeafDescriptionsByFc(IedModelHandle handle, ModelNode* node, FunctionalConstraint fc, LinkedList result) {
+    if (ModelNode_getType(node) == DataAttributeModelType) {
+        if (((DataAttribute*) node)->fc != fc) return;
+
+        LinkedList children = ModelNode_getChildren(node);
+        LinkedList firstChild = children ? LinkedList_getNext(children) : NULL;
+
+        if (!firstChild) {
+            LinkedList_add(result, (void*) lookupDaDescription(handle, (DataAttribute*) node));
+            if (children) LinkedList_destroyStatic(children);
+            return;
+        }
+
+        LinkedList element = firstChild;
+        while (element) {
+            collectLeafDescriptionsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+        return;
+    }
+
+    LinkedList children = ModelNode_getChildren(node);
+    if (children) {
+        LinkedList element = LinkedList_getNext(children);
+        while (element) {
+            collectLeafDescriptionsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(children);
+    }
+}
+
+LinkedList
+IedModelUseCases_getLeafDescriptionsForMemberReference(IedModelHandle handle, const char* memberReference) {
+    LinkedList result = LinkedList_create();
+    ModelNode* doNode = NULL;
+    FunctionalConstraint fc = IEC61850_FC_NONE;
+    if (!resolveDoLevelMemberReference(handle->model, memberReference, &doNode, &fc)) return result;
+
+    LinkedList doChildren = ModelNode_getChildren(doNode);
+    if (doChildren) {
+        LinkedList element = LinkedList_getNext(doChildren);
+        while (element) {
+            collectLeafDescriptionsByFc(handle, (ModelNode*) LinkedList_getData(element), fc, result);
+            element = LinkedList_getNext(element);
+        }
+        LinkedList_destroyStatic(doChildren);
+    }
+    return result;
+}
+
 LinkedList
 IedModelUseCases_getDataSetMemberSemantics(IedModelHandle handle, const char* datasetReference) {
     LinkedList result = LinkedList_create();
@@ -799,6 +993,19 @@ collectLnLeavesByFc(LogicalNode* ln, FunctionalConstraint fc, const char* ldName
     free(basePath);
 }
 
+/*
+ * Deliberately applies NO categoryFilter check of its own, unlike
+ * getGooseSubscriptionTargets/getReportSubscriptionTargets/
+ * getReportableAttributeReferencesForWholeDevice above/below - this
+ * single-LN variant is only ever called (by mms_report_client, via
+ * ReportControlBlockTarget.lnReference) with an lnReference that already
+ * survived getReportSubscriptionTargets's own filter: an RCB whose parent LN
+ * doesn't match the active filter was never returned as a target in the
+ * first place, so this function is never reached for it. Filtering here too
+ * would be redundant, not wrong - but a future caller must not reach this
+ * function with an unfiltered LN and expect filtering to happen here; it
+ * won't.
+ */
 LinkedList
 IedModelUseCases_getReportableAttributeReferencesForLogicalNode(IedModelHandle handle, const char* lnReference) {
     LinkedList result = LinkedList_create();
@@ -869,15 +1076,52 @@ IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle h
              * _getGooseSubscriptionTargets already use for a parent LN node,
              * reused here rather than re-deriving the IED-name-prefixing rule
              * by hand. */
-            char* lnRef = ModelNode_getObjectReference(lnNode, NULL);
-            if (lnRef) {
-                char* slash = strchr(lnRef, '/');
-                if (slash) {
-                    *slash = '\0';
-                    collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_ST, lnRef, slash + 1, result);
-                    collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_MX, lnRef, slash + 1, result);
+            LnCategory lnCategory = categoryForLn(handle, (LogicalNode*) lnNode);
+            if (handle->categoryFilter & lnCategory) {
+                char* lnRef = ModelNode_getObjectReference(lnNode, NULL);
+                if (lnRef) {
+                    char* slash = strchr(lnRef, '/');
+                    if (slash) {
+                        *slash = '\0';
+                        collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_ST, lnRef, slash + 1, result);
+                        collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_MX, lnRef, slash + 1, result);
+                    }
+                    free(lnRef);
                 }
-                free(lnRef);
+            } else if (handle->categoryFilter != IED_MODEL_LN_CATEGORY_ALL) {
+                /* Diagnostic-only, and only once a filter is genuinely active
+                 * (skip the noise on the common unfiltered path) - logs what
+                 * got excluded and why, since mms_dataset_manager's own
+                 * cluster-plan logging only ever sees the already-filtered
+                 * survivors and has no LN-category context of its own to
+                 * explain an absence. */
+                char* lnRef = ModelNode_getObjectReference(lnNode, NULL);
+                if (lnRef) {
+                    /* Keep the full "LD/LN" reference for the log line -
+                     * splitLnRef is a separate, truncated copy used only to
+                     * feed collectLnLeavesByFc's own (ldName, lnName) pair. */
+                    char* splitLnRef = strdup(lnRef);
+                    LinkedList skipped = LinkedList_create();
+                    if (splitLnRef) {
+                        char* slash = strchr(splitLnRef, '/');
+                        if (slash) {
+                            *slash = '\0';
+                            collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_ST, splitLnRef, slash + 1,
+                                    skipped);
+                            collectLnLeavesByFc((LogicalNode*) lnNode, IEC61850_FC_MX, splitLnRef, slash + 1,
+                                    skipped);
+                        }
+                    }
+                    char maskStr[64];
+                    formatCategoryMask(handle->categoryFilter, maskStr, sizeof(maskStr));
+                    fprintf(stderr,
+                            "[ied_model] LN '%s' (category %s) excluded by active filter (%s) - "
+                            "%d leaf attribute(s) skipped\n",
+                            lnRef, IedModelLnCategory_toString(lnCategory), maskStr, LinkedList_size(skipped));
+                    LinkedList_destroyDeep(skipped, free);
+                    free(splitLnRef);
+                    free(lnRef);
+                }
             }
             lnNode = lnNode->sibling;
         }
@@ -885,6 +1129,11 @@ IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle h
     }
 
     return result;
+}
+
+LnCategoryMask
+IedModelUseCases_getCategoryFilter(IedModelHandle handle) {
+    return handle ? handle->categoryFilter : IED_MODEL_LN_CATEGORY_ALL;
 }
 
 int

@@ -51,7 +51,8 @@ void
 test_create_error_whenInterfaceIdNull(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     GooseSubscriberError error;
@@ -65,7 +66,8 @@ void
 test_create_error_whenInterfaceIdEmpty(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     GooseSubscriberError error;
@@ -79,7 +81,8 @@ void
 test_create_success_withValidArguments(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     GooseSubscriberError error;
@@ -95,7 +98,8 @@ void
 test_create_appliesDefaults_whenConfigIsNull(void) {
     fixtureModel = buildBareModel();
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     GooseSubscriberHandle handle = GooseSubscription_create(fixtureIedModelHandle, "eth0", NULL, NULL);
@@ -110,7 +114,8 @@ void
 test_start_returnsErrNoTargets_whenModelHasNoGooseControlBlocks(void) {
     fixtureModel = buildBareModel(); /* no GSEControlBlocks */
     fixtureIedHandle = (struct sIedModelHandle) { .model = fixtureModel,
-        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .iedName = "TestIED" };
+        .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
+        .iedName = "TestIED" };
     fixtureIedModelHandle = &fixtureIedHandle;
 
     GooseSubscriberHandle handle = GooseSubscription_create(fixtureIedModelHandle, "eth0", NULL, NULL);

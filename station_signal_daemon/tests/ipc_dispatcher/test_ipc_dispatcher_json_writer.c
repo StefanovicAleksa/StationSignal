@@ -38,6 +38,7 @@ tearDown(void) {
                             || fixtureMessage->dataPoints[i].previousValue.type == IPC_SCALAR_RAW)) {
                 free(fixtureMessage->dataPoints[i].previousValue.value.str);
             }
+            free(fixtureMessage->dataPoints[i].description);
         }
         free(fixtureMessage->dataPoints);
         free(fixtureMessage);
@@ -207,6 +208,73 @@ test_write_nullSourceReference_emitsJsonNull(void) {
 }
 
 void
+test_write_category_alwaysPresent_asString(void) {
+    fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "LD0/LLN0.BR.brcbMain", true, true, false, 0, 1);
+    fixtureMessage->dataPoints[0].reference = strdup("LD0/XCBR1$ST$Pos$stVal");
+    fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_BOOL;
+    fixtureMessage->dataPoints[0].value.value.b = true;
+    fixtureMessage->dataPoints[0].category = "CONTROL";
+
+    fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
+    fixtureParsed = cJSON_Parse(fixtureJson);
+
+    cJSON* point = cJSON_GetArrayItem(cJSON_GetObjectItem(fixtureParsed, "dataPoints"), 0);
+    TEST_ASSERT_EQUAL_STRING("CONTROL", cJSON_GetObjectItem(point, "category")->valuestring);
+}
+
+void
+test_write_category_null_emitsJsonNull(void) {
+    /* Only reachable via a fixture that bypasses assembleMessage (which
+     * always assigns a real string, "OTHER" at worst) - defensive coverage
+     * for buildDataPointJson's own NULL guard, same posture as
+     * test_write_nullSourceReference_emitsJsonNull. */
+    fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "LD0/LLN0.BR.brcbMain", true, true, false, 0, 1);
+    fixtureMessage->dataPoints[0].reference = strdup("LD0/LLN0$ST$Ind1$stVal");
+    fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_BOOL;
+    fixtureMessage->dataPoints[0].value.value.b = true;
+    fixtureMessage->dataPoints[0].category = NULL;
+
+    fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
+    fixtureParsed = cJSON_Parse(fixtureJson);
+
+    cJSON* point = cJSON_GetArrayItem(cJSON_GetObjectItem(fixtureParsed, "dataPoints"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "category")));
+}
+
+void
+test_write_description_present_asString(void) {
+    fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "LD0/LLN0.BR.brcbMain", true, true, false, 0, 1);
+    fixtureMessage->dataPoints[0].reference = strdup("LD0/XCBR1$ST$Pos$stVal");
+    fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_BOOL;
+    fixtureMessage->dataPoints[0].value.value.b = true;
+    fixtureMessage->dataPoints[0].category = "CONTROL";
+    fixtureMessage->dataPoints[0].hasDescription = true;
+    fixtureMessage->dataPoints[0].description = strdup("Circuit breaker position");
+
+    fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
+    fixtureParsed = cJSON_Parse(fixtureJson);
+
+    cJSON* point = cJSON_GetArrayItem(cJSON_GetObjectItem(fixtureParsed, "dataPoints"), 0);
+    TEST_ASSERT_EQUAL_STRING("Circuit breaker position", cJSON_GetObjectItem(point, "description")->valuestring);
+}
+
+void
+test_write_description_absent_emitsJsonNull(void) {
+    fixtureMessage = buildMessage(IPC_SOURCE_MMS_REPORT, "LD0/LLN0.BR.brcbMain", true, true, false, 0, 1);
+    fixtureMessage->dataPoints[0].reference = strdup("LD0/LLN0$ST$Ind1$stVal");
+    fixtureMessage->dataPoints[0].value.type = IPC_SCALAR_BOOL;
+    fixtureMessage->dataPoints[0].value.value.b = true;
+    fixtureMessage->dataPoints[0].category = "OTHER";
+    fixtureMessage->dataPoints[0].hasDescription = false;
+
+    fixtureJson = IpcDispatcherJsonWriter_write(fixtureMessage);
+    fixtureParsed = cJSON_Parse(fixtureJson);
+
+    cJSON* point = cJSON_GetArrayItem(cJSON_GetObjectItem(fixtureParsed, "dataPoints"), 0);
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(point, "description")));
+}
+
+void
 test_write_returnsNull_onNullMessage(void) {
     TEST_ASSERT_NULL(IpcDispatcherJsonWriter_write(NULL));
 }
@@ -222,6 +290,10 @@ main(void) {
     RUN_TEST(test_write_previousValueQuality_allPopulated);
     RUN_TEST(test_write_previousValueQuality_allAbsent_emitJsonNull);
     RUN_TEST(test_write_nullSourceReference_emitsJsonNull);
+    RUN_TEST(test_write_category_alwaysPresent_asString);
+    RUN_TEST(test_write_category_null_emitsJsonNull);
+    RUN_TEST(test_write_description_present_asString);
+    RUN_TEST(test_write_description_absent_emitsJsonNull);
     RUN_TEST(test_write_returnsNull_onNullMessage);
 
     return UNITY_END();

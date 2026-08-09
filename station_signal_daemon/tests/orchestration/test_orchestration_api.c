@@ -59,7 +59,7 @@ test_run_rejectsNullHandle(void) {
     LinkedList hosts = makeHostList("127.0.0.1");
 
     OrchestrationError err = Orchestration_run(NULL, hosts, 102, "Reporter1", "lo",
-            IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL);
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
     LinkedList_destroyStatic(hosts);
@@ -71,10 +71,10 @@ test_run_rejectsNullOrEmptyHostList(void) {
     LinkedList empty = LinkedList_create();
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, NULL, 102, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, NULL, 102, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, empty, 102, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, empty, 102, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
 
     LinkedList_destroy(empty);
@@ -87,10 +87,10 @@ test_run_rejectsNonPositivePort(void) {
     LinkedList hosts = makeHostList("127.0.0.1");
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, hosts, 0, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, hosts, 0, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, hosts, -1, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, hosts, -1, "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
 
     LinkedList_destroyStatic(hosts);
@@ -109,11 +109,11 @@ test_run_doesNotRejectNullOrEmptyIedName_atValidation(void) {
     OrchestrationErrorDetail detail;
 
     OrchestrationError err = Orchestration_run(handle, hosts, 102, NULL, "lo",
-            IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
     TEST_ASSERT_NOT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
     TEST_ASSERT_EQUAL(ORCHESTRATION_STAGE_BOOTSTRAP, detail.stage);
 
-    err = Orchestration_run(handle, hosts, 102, "", "lo", IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+    err = Orchestration_run(handle, hosts, 102, "", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
     TEST_ASSERT_NOT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
     TEST_ASSERT_EQUAL(ORCHESTRATION_STAGE_BOOTSTRAP, detail.stage);
 
@@ -127,10 +127,10 @@ test_run_rejectsNullOrEmptyInterfaceId(void) {
     LinkedList hosts = makeHostList("127.0.0.1");
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, hosts, 102, "Reporter1", NULL, IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, hosts, 102, "Reporter1", NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
-            Orchestration_run(handle, hosts, 102, "Reporter1", "", IED_MODEL_ACCESS_REPORT_ONLY, NULL,
+            Orchestration_run(handle, hosts, 102, "Reporter1", "", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL,
                     NULL, NULL));
 
     LinkedList_destroyStatic(hosts);
@@ -144,7 +144,7 @@ test_run_rejectsReentry_whenAlreadyRunning(void) {
 
     LinkedList hosts = makeHostList("127.0.0.1");
     OrchestrationError err = Orchestration_run(handle, hosts, 102, "Reporter1", "lo",
-            IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL);
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
 
@@ -158,7 +158,7 @@ test_run_rejectsReentry_whenAlreadyRunning(void) {
 void
 test_runFromLocalFile_rejectsNullHandle(void) {
     OrchestrationError err = Orchestration_runFromLocalFile(NULL, "/tmp/some.icd", "127.0.0.1", 102,
-            "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL);
+            "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL);
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
 }
@@ -169,10 +169,10 @@ test_runFromLocalFile_rejectsNullOrEmptySclFilePath(void) {
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, NULL, "127.0.0.1", 102, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "", "127.0.0.1", 102, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
 
     Orchestration_destroy(handle);
 }
@@ -183,10 +183,10 @@ test_runFromLocalFile_rejectsNullOrEmptyHost(void) {
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", NULL, 102, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "", 102, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
 
     Orchestration_destroy(handle);
 }
@@ -197,10 +197,10 @@ test_runFromLocalFile_rejectsNonPositivePort(void) {
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "127.0.0.1", 0, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "127.0.0.1", -1, "Reporter1", "lo",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
 
     Orchestration_destroy(handle);
 }
@@ -216,7 +216,7 @@ test_runFromLocalFile_doesNotRejectNullOrEmptyIedName_atValidation(void) {
     OrchestrationErrorDetail detail;
 
     OrchestrationError err = Orchestration_runFromLocalFile(handle, "/nonexistent/path.icd", "127.0.0.1",
-            102, NULL, "lo", IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+            102, NULL, "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
 
     TEST_ASSERT_NOT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
     TEST_ASSERT_EQUAL(ORCHESTRATION_STAGE_IED_NAME_RESOLUTION, detail.stage);
@@ -231,10 +231,10 @@ test_runFromLocalFile_rejectsNullOrEmptyInterfaceId(void) {
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "127.0.0.1", 102, "Reporter1", NULL,
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT,
             Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "127.0.0.1", 102, "Reporter1", "",
-                    IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL));
+                    IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL));
 
     Orchestration_destroy(handle);
 }
@@ -245,7 +245,7 @@ test_runFromLocalFile_rejectsReentry_whenAlreadyRunning(void) {
     handle->running = true; /* struct is visible by convention - see orchestration_types.h */
 
     OrchestrationError err = Orchestration_runFromLocalFile(handle, "/tmp/some.icd", "127.0.0.1", 102,
-            "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, NULL);
+            "Reporter1", "lo", IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, NULL, NULL);
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_ERR_INVALID_ARGUMENT, err);
 

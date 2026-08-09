@@ -22,6 +22,7 @@ all: run
 $(BIN): e2e_test_ied_model.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)

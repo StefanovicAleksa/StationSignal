@@ -1397,6 +1397,127 @@ test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor(void) {
     MmsReportClientUseCases_freeReportRecord(record);
 }
 
+/* ---- buildReportRecord: per-point category filtering ----
+ * categoryFilter no longer gates RCB/GoCB visibility (see
+ * ied_model_usecases.c's getReportSubscriptionTargets/getGooseSubscriptionTargets
+ * doc comments) - it gates individual candidates instead, in collectCandidates,
+ * BEFORE they ever reach the value-diff cache or group-anchor logic. */
+
+void
+test_buildReportRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { NULL };
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_MEASUREMENT };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL; /* does not include MEASUREMENT */
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "a candidate whose own LN category isn't in the filter must never become an entry, "
+            "even though it's a genuine, real value change");
+    TEST_ASSERT_NULL_MESSAGE(cache.lastForwardedValues[0],
+            "an excluded candidate must never even reach the value-diff cache - the slot must "
+            "stay untouched, proving the filter runs BEFORE shouldForwardAndUpdateCache");
+
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_categoryFilter_matchingCategoryStillForwardsNormally(void) {
+    /* Mirrors test_buildReportRecord_realChangeReason_previousValueEqualsPriorCache's
+     * shape (a real change against an already-seeded cache) - a NULL prior
+     * slot would hit bootstrap suppression regardless of category, which
+     * would prove nothing about the filter itself. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) }; /* prior cache */
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_CONTROL };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL;
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "a candidate whose own LN category IS in the filter must forward exactly like an "
+            "unfiltered candidate would");
+    TEST_ASSERT_NOT_NULL(cache.lastForwardedValues[0]);
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
+void
+test_buildReportRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether(void) {
+    /* Same shape as test_buildReportRecord_valueForwarded_dragsUnchangedQualitySibling
+     * (a real value change would normally drag its unchanged quality sibling
+     * along too) - here both share one excluded category (q is always the
+     * same LN as its value sibling), so the category filter must drop BOTH,
+     * never leaving one orphaned. */
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(2);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));  /* stVal: differs from cache */
+    MmsValue_setElement(dataSetValues, 1, MmsValue_newBoolean(false)); /* q: matches cache */
+
+    ReasonForInclusion reasons[2] = { IEC61850_REASON_DATA_CHANGE, IEC61850_REASON_UNKNOWN };
+
+    int leafSlotOffsets[2] = { 0, 1 };
+    MmsValue* lastForwardedValues[2] = { MmsValue_newBoolean(false), MmsValue_newBoolean(false) };
+    char* memberReferences[2] = { "Breaker1CB1/XCBR1.Pos$stVal", "Breaker1CB1/XCBR1.Pos$q" };
+    LnCategory leafCategories[2] = { IED_MODEL_LN_CATEGORY_CONTROL, IED_MODEL_LN_CATEGORY_CONTROL };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 2;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 2;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.memberReferences = memberReferences;
+    cache.leafCategories = leafCategories;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_MEASUREMENT; /* excludes CONTROL */
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 2);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, record->entryCount,
+            "value and quality always share one LN and therefore one category - an excluded "
+            "category must drop both together, never forward one without the other");
+
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsValue_delete(cache.lastForwardedValues[1]);
+    MmsValue_delete(dataSetValues);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
 /* ---- value-diff cache persistence across a simulated reconnect ----
  * The cache is now NEVER reset (the old resetValueDiffCache function and its
  * every-(re-)enable call site are both gone) - it's populated exactly once,
@@ -1773,6 +1894,10 @@ main(void) {
     RUN_TEST(test_buildReportRecord_decomposedGroup_fourLeafDpc_onlyChangedLeafHasOwnChangeDetected);
     RUN_TEST(test_buildReportRecord_nestedCmvValue_dragsQualitySeveralAncestorLevelsUp);
     RUN_TEST(test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
+
+    RUN_TEST(test_buildReportRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache);
+    RUN_TEST(test_buildReportRecord_categoryFilter_matchingCategoryStillForwardsNormally);
+    RUN_TEST(test_buildReportRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether);
 
     RUN_TEST(test_buildReportRecord_firstReport_seedsCache_andSetsEverPopulated);
     RUN_TEST(test_buildReportRecord_simulatedReconnect_genuineChangeForwards_withRealPreviousValue);

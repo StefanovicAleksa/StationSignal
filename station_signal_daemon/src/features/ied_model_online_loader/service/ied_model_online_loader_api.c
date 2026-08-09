@@ -4,16 +4,20 @@
 
 IedModelHandle
 IedModelOnlineLoader_build(const char* host, int port, const char* iedName, AccessMode mode,
-        const char* acseAuthPassword, const IedModelOnlineLoaderConfig* config,
+        LnCategoryMask categoryFilter, const char* acseAuthPassword, const IedModelOnlineLoaderConfig* config,
         IedModelOnlineLoaderError* outError) {
     IedModelOnlineLoaderError localError;
+    LinkedList lnCategoriesList = NULL;
     IedModel* model = IedModelOnlineLoaderConnection_connectAndBuild(host, port, iedName, acseAuthPassword,
-            config, &localError);
+            config, &lnCategoriesList, &localError);
 
     if (outError) *outError = localError;
-    if (!model) return NULL;
+    if (!model) {
+        if (lnCategoriesList) LinkedList_destroyDeep(lnCategoriesList, free);
+        return NULL;
+    }
 
-    IedModelHandle handle = IedModel_wrapDynamicModel(model, iedName, mode);
+    IedModelHandle handle = IedModel_wrapDynamicModel(model, iedName, mode, lnCategoriesList, categoryFilter);
     if (!handle) {
         IedModel_destroy(model);
         if (outError) *outError = IED_MODEL_ONLINE_LOADER_ERR_OUT_OF_MEMORY;

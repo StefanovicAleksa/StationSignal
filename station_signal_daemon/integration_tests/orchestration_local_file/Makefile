@@ -57,6 +57,7 @@ $(BIN): e2e_test_orchestration_local_file.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \

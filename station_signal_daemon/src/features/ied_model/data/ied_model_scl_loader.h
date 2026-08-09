@@ -23,6 +23,21 @@
  * IedModel_loadFromFile copies each entry by value into the handle's own flat
  * array and then destroys this list.
  *
+ * *outLnCategories is the same shape, one heap-boxed IedModelLnCategoryEntry*
+ * per LN built, classified from that LN's own SCL lnClass="..." attribute via
+ * IedModelLnCategory_forLnClass. Caller owns the list and its elements
+ * (LinkedList_destroyDeep(list, free) - the boxed entries own nothing beyond
+ * themselves, `ln` is borrowed).
+ *
+ * *outDaDescriptions is the same shape, one heap-boxed IedModelDaDescEntry*
+ * per DataAttribute with a non-empty SCL desc="..." - captured at both the
+ * <DA>/<BDA> template level and the <DAI> instance-override level (instance
+ * wins when both are present, same precedence Val overrides already use).
+ * Caller owns the list and its elements, but unlike outDaSemantics/
+ * outLnCategories each entry also owns its own `desc` string - destroying
+ * this list must free both the string and the box (never plain
+ * LinkedList_destroyDeep(list, free) alone, which would leak `desc`).
+ *
  * Returns NULL and sets *outError on failure. Caller owns the returned IedModel
  * (IedModel_destroy when done).
  *
@@ -40,7 +55,8 @@
  */
 IedModel*
 IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError* outError,
-        LinkedList* outDaSemantics, int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
+        LinkedList* outDaSemantics, LinkedList* outLnCategories, LinkedList* outDaDescriptions,
+        int* outDynDataSetMax, int* outDynDataSetMaxAttributes,
         int* outConfDataSetMax, int* outConfDataSetMaxAttributes);
 
 /*

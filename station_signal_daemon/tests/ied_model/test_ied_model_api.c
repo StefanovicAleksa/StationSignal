@@ -83,7 +83,7 @@ void
 test_loadFromFile_errorFileNotFound_whenPathDoesNotExist(void) {
     IedModelLoadError error;
     IedModelHandle handle = IedModel_loadFromFile("/nonexistent/path/should/not/exist.icd", "TestIED",
-            IED_MODEL_ACCESS_READ_ONLY, &error);
+            IED_MODEL_ACCESS_READ_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_ERR_FILE_NOT_FOUND, error);
@@ -94,7 +94,7 @@ test_loadFromFile_errorIedNotFound_whenIedNameDoesNotMatch(void) {
     char* path = writeTempSclFile();
 
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(path, "NoSuchIed", IED_MODEL_ACCESS_READ_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(path, "NoSuchIed", IED_MODEL_ACCESS_READ_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_ERR_IED_NOT_FOUND, error);
@@ -108,7 +108,7 @@ test_loadFromFile_success_wiresModelAndAccessModeIntoHandle(void) {
     char* path = writeTempSclFile();
 
     IedModelLoadError error;
-    IedModelHandle handle = IedModel_loadFromFile(path, "TestIED", IED_MODEL_ACCESS_READ_ONLY, &error);
+    IedModelHandle handle = IedModel_loadFromFile(path, "TestIED", IED_MODEL_ACCESS_READ_ONLY, IED_MODEL_LN_CATEGORY_ALL, &error);
 
     TEST_ASSERT_NOT_NULL(handle);
     TEST_ASSERT_EQUAL(IED_MODEL_OK, error);
@@ -224,10 +224,14 @@ buildGatingFixtureModel(void) {
 
 static IedModelHandle
 makeHandle(IedModel* model, AccessMode mode) {
-    struct sIedModelHandle* handle = malloc(sizeof(struct sIedModelHandle));
+    struct sIedModelHandle* handle = calloc(1, sizeof(struct sIedModelHandle));
     handle->model = model;
     handle->accessMode = mode;
     handle->iedName = "TestIED";
+    /* categoryFilter defaults to 0 (calloc) otherwise, which matches NO
+     * category, not ALL - every real construction site (IedModel_loadFromFile/
+     * _wrapDynamicModel) sets this explicitly, so this test helper must too. */
+    handle->categoryFilter = IED_MODEL_LN_CATEGORY_ALL;
     return handle;
 }
 

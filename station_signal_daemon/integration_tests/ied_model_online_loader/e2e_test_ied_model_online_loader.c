@@ -136,7 +136,7 @@ test_onlineDiscovery_buildsReportTargets_matchingSimServerShape(void) {
 
     IedModelOnlineLoaderError err;
     IedModelHandle handle = IedModelOnlineLoader_build(LIVE_HOST, TEST_PORT, "Reporter1",
-            IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, &err);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, NULL, NULL, &err);
     TEST_ASSERT_NOT_NULL_MESSAGE(handle, "expected online discovery to build a model against a live, "
             "associable server with no SCL file at all");
 
@@ -175,7 +175,7 @@ test_onlineDiscovery_buildsGooseTargets_matchingSimServerShape(void) {
 
     IedModelOnlineLoaderError err;
     IedModelHandle handle = IedModelOnlineLoader_build(LIVE_HOST, TEST_PORT, "Reporter1",
-            IED_MODEL_ACCESS_REPORT_ONLY, NULL, NULL, &err);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, NULL, NULL, &err);
     TEST_ASSERT_NOT_NULL(handle);
 
     LinkedList gooseTargets = IedModel_getGooseSubscriptionTargets(handle);

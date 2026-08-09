@@ -58,7 +58,7 @@ clearDetail(DeviceManagerErrorDetail* outDetail) {
 DeviceManagerError
 DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, const char* sclFilePath,
-        const char* acseAuthPassword, AccessMode accessMode,
+        const char* acseAuthPassword, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail,
         bool* outMmsAvailable, bool* outGooseAvailable) {
     clearDetail(outDetail);
@@ -116,8 +116,8 @@ DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int m
     OrchestrationErrorDetail detail;
     memset(&detail, 0, sizeof(detail));
     OrchestrationError runError = DeviceManagerBootstrapPolicy_run(orchestrationHandle, host, mmsPort,
-            effectiveIedName, interfaceId, effectiveSclFilePath, effectiveAcseAuthPassword, accessMode, &detail,
-            outMmsAvailable, outGooseAvailable);
+            effectiveIedName, interfaceId, effectiveSclFilePath, effectiveAcseAuthPassword, accessMode,
+            lnCategoryFilter, &detail, outMmsAvailable, outGooseAvailable);
 
     if (runError != ORCHESTRATION_OK) {
         Orchestration_destroy(orchestrationHandle);

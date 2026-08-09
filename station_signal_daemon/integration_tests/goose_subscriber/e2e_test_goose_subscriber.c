@@ -153,7 +153,7 @@ test_dataChangeOnServer_triggersGooseRecordWithNewValue(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_REPORT_ONLY, &modelError);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     GooseSubscriberError createError;
@@ -212,7 +212,7 @@ test_firstFrameEverPerTarget_neverReachesCallback(void) {
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_REPORT_ONLY, &modelError);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     GooseSubscriberError createError;
@@ -322,7 +322,7 @@ test_crossTargetDuplicateContent_bothIdenticalGoCbsReachCallback_dedupMovedDowns
 
     IedModelLoadError modelError;
     IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
-            IED_MODEL_ACCESS_REPORT_ONLY, &modelError);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL, &modelError);
     TEST_ASSERT_NOT_NULL_MESSAGE(iedModel, "expected reporter1.cid to load successfully");
 
     GooseSubscriberError createError;

@@ -11,9 +11,28 @@
  * into domain/data/utils directly.
  */
 
-/* Returns NULL and sets *outError on failure. Caller owns the handle (IedModel_release). */
+/*
+ * categoryFilter: stored directly on the resulting handle. Does NOT gate
+ * getGooseSubscriptionTargets/getReportSubscriptionTargets - every RCB/GoCB
+ * is always visible regardless of category, since the daemon always needs to
+ * know where every dataset lives (real SCL very commonly parents every
+ * RCB/GoCB on LLN0, which would make a parent-LN gate useless in practice -
+ * see those two functions' own doc comments). It DOES gate
+ * getReportableAttributeReferencesForWholeDevice below (which leaves a
+ * self-created dynamic dataset captures) and, downstream in
+ * mms_report_client/goose_subscriber, which already-delivered data points
+ * get forwarded (see IedModel_getCategoryFilter and
+ * MmsReportClientMemberRefCacheEntry.categoryFilter/
+ * GooseSubscriberMemberRefCache.categoryFilter). IED_MODEL_LN_CATEGORY_ALL
+ * (today's unfiltered behavior) matches every LN. Every construction site
+ * passes this explicitly, mirroring `mode` - never silently defaulted deep
+ * inside the handle.
+ *
+ * Returns NULL and sets *outError on failure. Caller owns the handle (IedModel_release).
+ */
 IedModelHandle
-IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError);
+IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, LnCategoryMask categoryFilter,
+        IedModelLoadError* outError);
 
 /*
  * Wraps an already-constructed, caller-owned dynamic IedModel (built via
@@ -27,11 +46,26 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
  * model came from SCL parsing or live discovery, since they only ever walk
  * handle->model, never care how it was built. Ownership of `model` transfers
  * to the returned handle - IedModel_release destroys it exactly like a
- * loadFromFile'd one. Returns NULL (and never touches `model`) if model is
- * NULL or allocation fails.
+ * loadFromFile'd one. Returns NULL (and never touches `model` or
+ * `lnCategoriesList`) if model is NULL or allocation fails.
+ *
+ * lnCategoriesList is adopted exactly like IedModel_loadFromFile adopts
+ * IedModelSclLoader_load's own outLnCategories - a LinkedList of heap-boxed
+ * IedModelLnCategoryEntry*, ownership transferred to this call (destroyed
+ * here regardless of success/failure), copied by value into the handle's own
+ * flat array. May be NULL (handle ends up with zero classified LNs, same as
+ * a caller that opts out of daSemantics on the SCL path) - callers that DO
+ * classify their LNs (ied_model_online_loader, via
+ * IedModel_categorizeWireInstanceName per LN) should always pass a populated
+ * list, since leaving this NULL makes the whole category filter inert for
+ * every LN wrapped this way.
+ *
+ * categoryFilter: same contract as IedModel_loadFromFile's own parameter of
+ * the same name - stored directly on the handle.
  */
 IedModelHandle
-IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode);
+IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode, LinkedList lnCategoriesList,
+        LnCategoryMask categoryFilter);
 
 /*
  * Lists every <IED name="..."> declared at the top level of the SCL file at
@@ -57,11 +91,15 @@ IedModel_release(IedModelHandle handle);
  * getReportSubscriptionTargets returns a LinkedList of heap-allocated
  * ReportControlBlockTarget* instead. Caller owns the list and its elements:
  * LinkedList_destroyDeep(list, IedModel_destroyReportControlBlockTarget).
+ * Returns EVERY RCB regardless of the handle's categoryFilter - see that
+ * field's own doc comment above.
  *
  * getGooseSubscriptionTargets returns a LinkedList of heap-allocated
  * GooseSubscriptionTarget* (object reference plus optional VLAN/APPID/dst-MAC
  * addressing parsed from SCL). Caller owns the list and its elements:
  * LinkedList_destroyDeep(list, IedModel_destroyGooseSubscriptionTarget).
+ * Returns EVERY GoCB regardless of the handle's categoryFilter, same as
+ * getReportSubscriptionTargets above.
  */
 
 /* Available at IED_MODEL_ACCESS_REPORT_ONLY and above (i.e. always). */
@@ -215,6 +253,15 @@ int IedModel_getDynDataSetMaxAttributes(IedModelHandle handle);
 int IedModel_getConfDataSetMax(IedModelHandle handle);
 int IedModel_getConfDataSetMaxAttributes(IedModelHandle handle);
 
+/* This handle's active category filter mask - see categoryFilter's own doc
+ * comment on IedModel_loadFromFile above. mms_report_client/goose_subscriber
+ * call this once per connection (not per report/frame) and cache the result
+ * alongside each dataset member's own resolved category, to filter
+ * individual data points by their OWN LN's category before forwarding - RCB/
+ * GoCB visibility itself is never gated by this. NULL handle returns
+ * IED_MODEL_LN_CATEGORY_ALL. */
+LnCategoryMask IedModel_getCategoryFilter(IedModelHandle handle);
+
 /*
  * Member-reference-keyed counterparts of IedModel_getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberLeafSemantics, plus a
@@ -235,6 +282,17 @@ LinkedList IedModel_getLeafWireTypesForMemberReference(IedModelHandle handle, co
 LinkedList IedModel_getLeafSemanticsForMemberReference(IedModelHandle handle, const char* memberReference);
 IedModelDaSemantic IedModel_getSemanticForMemberReference(IedModelHandle handle, const char* memberReference);
 
+/* See IedModelUseCases_getCategoryForMemberReference's own doc comment
+ * (ied_model_usecases.h) - LN-level, not per-leaf. */
+LnCategory IedModel_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference);
+
+/* See IedModelUseCases_getDescriptionForMemberReference/
+ * _getLeafDescriptionsForMemberReference's own doc comments
+ * (ied_model_usecases.h) - both return BORROWED strings, owned by the
+ * handle, never freed by the caller. */
+const char* IedModel_getDescriptionForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModel_getLeafDescriptionsForMemberReference(IedModelHandle handle, const char* memberReference);
+
 /* LinkedListValueDeleteFunction-compatible: frees a ReportControlBlockTarget. */
 void IedModel_destroyReportControlBlockTarget(void* target);
 
@@ -246,5 +304,26 @@ LinkedList IedModel_getReadTargets(IedModelHandle handle);
 
 /* Available only at IED_MODEL_ACCESS_READ_AND_WRITE; empty list otherwise. */
 LinkedList IedModel_getControlTargets(IedModelHandle handle);
+
+/*
+ * Thin re-export of IedModelLnCategory_forWireInstanceName (utils/, not
+ * otherwise reachable outside this feature per this header's own boundary
+ * rule above) - exists purely so ied_model_online_loader can classify each
+ * LN it discovers over the live MMS ACSI directory (no lnClass attribute
+ * available there, only the raw concatenated wire instance name) without
+ * reaching into ied_model's utils/ directly. See that function's own doc
+ * comment (ied_model_ln_category.h) for the matching algorithm.
+ */
+LnCategory IedModel_categorizeWireInstanceName(const char* wireName);
+
+/*
+ * Thin re-export of IedModelLnCategory_toString (utils/) - exists so
+ * ipc_dispatcher (and any other cross-feature caller) can render a
+ * MmsReportEntry.category/GooseSubscriberEntry.category value as its
+ * wire-facing string ("CONTROL"/"MEASUREMENT"/"PROTECTION"/"OTHER") without
+ * reaching into ied_model's utils/ directly. Never NULL - "UNKNOWN" for an
+ * out-of-range value, same as the wrapped function.
+ */
+const char* IedModel_categoryToString(LnCategory category);
 
 #endif /* IED_MODEL_API_H_ */

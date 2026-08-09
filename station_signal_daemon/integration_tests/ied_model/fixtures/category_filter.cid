@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="category-filter-fixture" nameStructure="IEDName" />
+
+  <IED name="CatFilterIED">
+    <AccessPoint name="AP1">
+      <Server>
+        <LDevice inst="CB1">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="ds1">
+              <FCDA ldInst="CB1" lnClass="LLN0" fc="ST" doName="Mod" daName="q" />
+              <FCDA ldInst="CB1" lnClass="XCBR" lnInst="1" fc="ST" doName="Pos" daName="stVal" />
+              <FCDA ldInst="CB1" lnClass="MMXU" lnInst="1" fc="MX" doName="TotW" daName="mag" />
+              <FCDA ldInst="CB1" lnClass="PTOC" lnInst="1" fc="ST" doName="Str" daName="general" />
+            </DataSet>
+            <ReportControl name="brcbMain" rptID="brcbMain" datSet="ds1" confRev="1" buffered="true"
+                intgPd="60000" bufTime="100">
+              <TrgOps dchg="true" qchg="true" period="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+            <GSEControl name="gcbStatus" appID="GCB1" datSet="ds1" type="GOOSE" confRev="1" />
+          </LN0>
+          <LN lnClass="XCBR" lnType="XCBRType" inst="1" prefix="">
+            <DataSet name="dsXcbr">
+              <FCDA ldInst="CB1" lnClass="XCBR" lnInst="1" fc="ST" doName="Pos" daName="stVal" />
+            </DataSet>
+            <ReportControl name="urcbXcbr" rptID="urcbXcbr" datSet="dsXcbr" confRev="1" buffered="false">
+              <TrgOps dchg="true" qchg="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" />
+              <RptEnabled max="1" />
+            </ReportControl>
+          </LN>
+          <LN lnClass="MMXU" lnType="MMXUType" inst="1" prefix="" />
+          <LN lnClass="PTOC" lnType="PTOCType" inst="1" prefix="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+      <DO name="Health" type="ENS1" />
+      <DO name="NamPlt" type="LPL1" />
+    </LNodeType>
+
+    <LNodeType id="XCBRType" lnClass="XCBR">
+      <DO name="Mod" type="INC1" />
+      <DO name="Pos" type="DPC1" />
+    </LNodeType>
+
+    <LNodeType id="MMXUType" lnClass="MMXU">
+      <DO name="Mod" type="INC1" />
+      <DO name="TotW" type="MV1" />
+    </LNodeType>
+
+    <LNodeType id="PTOCType" lnClass="PTOC">
+      <DO name="Mod" type="INC1" />
+      <DO name="Str" type="ACT1" />
+    </LNodeType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="Enum" type="HealthKind" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="LPL1" cdc="LPL">
+      <DA name="vendor" bType="VisString255" fc="DC" />
+      <DA name="swRev" bType="VisString255" fc="DC" />
+    </DOType>
+
+    <DOType id="DPC1" cdc="DPC">
+      <DA name="stVal" bType="Dbpos" fc="ST" desc="Circuit breaker position" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+      <DA name="Oper" bType="Struct" type="OperSPS" fc="CO" />
+      <DA name="ctlModel" bType="Enum" type="CtlModels" fc="CF" />
+    </DOType>
+
+    <DOType id="MV1" cdc="MV">
+      <DA name="mag" bType="Struct" type="AnalogueValue1" fc="MX" />
+      <DA name="q" bType="Quality" fc="MX" />
+      <DA name="t" bType="Timestamp" fc="MX" />
+    </DOType>
+
+    <DOType id="ACT1" cdc="ACT">
+      <DA name="general" bType="BOOLEAN" fc="ST" desc="Protection general start" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DAType id="OperSPS">
+      <BDA name="ctlVal" bType="BOOLEAN" />
+    </DAType>
+
+    <DAType id="AnalogueValue1">
+      <BDA name="f" bType="FLOAT32" />
+    </DAType>
+
+    <EnumType id="CtlModels">
+      <EnumVal ord="0">status-only</EnumVal>
+      <EnumVal ord="4">sbo-with-enhanced-security</EnumVal>
+    </EnumType>
+
+    <EnumType id="HealthKind">
+      <EnumVal ord="1">Ok</EnumVal>
+      <EnumVal ord="2">Warning</EnumVal>
+      <EnumVal ord="3">Alarm</EnumVal>
+    </EnumType>
+  </DataTypeTemplates>
+</SCL>

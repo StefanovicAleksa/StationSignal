@@ -56,6 +56,45 @@ parseAccessMode(const cJSON* object, AccessMode* outMode) {
     return true;
 }
 
+/*
+ * Absent "lnCategories" -> IED_MODEL_LN_CATEGORY_ALL (today's unfiltered
+ * behavior, fully backward compatible). Present: must be a non-empty array
+ * of recognized category name strings ("CONTROL"/"MEASUREMENT"/"PROTECTION"/
+ * "OTHER"), OR'd together into the returned mask. An empty array is
+ * REJECTED as INVALID_PARAMS rather than treated as "no filter" - a caller
+ * wanting no filter should omit the field entirely; an explicit empty array
+ * is far more likely a client-side bug than genuine "subscribe to nothing"
+ * intent (explicit product decision, not an oversight). Any non-string
+ * element or unrecognized category name also fails closed, same as
+ * parseAccessMode's own unrecognized-string handling. */
+static bool
+parseLnCategoryFilter(const cJSON* object, LnCategoryMask* outMask) {
+    const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, "lnCategories");
+    if (!item) {
+        *outMask = IED_MODEL_LN_CATEGORY_ALL;
+        return true;
+    }
+    if (!cJSON_IsArray(item)) return false;
+
+    int size = cJSON_GetArraySize(item);
+    if (size == 0) return false;
+
+    LnCategoryMask mask = 0;
+    for (int i = 0; i < size; i++) {
+        const cJSON* element = cJSON_GetArrayItem(item, i);
+        if (!cJSON_IsString(element) || !element->valuestring) return false;
+
+        if (strcmp(element->valuestring, "CONTROL") == 0) mask |= IED_MODEL_LN_CATEGORY_CONTROL;
+        else if (strcmp(element->valuestring, "MEASUREMENT") == 0) mask |= IED_MODEL_LN_CATEGORY_MEASUREMENT;
+        else if (strcmp(element->valuestring, "PROTECTION") == 0) mask |= IED_MODEL_LN_CATEGORY_PROTECTION;
+        else if (strcmp(element->valuestring, "OTHER") == 0) mask |= IED_MODEL_LN_CATEGORY_OTHER;
+        else return false;
+    }
+
+    *outMask = mask;
+    return true;
+}
+
 static ControlParseError
 parseStartReportingParams(const cJSON* params, ControlRequest* request) {
     const cJSON* hostItem = cJSON_GetObjectItemCaseSensitive(params, "host");
@@ -80,6 +119,7 @@ parseStartReportingParams(const cJSON* params, ControlRequest* request) {
     if (request->sclFilePath && !request->iedName) return CONTROL_PARSE_ERR_INVALID_PARAMS;
 
     if (!parseAccessMode(params, &request->accessMode)) return CONTROL_PARSE_ERR_INVALID_PARAMS;
+    if (!parseLnCategoryFilter(params, &request->lnCategoryFilter)) return CONTROL_PARSE_ERR_INVALID_PARAMS;
 
     if (!request->host || !request->interfaceId) return CONTROL_PARSE_ERR_INVALID_PARAMS; /* OOM */
 

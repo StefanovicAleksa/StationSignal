@@ -237,7 +237,7 @@ test_localFile_enablesRptEnabledMaxInstanceRcb_usingSuffixedReference(void) {
     bool mmsAvailable = false;
     bool gooseAvailable = false;
     OrchestrationError runError = Orchestration_runFromLocalFile(handle, FIXTURE_PATH, "127.0.0.1", TEST_PORT,
-            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, &mmsAvailable, &gooseAvailable);
+            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, &mmsAvailable, &gooseAvailable);
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
             "Orchestration_runFromLocalFile failed - if stage==GOOSE_SUBSCRIBER_START, this test needs "
             "CAP_NET_RAW (run with sudo)");

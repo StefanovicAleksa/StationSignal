@@ -45,6 +45,7 @@ $(BIN): e2e_test_mms_report_client.c \
 		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_SIMULATOR)/src/sim_server.c

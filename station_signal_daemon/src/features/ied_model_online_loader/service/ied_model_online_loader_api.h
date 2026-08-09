@@ -48,12 +48,19 @@
  * `acseAuthPassword` NULL means unauthenticated, same convention as
  * scl_bootstrap/mms_report_client's own config fields.
  *
+ * `categoryFilter` is the same contract as IedModel_loadFromFile's own
+ * parameter of the same name - stored on the resulting handle. Unlike
+ * daSemantics/dynDataSetMax, LN classification IS available on this path
+ * (reverse-matched from the raw wire instance name per LN - see
+ * IedModel_categorizeWireInstanceName), so a non-ALL filter is fully
+ * effective here too, not degraded.
+ *
  * Returns NULL and sets *outError on failure. Caller owns the returned handle
  * exactly like IedModel_loadFromFile's (IedModel_release when done).
  */
 IedModelHandle
 IedModelOnlineLoader_build(const char* host, int port, const char* iedName, AccessMode mode,
-        const char* acseAuthPassword, const IedModelOnlineLoaderConfig* config,
+        LnCategoryMask categoryFilter, const char* acseAuthPassword, const IedModelOnlineLoaderConfig* config,
         IedModelOnlineLoaderError* outError);
 
 #endif /* IED_MODEL_ONLINE_LOADER_API_H_ */

@@ -74,6 +74,13 @@ DeviceManager_create(const DeviceManagerConfig* config, DeviceManagerError* outE
  * technically work, but this feature's own explicit contract makes it
  * mandatory instead.
  *
+ * lnCategoryFilter: IED_MODEL_LN_CATEGORY_ALL (today's unfiltered behavior)
+ * matches every LN. A narrower mask excludes non-matching LNs from every
+ * downstream subscription/dataset-clustering decision - see ied_model's own
+ * categoryFilter field (ied_model_types.h) for where this actually takes
+ * effect; this parameter is passed straight through to Orchestration_run*
+ * unchanged, same route as accessMode.
+ *
  * outMmsAvailable/outGooseAvailable are optional (NULL-safe) and, on
  * DEVICE_MANAGER_OK, report which of MMS reporting / GOOSE subscription this
  * device's SCL actually declared targets for - see
@@ -85,7 +92,7 @@ DeviceManager_create(const DeviceManagerConfig* config, DeviceManagerError* outE
 DeviceManagerError
 DeviceManager_startReporting(DeviceManagerHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, const char* sclFilePath,
-        const char* acseAuthPassword, AccessMode accessMode,
+        const char* acseAuthPassword, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         uint64_t* outDeviceId, uint16_t* outWsPort, DeviceManagerErrorDetail* outDetail,
         bool* outMmsAvailable, bool* outGooseAvailable);
 

@@ -127,6 +127,7 @@ test_startReporting_minimalValid_appliesDefaults(void) {
     TEST_ASSERT_NULL(fixtureRequest->sclFilePath);
     TEST_ASSERT_NULL(fixtureRequest->acseAuthPassword);
     TEST_ASSERT_EQUAL(IED_MODEL_ACCESS_REPORT_ONLY, fixtureRequest->accessMode); /* default */
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_ALL, fixtureRequest->lnCategoryFilter); /* default */
 
     /* Success clears the error-echo recovery fields. */
     TEST_ASSERT_NULL(fixtureRequestId);
@@ -138,7 +139,7 @@ test_startReporting_fullyPopulated(void) {
     ControlParseError err = parse("{\"requestId\":\"req-2\",\"action\":\"START_REPORTING\","
             "\"params\":{\"host\":\"10.0.0.1\",\"mmsPort\":103,\"iedName\":\"Reporter1\","
             "\"interfaceId\":\"eth0\",\"sclFilePath\":\"/tmp/x.icd\",\"acseAuthPassword\":\"secret\","
-            "\"accessMode\":\"READ_AND_WRITE\"}}");
+            "\"accessMode\":\"READ_AND_WRITE\",\"lnCategories\":[\"CONTROL\",\"MEASUREMENT\"]}}");
 
     TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
     TEST_ASSERT_NOT_NULL(fixtureRequest);
@@ -147,6 +148,78 @@ test_startReporting_fullyPopulated(void) {
     TEST_ASSERT_EQUAL_STRING("/tmp/x.icd", fixtureRequest->sclFilePath);
     TEST_ASSERT_EQUAL_STRING("secret", fixtureRequest->acseAuthPassword);
     TEST_ASSERT_EQUAL(IED_MODEL_ACCESS_READ_AND_WRITE, fixtureRequest->accessMode);
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_CONTROL | IED_MODEL_LN_CATEGORY_MEASUREMENT,
+            fixtureRequest->lnCategoryFilter);
+}
+
+/* ---- lnCategories (START_REPORTING) ---- */
+
+void
+test_startReporting_lnCategories_absent_defaultsToAll(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+            "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\"}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_ALL, fixtureRequest->lnCategoryFilter);
+}
+
+void
+test_startReporting_lnCategories_singleValue(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+            "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\",\"lnCategories\":[\"PROTECTION\"]}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_PROTECTION, fixtureRequest->lnCategoryFilter);
+}
+
+void
+test_startReporting_lnCategories_allFourValues_orsTogether(void) {
+    ControlParseError err = parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+            "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\","
+            "\"lnCategories\":[\"CONTROL\",\"MEASUREMENT\",\"PROTECTION\",\"OTHER\"]}}");
+
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_OK, err);
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_ALL, fixtureRequest->lnCategoryFilter);
+}
+
+void
+test_startReporting_lnCategories_emptyArray_returnsInvalidParams(void) {
+    /* Fail closed - a caller wanting "no filter" should omit the field
+     * entirely; an explicit empty array is more likely a client bug than
+     * genuine "subscribe to nothing" intent (explicit product decision). */
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+                    "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\",\"lnCategories\":[]}}"));
+}
+
+void
+test_startReporting_lnCategories_unrecognizedCategoryName_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+                    "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\","
+                    "\"lnCategories\":[\"SOMETHING_ELSE\"]}}"));
+}
+
+void
+test_startReporting_lnCategories_mixedValidAndInvalid_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+                    "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\","
+                    "\"lnCategories\":[\"CONTROL\",\"NOT_A_CATEGORY\"]}}"));
+}
+
+void
+test_startReporting_lnCategories_notAnArray_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+                    "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\",\"lnCategories\":\"CONTROL\"}}"));
+}
+
+void
+test_startReporting_lnCategories_nonStringElement_returnsInvalidParams(void) {
+    TEST_ASSERT_EQUAL(CONTROL_PARSE_ERR_INVALID_PARAMS,
+            parse("{\"requestId\":\"req-1\",\"action\":\"START_REPORTING\","
+                    "\"params\":{\"host\":\"10.0.0.1\",\"interfaceId\":\"eth0\",\"lnCategories\":[42]}}"));
 }
 
 /* ---- STOP_REPORTING params ---- */
@@ -306,6 +379,14 @@ main(void) {
     RUN_TEST(test_startReporting_unknownAccessMode_returnsInvalidParams);
     RUN_TEST(test_startReporting_minimalValid_appliesDefaults);
     RUN_TEST(test_startReporting_fullyPopulated);
+    RUN_TEST(test_startReporting_lnCategories_absent_defaultsToAll);
+    RUN_TEST(test_startReporting_lnCategories_singleValue);
+    RUN_TEST(test_startReporting_lnCategories_allFourValues_orsTogether);
+    RUN_TEST(test_startReporting_lnCategories_emptyArray_returnsInvalidParams);
+    RUN_TEST(test_startReporting_lnCategories_unrecognizedCategoryName_returnsInvalidParams);
+    RUN_TEST(test_startReporting_lnCategories_mixedValidAndInvalid_returnsInvalidParams);
+    RUN_TEST(test_startReporting_lnCategories_notAnArray_returnsInvalidParams);
+    RUN_TEST(test_startReporting_lnCategories_nonStringElement_returnsInvalidParams);
 
     RUN_TEST(test_stopReporting_missingDeviceId_returnsInvalidParams);
     RUN_TEST(test_stopReporting_negativeDeviceId_returnsInvalidParams);

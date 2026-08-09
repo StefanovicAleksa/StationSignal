@@ -31,7 +31,7 @@ CC      := gcc
 CFLAGS  := -g -Wall -I$(SRC) -idirafter $(THIRD_PARTY_INCLUDE)
 LDFLAGS := -L$(THIRD_PARTY_LIB) -lunity
 
-TESTS := test_ied_model_utils test_ied_model_usecases test_ied_model_api \
+TESTS := test_ied_model_utils test_ied_model_ln_category test_ied_model_usecases test_ied_model_api \
          test_ied_model_online_loader_usecases \
          test_mms_report_client_utils test_mms_report_client_usecases test_mms_report_client_api \
          test_mms_dataset_manager_usecases \
@@ -58,9 +58,18 @@ all: run
 test_ied_model_utils: ied_model/test_ied_model_utils.c $(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -lmxml
 
+# ln_category.c is pure string/table logic over the LnCategory enum - touches
+# no mxml/libiec61850 symbols at all (only enum/struct types from
+# iec61850_model.h, no linking needed), same situation as
+# test_ipc_dispatcher_usecases.
+test_ied_model_ln_category: ied_model/test_ied_model_ln_category.c $(IED_MODEL)/utils/ied_model_ln_category.c
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
 # usecases.c builds/reads a real IedModel via the dynamic model API but never
-# touches mxml.
-test_ied_model_usecases: ied_model/test_ied_model_usecases.c $(IED_MODEL)/domain/ied_model_usecases.c
+# touches mxml. Needs ied_model_ln_category.c too now (categoryForLn/
+# formatCategoryMask's own IedModelLnCategory_toString call).
+test_ied_model_usecases: ied_model/test_ied_model_usecases.c $(IED_MODEL)/domain/ied_model_usecases.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lpthread
 
 # api.c pulls in the real loader (for the one wiring test) plus usecases and
@@ -68,6 +77,7 @@ test_ied_model_usecases: ied_model/test_ied_model_usecases.c $(IED_MODEL)/domain
 test_ied_model_api: ied_model/test_ied_model_api.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
@@ -93,6 +103,7 @@ test_mms_report_client_usecases: mms_report_client/test_mms_report_client_usecas
 		$(MMS_REPORT_CLIENT)/utils/mms_report_client_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
@@ -114,6 +125,7 @@ test_mms_report_client_api: mms_report_client/test_mms_report_client_api.c \
 		$(MMS_DATASET_MANAGER)/utils/mms_dataset_manager_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
@@ -141,6 +153,7 @@ test_goose_subscriber_usecases: goose_subscriber/test_goose_subscriber_usecases.
 		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
@@ -155,6 +168,7 @@ test_goose_subscriber_api: goose_subscriber/test_goose_subscriber_api.c \
 		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lpthread
@@ -219,6 +233,7 @@ test_orchestration_api: orchestration/test_orchestration_api.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
@@ -310,6 +325,7 @@ test_ipc_dispatcher_api: ipc_dispatcher/test_ipc_dispatcher_api.c \
 		$(GOOSE_SUBSCRIBER)/utils/goose_subscriber_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) -liec61850 -lhal -lmxml -lcjson -lwebsockets -lpthread
@@ -464,6 +480,7 @@ test_device_manager_api: device_manager/test_device_manager_api.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
@@ -569,6 +586,7 @@ test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_use
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \
@@ -653,6 +671,7 @@ test_control_dispatcher_api: control_dispatcher/test_control_dispatcher_api.c \
 		$(SCL_BOOTSTRAP)/utils/scl_bootstrap_utils.c \
 		$(IED_MODEL)/service/ied_model_api.c \
 		$(IED_MODEL)/data/ied_model_scl_loader.c \
+		$(IED_MODEL)/utils/ied_model_ln_category.c \
 		$(IED_MODEL)/domain/ied_model_usecases.c \
 		$(IED_MODEL)/utils/ied_model_utils.c \
 		$(IED_MODEL_ONLINE_LOADER)/service/ied_model_online_loader_api.c \

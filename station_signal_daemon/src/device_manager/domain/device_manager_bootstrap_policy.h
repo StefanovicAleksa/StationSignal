@@ -25,7 +25,7 @@
 OrchestrationError
 DeviceManagerBootstrapPolicy_run(OrchestrationHandle handle, const char* host, int mmsPort,
         const char* iedName, const char* interfaceId, const char* sclFilePath,
-        const char* acseAuthPassword, AccessMode accessMode, OrchestrationErrorDetail* outDetail,
-        bool* outMmsAvailable, bool* outGooseAvailable);
+        const char* acseAuthPassword, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
+        OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable);
 
 #endif /* DEVICE_MANAGER_BOOTSTRAP_POLICY_H_ */

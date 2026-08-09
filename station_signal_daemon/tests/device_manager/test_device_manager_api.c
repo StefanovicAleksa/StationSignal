@@ -75,7 +75,7 @@ test_startReporting_rejectsNullHandle(void) {
     uint64_t deviceId;
     uint16_t wsPort;
     DeviceManagerError err = DeviceManager_startReporting(NULL, "10.0.0.1", 102, "Reporter1", "lo",
-            NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL);
+            NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL);
 
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT, err);
 }
@@ -88,10 +88,10 @@ test_startReporting_rejectsEmptyHost(void) {
     uint16_t wsPort;
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "", 102, "Reporter1", "lo",
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, NULL, 102, "Reporter1", "lo",
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
 }
 
 void
@@ -102,10 +102,10 @@ test_startReporting_rejectsEmptyInterfaceId(void) {
     uint16_t wsPort;
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, "Reporter1", "",
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, "Reporter1", NULL,
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
 }
 
 void
@@ -116,10 +116,10 @@ test_startReporting_rejectsSclFilePath_withoutIedName(void) {
     uint16_t wsPort;
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, NULL, "lo",
-                    "/tmp/some.icd", NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    "/tmp/some.icd", NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, "", "lo",
-                    "/tmp/some.icd", NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, &wsPort, NULL, NULL, NULL));
+                    "/tmp/some.icd", NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, &wsPort, NULL, NULL, NULL));
 }
 
 void
@@ -129,12 +129,12 @@ test_startReporting_rejectsNullOutParams(void) {
     uint16_t wsPort;
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, "Reporter1", "lo",
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, NULL, &wsPort, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, &wsPort, NULL, NULL, NULL));
 
     uint64_t deviceId;
     TEST_ASSERT_EQUAL(DEVICE_MANAGER_ERR_INVALID_ARGUMENT,
             DeviceManager_startReporting(fixtureHandle, "10.0.0.1", 102, "Reporter1", "lo",
-                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, &deviceId, NULL, NULL, NULL, NULL));
+                    NULL, NULL, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&deviceId, NULL, NULL, NULL, NULL));
 }
 
 /* ---- DeviceManager_stopReporting ---- */

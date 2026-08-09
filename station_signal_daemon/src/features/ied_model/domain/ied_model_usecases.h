@@ -18,12 +18,17 @@
  * reference matter to report consumers in a way plain read/control references
  * don't); caller owns the list and its elements
  * (LinkedList_destroyDeep(list, IedModelUseCases_destroyReportControlBlockTarget)).
+ * Returns EVERY RCB regardless of handle->categoryFilter - deliberately not
+ * gated by category (see this function's own doc comment in the .c file):
+ * the daemon always needs every RCB visible to know where every dataset
+ * lives. Category filtering happens downstream, per data point.
  *
  * getGooseSubscriptionTargets returns a LinkedList of heap-allocated
  * GooseSubscriptionTarget* (object reference plus optional VLAN/APPID/dst-MAC
  * addressing parsed from SCL's <GSE><Address> block); caller owns the list and
  * its elements (LinkedList_destroyDeep(list,
- * IedModelUseCases_destroyGooseSubscriptionTarget)).
+ * IedModelUseCases_destroyGooseSubscriptionTarget)). Same category-blind
+ * contract as getReportSubscriptionTargets above.
  *
  * AccessMode gating is NOT done here - these always compute the full result for
  * the model as built. The service layer (ied_model_api.c) decides which of these
@@ -113,6 +118,14 @@ int IedModelUseCases_getDynDataSetMaxAttributes(IedModelHandle handle);
 int IedModelUseCases_getConfDataSetMax(IedModelHandle handle);
 int IedModelUseCases_getConfDataSetMaxAttributes(IedModelHandle handle);
 
+/* This handle's active category filter mask (see sIedModelHandle.categoryFilter's
+ * own doc comment) - mms_report_client/goose_subscriber read this once per
+ * connection to cache it alongside each dataset member's own resolved
+ * category, for per-data-point filtering. NULL handle returns
+ * IED_MODEL_LN_CATEGORY_ALL (unfiltered), the same safe default the field
+ * itself defaults to. */
+LnCategoryMask IedModelUseCases_getCategoryFilter(IedModelHandle handle);
+
 /*
  * Member-reference-keyed counterparts of getDataSetMemberLeafReferences/
  * _getDataSetMemberLeafWireTypes/_getDataSetMemberSemantics(one entry)/
@@ -132,6 +145,36 @@ LinkedList IedModelUseCases_getLeafReferencesForMemberReference(IedModelHandle h
 LinkedList IedModelUseCases_getLeafWireTypesForMemberReference(IedModelHandle handle, const char* memberReference);
 LinkedList IedModelUseCases_getLeafSemanticsForMemberReference(IedModelHandle handle, const char* memberReference);
 IedModelDaSemantic IedModelUseCases_getSemanticForMemberReference(IedModelHandle handle, const char* memberReference);
+
+/*
+ * LN-level counterpart of getSemanticForMemberReference - unlike a Dbpos
+ * semantic (genuinely per-DA), LnCategory is constant across every leaf
+ * under one LN (see IedModelLnCategoryEntry's own doc comment), so this
+ * resolves only as far as the reference's own "LD/LN" prefix, never down to
+ * a terminal DataAttribute. Returns IED_MODEL_LN_CATEGORY_OTHER (never a
+ * guess into a real category) if memberReference is NULL, malformed, or its
+ * LN doesn't resolve in this model.
+ */
+LnCategory IedModelUseCases_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference);
+
+/*
+ * Description-lookup counterparts of getSemanticForMemberReference/
+ * getLeafSemanticsForMemberReference - same resolution shape, but return the
+ * SCL desc="..." string captured for that leaf (IedModelDaDescEntry, DA-level
+ * or DAI-instance-level, whichever a handle ends up with per its own doc
+ * comment) instead of an IedModelDaSemantic. Returned string(s) are
+ * BORROWED (point directly into handle->daDescriptions - owned by the handle,
+ * not the caller) - never free them; getDescriptionForMemberReference returns
+ * NULL if no description was captured for that leaf (or on any resolution
+ * failure, same graceful-degradation posture as every other lookup here).
+ * getLeafDescriptionsForMemberReference's list is index-aligned with
+ * getLeafReferencesForMemberReference's own output for the same
+ * memberReference - a NULL element means "this leaf has no description," not
+ * an error; the caller owns the list structure only
+ * (LinkedList_destroyStatic), never the strings inside it.
+ */
+const char* IedModelUseCases_getDescriptionForMemberReference(IedModelHandle handle, const char* memberReference);
+LinkedList IedModelUseCases_getLeafDescriptionsForMemberReference(IedModelHandle handle, const char* memberReference);
 
 /*
  * Cross-checks one leaf's EXPECTED (SCL-declared) DataAttributeType against

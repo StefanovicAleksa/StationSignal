@@ -111,6 +111,25 @@ typedef struct {
     const char* label; /* valid only if hasLabel - NOT owned, never freed */
     bool hasPreviousLabel;
     const char* previousLabel; /* valid only if hasPreviousLabel - NOT owned, never freed */
+
+    /* This point's LN category ("CONTROL"/"MEASUREMENT"/"PROTECTION"/"OTHER",
+     * via IedModelLnCategory_toString) - unlike label, this is NEVER absent:
+     * MmsReportEntry.category/GooseSubscriberEntry.category always resolve to
+     * a real LnCategory value (worst case OTHER, an "uncategorized" outcome,
+     * not an absent one), so no hasCategory flag is needed. NOT owned -
+     * points at a static string literal, never freed. */
+    const char* category;
+
+    /* This point's captured SCL desc="...", if any - additive alongside
+     * `reference`, never a replacement for it. Present only when SCL
+     * (DA-template or DAI-instance level) actually carried a desc for this
+     * leaf; absent for online-discovered devices (no SCL equivalent exists
+     * over MMS ACSI directory services) or any leaf with no desc. Unlike
+     * category/label, this IS owned (strdup'd from MmsReportEntry.description/
+     * GooseSubscriberEntry.description, which are themselves owned copies) -
+     * freed alongside `reference`. */
+    bool hasDescription;
+    char* description; /* valid only if hasDescription - owned, freed */
 } IpcDataPoint;
 
 /*
@@ -133,6 +152,10 @@ typedef struct {
     const char* const* pointLabel;
     const bool* pointHasPreviousLabel;
     const char* const* pointPreviousLabel;
+    const char* const* pointCategory; /* never NULL per-element if this array itself is non-NULL -
+                                          see IpcDataPoint.category's own doc comment */
+    const bool* pointHasDescription;
+    const char* const* pointDescription;
 } IpcDataPointExtras;
 
 typedef struct {

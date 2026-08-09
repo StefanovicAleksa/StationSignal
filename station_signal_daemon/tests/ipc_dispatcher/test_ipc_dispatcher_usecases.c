@@ -297,6 +297,10 @@ test_assembleMessage_extrasNull_everyHasFlagFalse(void) {
     TEST_ASSERT_NOT_NULL(message);
     TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousValue);
     TEST_ASSERT_FALSE(message->dataPoints[0].hasPreviousQuality);
+    /* category is never absent, even with extras == NULL - degrades to the
+     * literal "OTHER" rather than crashing or leaving it unset. */
+    TEST_ASSERT_EQUAL_STRING("OTHER", message->dataPoints[0].category);
+    TEST_ASSERT_FALSE(message->dataPoints[0].hasDescription);
 
     IpcDispatcherUseCases_freeMessage(message);
 }
@@ -317,11 +321,19 @@ test_assembleMessage_extrasPopulated_roundTripsEveryField(void) {
     bool hasPreviousQuality = true;
     IpcQuality previousQuality = { IPC_QUALITY_INVALID, 7 };
 
+    const char* category = "CONTROL";
+    bool hasDescription = true;
+    char descText[] = "Circuit breaker position";
+    const char* description = descText;
+
     IpcDataPointExtras extras = {
         .pointHasPreviousValue = &hasPreviousValue,
         .pointPreviousValue = &previousValue,
         .pointHasPreviousQuality = &hasPreviousQuality,
         .pointPreviousQuality = &previousQuality,
+        .pointCategory = &category,
+        .pointHasDescription = &hasDescription,
+        .pointDescription = &description,
     };
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
@@ -336,6 +348,11 @@ test_assembleMessage_extrasPopulated_roundTripsEveryField(void) {
     TEST_ASSERT_TRUE(message->dataPoints[0].hasPreviousQuality);
     TEST_ASSERT_EQUAL_INT(IPC_QUALITY_INVALID, message->dataPoints[0].previousQuality.validity);
     TEST_ASSERT_EQUAL_INT(7, message->dataPoints[0].previousQuality.detailFlags);
+    TEST_ASSERT_EQUAL_STRING("CONTROL", message->dataPoints[0].category);
+    TEST_ASSERT_TRUE(message->dataPoints[0].hasDescription);
+    TEST_ASSERT_EQUAL_STRING("Circuit breaker position", message->dataPoints[0].description);
+    TEST_ASSERT_TRUE_MESSAGE(message->dataPoints[0].description != descText,
+            "description string must be a deep copy, not aliased");
 
     IpcDispatcherUseCases_freeMessage(message);
 }

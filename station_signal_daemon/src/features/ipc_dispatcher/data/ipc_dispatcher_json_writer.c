@@ -78,6 +78,18 @@ buildDataPointJson(const IpcDataPoint* point) {
     if (point->hasPreviousLabel) cJSON_AddStringToObject(obj, "previousLabel", point->previousLabel);
     else cJSON_AddNullToObject(obj, "previousLabel");
 
+    /* Never absent by contract (see IpcDataPoint.category's own doc comment)
+     * - always a real string on every path assembleMessage builds. Still
+     * guarded here (never trust cJSON_AddStringToObject with a raw NULL),
+     * same defensive posture as "reference" above - a test/fixture that
+     * builds an IpcDataPoint directly (bypassing assembleMessage) could
+     * leave this NULL. */
+    if (point->category) cJSON_AddStringToObject(obj, "category", point->category);
+    else cJSON_AddNullToObject(obj, "category");
+
+    if (point->hasDescription) cJSON_AddStringToObject(obj, "description", point->description);
+    else cJSON_AddNullToObject(obj, "description");
+
     return obj;
 }
 

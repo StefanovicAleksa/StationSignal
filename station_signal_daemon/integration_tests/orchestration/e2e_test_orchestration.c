@@ -243,7 +243,7 @@ test_fullSequence_bootstrapModelReportAndGoose_endToEnd(void) {
     bool mmsAvailable = false;
     bool gooseAvailable = false;
     OrchestrationError runError = Orchestration_run(handle, hosts, TEST_PORT, IED_NAME, TEST_INTERFACE,
-            IED_MODEL_ACCESS_REPORT_ONLY, &detail, &mmsAvailable, &gooseAvailable);
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, &mmsAvailable, &gooseAvailable);
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
             "Orchestration_run failed - if stage==GOOSE_SUBSCRIBER_START, this test needs CAP_NET_RAW (run with sudo)");
     TEST_ASSERT_TRUE_MESSAGE(mmsAvailable, "reporter1.cid declares brcbMain - mmsAvailable should be true");
@@ -367,7 +367,7 @@ test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd(void) {
 
     OrchestrationErrorDetail detail;
     OrchestrationError runError = Orchestration_run(handle, hosts, ONLINE_DISCOVERY_TEST_PORT, IED_NAME,
-            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
     LinkedList_destroyStatic(hosts);
 
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_ERR_BOOTSTRAP_FAILED, runError,
@@ -379,7 +379,7 @@ test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd(void) {
     bool mmsAvailable = false;
     bool gooseAvailable = false;
     OrchestrationError fallbackError = Orchestration_runFromOnlineDiscovery(handle, "127.0.0.1",
-            ONLINE_DISCOVERY_TEST_PORT, IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, NULL, &detail,
+            ONLINE_DISCOVERY_TEST_PORT, IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,NULL, &detail,
             &mmsAvailable, &gooseAvailable);
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, fallbackError,
             "Orchestration_runFromOnlineDiscovery failed - if stage==GOOSE_SUBSCRIBER_START, this test "
@@ -490,7 +490,7 @@ test_authRequired_bootstrapSucceedsButReportClientRejected_deliversConnectionSta
 
     OrchestrationErrorDetail detail;
     OrchestrationError runError = Orchestration_run(handle, hosts, AUTH_MISMATCH_TEST_PORT, IED_NAME,
-            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
     LinkedList_destroyStatic(hosts);
 
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
@@ -572,7 +572,7 @@ test_runFromLocalFile_mmsOnlyFixture_succeedsWithGooseUnavailable(void) {
     bool gooseAvailable = true; /* prove it actually gets set false, not left stale */
     OrchestrationError runError = Orchestration_runFromLocalFile(handle,
             "fixtures/served_files/reporter1_mms_only.cid", "127.0.0.1", MMS_ONLY_TEST_PORT, IED_NAME,
-            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, &mmsAvailable, &gooseAvailable);
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, &mmsAvailable, &gooseAvailable);
 
     TEST_ASSERT_EQUAL(ORCHESTRATION_OK, runError);
     TEST_ASSERT_TRUE_MESSAGE(mmsAvailable, "fixture declares brcbMain - mmsAvailable should be true");
@@ -597,7 +597,7 @@ test_runFromLocalFile_gooseOnlyFixture_succeedsWithMmsUnavailable(void) {
     bool gooseAvailable = false;
     OrchestrationError runError = Orchestration_runFromLocalFile(handle,
             "fixtures/served_files/reporter1_goose_only.cid", "127.0.0.1", GOOSE_ONLY_TEST_PORT, IED_NAME,
-            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, &mmsAvailable, &gooseAvailable);
+            TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, &mmsAvailable, &gooseAvailable);
 
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_OK, runError,
             "if this failed at stage==GOOSE_SUBSCRIBER_START, this test needs CAP_NET_RAW (run with sudo)");
@@ -621,7 +621,7 @@ test_runFromLocalFile_neitherProtocolFixture_failsWithNoCapabilities(void) {
     OrchestrationErrorDetail detail;
     OrchestrationError runError = Orchestration_runFromLocalFile(handle,
             "fixtures/served_files/reporter1_no_capabilities.cid", "127.0.0.1", NO_CAPABILITIES_TEST_PORT,
-            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, &detail, NULL, NULL);
+            IED_NAME, TEST_INTERFACE, IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_ALL,&detail, NULL, NULL);
 
     TEST_ASSERT_EQUAL_MESSAGE(ORCHESTRATION_ERR_NO_CAPABILITIES, runError,
             "a device declaring neither <ReportControl> nor <GSEControl> has nothing to monitor at all");

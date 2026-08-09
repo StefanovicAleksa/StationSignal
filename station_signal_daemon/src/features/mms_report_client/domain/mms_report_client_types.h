@@ -80,6 +80,20 @@ typedef struct {
      * wire type alone. */
     IedModelDaSemantic semantic;
 
+    /* This leaf's LN category (see LnCategory's own doc comment) - always a
+     * real value (never "unset"), resolved once at member-ref cache build
+     * time from IedModel_getCategoryForMemberReference/its per-slot
+     * memberRefCache->leafCategories cache, same resolution point as
+     * `semantic` above. Degrades to IED_MODEL_LN_CATEGORY_OTHER, never a
+     * guess, if the LN couldn't be resolved. */
+    LnCategory category;
+
+    /* Owned copy (strdup'd here, unlike the memberRefCache's own borrowed
+     * leafDescriptions - this struct's fields are always self-contained/
+     * owned by convention, same as `reference` above) of this leaf's captured
+     * SCL desc="...", or NULL if none was captured. */
+    char* description;
+
     /* True if THIS leaf's own value differed from its cached last-forwarded
      * value in shouldForwardAndUpdateCache's phase-2a diff check, BEFORE
      * buildEntries' group-extension pass ran (see that function's own doc
@@ -204,6 +218,48 @@ typedef struct {
      * NULL (degrades to IED_MODEL_DA_SEMANTIC_NONE everywhere) if allocation
      * failed at build time - same OOM posture as every other field here. */
     IedModelDaSemantic* leafSemantics;
+
+    /* Parallel to leafSemantics (size totalLeafSlots), but resolved once PER
+     * MEMBER, not per leaf - LnCategory is constant across every leaf under
+     * one LN (see IedModelLnCategoryEntry's own doc comment), unlike a Dbpos
+     * semantic which genuinely varies leaf-by-leaf. A decomposed member's
+     * leaves all share their parent member's single resolved category,
+     * replicated across that member's whole leaf-slot range. Matters because
+     * mms_dataset_manager's whole-device clustering can assign one RCB a
+     * dataset whose members span SEVERAL different LNs (and therefore
+     * several different categories) - a single per-RCB category would be
+     * wrong for that case, which is why this is per-slot, not a single field
+     * on this struct. Never NULL on successful build (degrades element-wise
+     * to IED_MODEL_LN_CATEGORY_OTHER via IedModel_getCategoryForMemberReference's
+     * own graceful-degradation contract, same OOM posture as leafSemantics
+     * otherwise). Only MmsReportClientUseCases_destroyMemberRefCacheEntry
+     * frees this. */
+    LnCategory* leafCategories;
+
+    /* This RCB's connection's active category filter (IedModel_getCategoryFilter),
+     * captured once at buildMemberRefCacheEntry time - connection-lifetime-invariant
+     * (the same IedModelHandle, and therefore the same filter, for as long as this
+     * connection lives), so caching it here avoids collectCandidates needing its
+     * own IedModelHandle. Compared against leafCategories[slot] in collectCandidates
+     * to decide whether a candidate is even constructed - see that function's own
+     * doc comment. Rebuilt identically (same source, same value) whenever this
+     * whole cache entry is rebuilt (refreshPulledMemberRefCache/
+     * ensureLnFallbackMemberRefCache), since it always goes back through this same
+     * build function. */
+    LnCategoryMask categoryFilter;
+
+    /* Parallel to leafSemantics (size totalLeafSlots) - slot i's captured SCL
+     * desc="..." string (IedModelDaDescEntry, DA-template or DAI-instance
+     * level), resolved once at buildMemberRefCache time via
+     * IedModel_getDescriptionForMemberReference/_getLeafDescriptionsForMemberReference.
+     * Elements are BORROWED (point into the IedModelHandle's own owned
+     * daDescriptions array - never freed via this field) - this array itself
+     * (the pointer table) IS owned and freed by
+     * MmsReportClientUseCases_destroyMemberRefCacheEntry, same as
+     * leafSemantics, but its contents are not. May be NULL (degrades to "no
+     * description anywhere" - every accessor already treats a NULL desc as
+     * "none captured") if allocation failed at build time. */
+    const char** leafDescriptions;
 
     /* Set to true, once, at the end of the first report this RCB ever
      * processes (see buildEntries in mms_report_client_usecases.c) - purely

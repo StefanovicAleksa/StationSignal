@@ -38,11 +38,15 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
     const char** pointLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
     bool* pointHasPreviousLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(bool)) : NULL;
     const char** pointPreviousLabel = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
+    const char** pointCategory = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
+    bool* pointHasDescription = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(bool)) : NULL;
+    const char** pointDescription = (valueCount > 0) ? calloc((size_t) valueCount, sizeof(char*)) : NULL;
 
     int builtCount = 0;
     if (valueCount > 0 && pointRefs && pointValues && pointHasQuality && pointQuality
             && pointHasPreviousValue && pointPreviousValue && pointHasPreviousQuality && pointPreviousQuality
-            && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel) {
+            && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel
+            && pointCategory && pointHasDescription && pointDescription) {
         int out = 0;
         for (int k = 0; k < valueCount; k++) {
             int vi = valueIdx[k];
@@ -97,6 +101,16 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
                 }
             }
 
+            /* category is never absent (LnCategory always resolves to a real
+             * value, worst case OTHER) - see IpcDataPoint.category's own doc
+             * comment. description is genuinely optional. Both sourced from
+             * the VALUE entry, same as label above - a dragged-along quality
+             * sibling's own category/description (if it even differs, which
+             * it shouldn't within one leaf's q/value pair) is never consulted. */
+            pointCategory[out] = IedModel_categoryToString(record->entries[vi].category);
+            pointHasDescription[out] = record->entries[vi].description != NULL;
+            if (pointHasDescription[out]) pointDescription[out] = record->entries[vi].description;
+
             /* Cross-RCB dedup, same protocol only - catches the SAME real
              * change already forwarded by a DIFFERENT MMS RCB this instant
              * (e.g. a Dyn-managed dataset that still overlaps another RCB's
@@ -124,6 +138,9 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
         .pointLabel = pointLabel,
         .pointHasPreviousLabel = pointHasPreviousLabel,
         .pointPreviousLabel = pointPreviousLabel,
+        .pointCategory = pointCategory,
+        .pointHasDescription = pointHasDescription,
+        .pointDescription = pointDescription,
     };
 
     IpcMessage* message = IpcDispatcherUseCases_assembleMessage(
@@ -155,6 +172,9 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
     free(pointLabel);
     free(pointHasPreviousLabel);
     free(pointPreviousLabel);
+    free(pointCategory); /* pointer table only - contents are static/borrowed */
+    free(pointHasDescription);
+    free(pointDescription); /* pointer table only - contents are borrowed (record->entries[].description) */
     free(pointRefs);
     free(refs);
     free(valueIdx);

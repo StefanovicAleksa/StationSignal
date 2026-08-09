@@ -42,6 +42,11 @@ freeTargetEntries(GooseSubscriberHandle handle) {
             free(cache->lastForwardedValues);
         }
         free(cache->leafSemantics);
+        free(cache->leafCategories);
+        /* leafDescriptions' own strings are BORROWED (owned by the
+         * IedModelHandle, not this cache) - free only the pointer table
+         * itself. */
+        free(cache->leafDescriptions);
     }
     free(handle->targetEntries);
     handle->targetEntries = NULL;
@@ -146,6 +151,39 @@ linkedListToSemanticArray(LinkedList list, int* outCount) {
     return array;
 }
 
+/* Same shape as linkedListToStringArray, for a LinkedList of BORROWED
+ * (possibly NULL) const char* elements (see
+ * IedModel_getLeafDescriptionsForMemberReference's own doc comment) - copies
+ * each raw pointer into the array WITHOUT freeing it - only the list's own
+ * node structure is destroyed (LinkedList_destroyStatic). Mirrors
+ * mms_report_client_usecases.c's identical helper exactly. */
+static const char**
+linkedListToDescriptionArray(LinkedList list, int* outCount) {
+    *outCount = 0;
+    int count = list ? LinkedList_size(list) : 0;
+    if (count <= 0) {
+        if (list) LinkedList_destroyStatic(list);
+        return NULL;
+    }
+
+    const char** array = calloc((size_t) count, sizeof(const char*));
+    if (!array) {
+        LinkedList_destroyStatic(list);
+        return NULL;
+    }
+
+    int i = 0;
+    LinkedList element = LinkedList_getNext(list);
+    while (element) {
+        array[i++] = (const char*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+    }
+    LinkedList_destroyStatic(list);
+
+    *outCount = count;
+    return array;
+}
+
 /*
  * One-time, local resolution of a target's dataset member references (never
  * over-the-wire - see CLAUDE.md's "no over-the-wire tree discovery" rule).
@@ -170,6 +208,12 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->totalLeafSlots = 0;
     cache->lastForwardedValues = NULL;
     cache->leafSemantics = NULL;
+    cache->leafCategories = NULL;
+    cache->leafDescriptions = NULL;
+    /* Set unconditionally, before any early return below - a zero/calloc
+     * default is NOT a safe "unfiltered" value here (see this field's own
+     * doc comment on GooseSubscriberMemberRefCache). */
+    cache->categoryFilter = IedModel_getCategoryFilter(iedModel);
     if (!entry->target->datasetReference) return;
 
     int count = 0;
@@ -180,6 +224,15 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     int rawSemCount = 0;
     IedModelDaSemantic* rawSemantics = linkedListToSemanticArray(
             IedModel_getDataSetMemberSemantics(iedModel, entry->target->datasetReference), &rawSemCount);
+
+    /* Category is resolved once PER MEMBER via array[m] itself (already the
+     * resolved plain reference string) - see
+     * MmsReportClientMemberRefCacheEntry.leafCategories' own doc comment for
+     * why this is per-member, not per-leaf like semantics/descriptions. */
+    LnCategory* rawCategories = calloc((size_t) count, sizeof(LnCategory));
+    const char** rawDescriptions = calloc((size_t) count, sizeof(const char*));
+    const char*** leafDescArray = calloc((size_t) count, sizeof(const char**));
+    int* leafDescCounts = calloc((size_t) count, sizeof(int));
 
     char*** leafRefsArray = calloc((size_t) count, sizeof(char**));
     int* leafCounts = calloc((size_t) count, sizeof(int));
@@ -222,6 +275,15 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
                 leafSemCounts[m] = leafSemCount;
             }
 
+            if (rawCategories) rawCategories[m] = IedModel_getCategoryForMemberReference(iedModel, array[m]);
+            if (rawDescriptions) rawDescriptions[m] = IedModel_getDescriptionForMemberReference(iedModel, array[m]);
+            if (leafDescArray && leafDescCounts) {
+                int leafDescCount = 0;
+                leafDescArray[m] = linkedListToDescriptionArray(
+                        IedModel_getLeafDescriptionsForMemberReference(iedModel, array[m]), &leafDescCount);
+                leafDescCounts[m] = leafDescCount;
+            }
+
             /* Value-diff cache slot(s) for member m: leafCount consecutive
              * slots if decomposed, else exactly 1. */
             leafOffsets[m] = totalLeafSlots;
@@ -243,6 +305,17 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
         leafSemArray = NULL;
         free(leafSemCounts);
         leafSemCounts = NULL;
+        free(rawCategories);
+        rawCategories = NULL;
+        free(rawDescriptions);
+        rawDescriptions = NULL;
+        if (leafDescArray) {
+            for (int m = 0; m < count; m++) free(leafDescArray[m]);
+            free(leafDescArray);
+        }
+        leafDescArray = NULL;
+        free(leafDescCounts);
+        leafDescCounts = NULL;
     }
 
     /* Zero-initialized so every slot starts NULL (never forwarded yet). */
@@ -269,13 +342,54 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
         }
     }
 
-    /* Temporaries only used to build the flattened leafSemantics above. */
+    /* Unlike leafSemantics, every slot is unconditionally assigned (never
+     * left at calloc's zero-default) - see mms_report_client_usecases.c's
+     * identical flatten step for why a bare 0 (matches no LnCategory bit at
+     * all) is worse than degrading to OTHER. */
+    LnCategory* leafCategories = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(LnCategory)) : NULL;
+    if (leafCategories) {
+        for (int m = 0; m < count; m++) {
+            LnCategory memberCategory = rawCategories ? rawCategories[m] : IED_MODEL_LN_CATEGORY_OTHER;
+            int slotsForMember = (leafCounts[m] > 0) ? leafCounts[m] : 1;
+            for (int k = 0; k < slotsForMember; k++) {
+                leafCategories[leafOffsets[m] + k] = memberCategory;
+            }
+        }
+    }
+
+    /* Same conditional-assignment shape as leafSemantics - elements are
+     * BORROWED, never freed via this array. */
+    const char** leafDescriptions = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(const char*)) : NULL;
+    if (leafDescriptions) {
+        for (int m = 0; m < count; m++) {
+            if (leafCounts[m] > 0) {
+                if (leafDescArray && leafDescArray[m] && leafDescCounts[m] == leafCounts[m]) {
+                    for (int k = 0; k < leafCounts[m]; k++) {
+                        leafDescriptions[leafOffsets[m] + k] = leafDescArray[m][k];
+                    }
+                }
+            } else if (rawDescriptions) {
+                leafDescriptions[leafOffsets[m]] = rawDescriptions[m];
+            }
+        }
+    }
+
+    /* Temporaries only used to build the flattened arrays above. */
     free(rawSemantics);
     if (leafSemArray) {
         for (int m = 0; m < count; m++) free(leafSemArray[m]);
         free(leafSemArray);
     }
     free(leafSemCounts);
+    free(rawCategories);
+    free(rawDescriptions); /* borrowed elements - only the pointer table is owned */
+    if (leafDescArray) {
+        for (int m = 0; m < count; m++) free(leafDescArray[m]); /* pointer table only, not its (borrowed) strings */
+        free(leafDescArray);
+    }
+    free(leafDescCounts);
 
     cache->memberReferences = array;
     cache->memberCount = count;
@@ -286,6 +400,8 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->totalLeafSlots = totalLeafSlots;
     cache->lastForwardedValues = lastForwardedValues;
     cache->leafSemantics = leafSemantics;
+    cache->leafCategories = leafCategories;
+    cache->leafDescriptions = leafDescriptions;
 }
 
 void

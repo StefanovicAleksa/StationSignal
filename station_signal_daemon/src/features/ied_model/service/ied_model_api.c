@@ -4,6 +4,7 @@
 #include "features/ied_model/service/ied_model_api.h"
 #include "features/ied_model/data/ied_model_scl_loader.h"
 #include "features/ied_model/domain/ied_model_usecases.h"
+#include "features/ied_model/utils/ied_model_ln_category.h"
 #include "iec61850_dynamic_model.h"
 
 static char*
@@ -41,20 +42,103 @@ adoptDaSemantics(IedModelHandle handle, LinkedList daSemanticsList) {
     LinkedList_destroyDeep(daSemanticsList, free);
 }
 
+/* Same shape as adoptDaSemantics - lnCategoriesList's boxed entries own
+ * nothing beyond themselves (`ln` is borrowed), so plain free() destroys them. */
+static void
+adoptLnCategories(IedModelHandle handle, LinkedList lnCategoriesList) {
+    handle->lnCategories = NULL;
+    handle->lnCategoryCount = 0;
+    if (!lnCategoriesList) return;
+
+    int count = LinkedList_size(lnCategoriesList);
+    if (count > 0) {
+        IedModelLnCategoryEntry* array = malloc(sizeof(IedModelLnCategoryEntry) * (size_t) count);
+        if (array) {
+            int i = 0;
+            for (LinkedList element = LinkedList_getNext(lnCategoriesList); element;
+                    element = LinkedList_getNext(element)) {
+                IedModelLnCategoryEntry* boxed = (IedModelLnCategoryEntry*) LinkedList_getData(element);
+                array[i++] = *boxed;
+            }
+            handle->lnCategories = array;
+            handle->lnCategoryCount = i;
+        }
+    }
+
+    LinkedList_destroyDeep(lnCategoriesList, free);
+}
+
+/* LinkedListValueDeleteFunction-compatible: frees a boxed IedModelDaDescEntry
+ * AND its owned `desc` string - unlike adoptDaSemantics/adoptLnCategories's
+ * boxed entries, plain free() here would leak `desc`. */
+static void
+freeDaDescEntryBox(void* entry) {
+    if (!entry) return;
+    IedModelDaDescEntry* descEntry = (IedModelDaDescEntry*) entry;
+    free(descEntry->desc);
+    free(descEntry);
+}
+
+/* Same shape as adoptDaSemantics/adoptLnCategories, but each copied array
+ * element's `desc` string is itself owned by the handle now (the source
+ * LinkedList's boxed entries are destroyed via freeDaDescEntryBox, not plain
+ * free, since the box owns `desc` - the array copy below takes over that
+ * ownership by value, same as `da` is taken over by reference). */
+static void
+adoptDaDescriptions(IedModelHandle handle, LinkedList daDescriptionsList) {
+    handle->daDescriptions = NULL;
+    handle->daDescriptionCount = 0;
+    if (!daDescriptionsList) return;
+
+    int count = LinkedList_size(daDescriptionsList);
+    if (count > 0) {
+        IedModelDaDescEntry* array = malloc(sizeof(IedModelDaDescEntry) * (size_t) count);
+        if (array) {
+            int i = 0;
+            for (LinkedList element = LinkedList_getNext(daDescriptionsList); element;
+                    element = LinkedList_getNext(element)) {
+                IedModelDaDescEntry* boxed = (IedModelDaDescEntry*) LinkedList_getData(element);
+                array[i++] = *boxed; /* takes over ownership of boxed->desc by value */
+            }
+            handle->daDescriptions = array;
+            handle->daDescriptionCount = i;
+            /* Ownership of each entry's `desc` string moved into the array by
+             * value above (a plain struct-copy also copies the pointer) -
+             * destroy only the boxes themselves here (plain free, same as
+             * adoptDaSemantics/adoptLnCategories), never freeDaDescEntryBox,
+             * which would free `desc` out from under the array's own copy of
+             * that same pointer. */
+            LinkedList_destroyDeep(daDescriptionsList, free);
+            return;
+        }
+    }
+
+    /* count == 0, or the array allocation failed - no array was built, so
+     * ownership of every entry's `desc` never transferred anywhere; free it
+     * here (via freeDaDescEntryBox) or it leaks. */
+    LinkedList_destroyDeep(daDescriptionsList, freeDaDescEntryBox);
+}
+
 IedModelHandle
-IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, IedModelLoadError* outError) {
+IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, LnCategoryMask categoryFilter,
+        IedModelLoadError* outError) {
     IedModelLoadError localError;
     LinkedList daSemanticsList = NULL;
+    LinkedList lnCategoriesList = NULL;
+    LinkedList daDescriptionsList = NULL;
     int dynDataSetMax = -1;
     int dynDataSetMaxAttributes = -1;
     int confDataSetMax = -1;
     int confDataSetMaxAttributes = -1;
-    IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList,
-            &dynDataSetMax, &dynDataSetMaxAttributes, &confDataSetMax, &confDataSetMaxAttributes);
+    IedModel* model = IedModelSclLoader_load(path, iedName, &localError, &daSemanticsList, &lnCategoriesList,
+            &daDescriptionsList, &dynDataSetMax, &dynDataSetMaxAttributes, &confDataSetMax,
+            &confDataSetMaxAttributes);
 
     if (outError) *outError = localError;
     if (!model) {
         if (daSemanticsList) LinkedList_destroyDeep(daSemanticsList, free);
+        if (lnCategoriesList) LinkedList_destroyDeep(lnCategoriesList, free);
+        if (daDescriptionsList) LinkedList_destroyDeep(daDescriptionsList, freeDaDescEntryBox);
         return NULL;
     }
 
@@ -62,6 +146,8 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     if (!handle) {
         IedModel_destroy(model);
         if (daSemanticsList) LinkedList_destroyDeep(daSemanticsList, free);
+        if (lnCategoriesList) LinkedList_destroyDeep(lnCategoriesList, free);
+        if (daDescriptionsList) LinkedList_destroyDeep(daDescriptionsList, freeDaDescEntryBox);
         if (outError) *outError = IED_MODEL_ERR_OUT_OF_MEMORY;
         return NULL;
     }
@@ -70,10 +156,13 @@ IedModel_loadFromFile(const char* path, const char* iedName, AccessMode mode, Ie
     handle->accessMode = mode;
     handle->iedName = copyString(iedName);
     adoptDaSemantics(handle, daSemanticsList);
+    adoptLnCategories(handle, lnCategoriesList);
+    adoptDaDescriptions(handle, daDescriptionsList);
     handle->dynDataSetMax = dynDataSetMax;
     handle->dynDataSetMaxAttributes = dynDataSetMaxAttributes;
     handle->confDataSetMax = confDataSetMax;
     handle->confDataSetMaxAttributes = confDataSetMaxAttributes;
+    handle->categoryFilter = categoryFilter;
 
     return handle;
 }
@@ -84,11 +173,18 @@ IedModel_listIedNames(const char* path, IedModelLoadError* outError) {
 }
 
 IedModelHandle
-IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode) {
-    if (!model) return NULL;
+IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode, LinkedList lnCategoriesList,
+        LnCategoryMask categoryFilter) {
+    if (!model) {
+        if (lnCategoriesList) LinkedList_destroyDeep(lnCategoriesList, free);
+        return NULL;
+    }
 
     IedModelHandle handle = malloc(sizeof(struct sIedModelHandle));
-    if (!handle) return NULL;
+    if (!handle) {
+        if (lnCategoriesList) LinkedList_destroyDeep(lnCategoriesList, free);
+        return NULL;
+    }
 
     handle->model = model;
     handle->accessMode = mode;
@@ -104,6 +200,20 @@ IedModel_wrapDynamicModel(IedModel* model, const char* iedName, AccessMode mode)
     handle->dynDataSetMaxAttributes = -1;
     handle->confDataSetMax = -1;
     handle->confDataSetMaxAttributes = -1;
+    /* Unlike daSemantics, NOT left permanently empty for a wrapped model -
+     * the caller (ied_model_online_loader) classifies each LN it discovers
+     * via IedModel_categorizeWireInstanceName as it builds them, since
+     * leaving this empty would make the whole category filter inert on the
+     * online-discovery path. adoptLnCategories degrades to an empty array
+     * (same as every other adopt* function) if lnCategoriesList is NULL. */
+    adoptLnCategories(handle, lnCategoriesList);
+    /* No SCL desc="..." equivalent is ever available over MMS ACSI directory
+     * services - always empty on this path, same "unknown" posture as
+     * daSemantics/dynDataSetMax above (unlike lnCategories, genuinely never
+     * populated later either). */
+    handle->daDescriptions = NULL;
+    handle->daDescriptionCount = 0;
+    handle->categoryFilter = categoryFilter;
 
     return handle;
 }
@@ -114,6 +224,9 @@ IedModel_release(IedModelHandle handle) {
     IedModel_destroy(handle->model);
     free(handle->iedName);
     free(handle->daSemantics);
+    free(handle->lnCategories);
+    for (int i = 0; i < handle->daDescriptionCount; i++) free(handle->daDescriptions[i].desc);
+    free(handle->daDescriptions);
     free(handle);
 }
 
@@ -167,6 +280,11 @@ IedModel_getReportableAttributeReferencesForWholeDevice(IedModelHandle handle) {
     return IedModelUseCases_getReportableAttributeReferencesForWholeDevice(handle);
 }
 
+LnCategoryMask
+IedModel_getCategoryFilter(IedModelHandle handle) {
+    return IedModelUseCases_getCategoryFilter(handle);
+}
+
 int
 IedModel_getDynDataSetMax(IedModelHandle handle) {
     return IedModelUseCases_getDynDataSetMax(handle);
@@ -207,6 +325,21 @@ IedModel_getSemanticForMemberReference(IedModelHandle handle, const char* member
     return IedModelUseCases_getSemanticForMemberReference(handle, memberReference);
 }
 
+LnCategory
+IedModel_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getCategoryForMemberReference(handle, memberReference);
+}
+
+const char*
+IedModel_getDescriptionForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getDescriptionForMemberReference(handle, memberReference);
+}
+
+LinkedList
+IedModel_getLeafDescriptionsForMemberReference(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_getLeafDescriptionsForMemberReference(handle, memberReference);
+}
+
 void
 IedModel_destroyReportControlBlockTarget(void* target) {
     IedModelUseCases_destroyReportControlBlockTarget(target);
@@ -234,4 +367,14 @@ IedModel_getControlTargets(IedModelHandle handle) {
         return LinkedList_create();
     }
     return IedModelUseCases_getControlTargets(handle);
+}
+
+LnCategory
+IedModel_categorizeWireInstanceName(const char* wireName) {
+    return IedModelLnCategory_forWireInstanceName(wireName);
+}
+
+const char*
+IedModel_categoryToString(LnCategory category) {
+    return IedModelLnCategory_toString(category);
 }

@@ -54,6 +54,9 @@ setUp(void) {
     fixtureHandle.model = fixtureModel;
     fixtureHandle.accessMode = IED_MODEL_ACCESS_READ_AND_WRITE; /* unused by usecases; gating lives in api.c */
     fixtureHandle.iedName = "TestIED";
+    fixtureHandle.categoryFilter = IED_MODEL_LN_CATEGORY_ALL;
+    fixtureHandle.lnCategories = NULL;
+    fixtureHandle.lnCategoryCount = 0;
     handle = &fixtureHandle;
 }
 
@@ -90,7 +93,7 @@ test_getGooseSubscriptionTargets_returnsCorrectReference(void) {
 void
 test_getGooseSubscriptionTargets_empty_whenModelHasNoGseControlBlocks(void) {
     IedModel* bareModel = IedModel_create("Bare");
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
@@ -113,7 +116,7 @@ test_getGooseSubscriptionTargets_populatesAddress_whenPhyComAddressPresent(void)
     uint8_t mac[6] = { 0x01, 0x0c, 0xcd, 0x01, 0x00, 0x05 };
     GSEControlBlock_addPhyComAddress(gcb, PhyComAddress_create(4, 10, 2000, mac));
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
@@ -140,7 +143,7 @@ test_getGooseSubscriptionTargets_datasetReferenceNull_whenGcbHasNoDataset(void) 
     LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
     GSEControlBlock_create("gcbNoDs", ln0, "1000", NULL, 1, false, -1, -1);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
@@ -182,7 +185,7 @@ test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment(void) {
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$stVal", -1, NULL);
     ReportControlBlock_create("urcb01", ln0, "rpt02", false, "ds1", 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
@@ -202,7 +205,7 @@ test_getReportSubscriptionTargets_unbufferedRcb_usesRpSegment(void) {
 void
 test_getReportSubscriptionTargets_empty_whenModelHasNoRcbs(void) {
     IedModel* bareModel = IedModel_create("Bare");
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
@@ -220,7 +223,7 @@ test_getReportSubscriptionTargets_datasetReferenceNull_whenRcbHasNoDataset(void)
     LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
     ReportControlBlock_create("brcbNoDs", ln0, "rptNoDs", true, NULL, 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
@@ -255,7 +258,7 @@ test_getDataSetMemberReferences_preservesOrder_forMultiEntryDataset(void) {
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$stVal", -1, NULL);
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Mod$q", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList refs = IedModelUseCases_getDataSetMemberReferences(&bareHandle, "BareLD1/LLN0$ds1");
@@ -318,7 +321,7 @@ test_getDataSetMemberLeafReferences_decomposesFlatDo(void) {
      * <FCDA doName="..." fc="ST" /> shape (no daName attribute). */
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Ind", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
@@ -352,7 +355,7 @@ test_getDataSetMemberLeafReferences_recursesIntoConstructedAttribute(void) {
     DataSet* dataSet = DataSet_create("ds1", ln0);
     DataSetEntry_create(dataSet, "BareLD1/LLN0$MX$PhV", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
@@ -383,7 +386,7 @@ test_getDataSetMemberLeafReferences_filtersByFc_excludesOtherFcSiblings(void) {
     DataSet* dataSet = DataSet_create("ds1", ln0);
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList leaves = IedModelUseCases_getDataSetMemberLeafReferences(&bareHandle, "BareLD1/LLN0$ds1", 0);
@@ -453,7 +456,7 @@ test_getLeafReferencesForMemberReference_decomposesFlatDo_withNoDataSetRegistere
      * string, unlike the DataSet-indexed accessor this mirrors
      * (test_getDataSetMemberLeafReferences_decomposesFlatDo), which requires
      * a real registered DataSet to look up. */
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList leaves = IedModelUseCases_getLeafReferencesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
@@ -481,7 +484,7 @@ test_getLeafReferencesForMemberReference_matchesDataSetIndexedAccessor_forSameDo
     DataSet* dataSet = DataSet_create("ds1", ln0);
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     /* Regression proof: the DataSet-indexed accessor (now a thin wrapper)
@@ -536,7 +539,7 @@ test_getLeafWireTypesForMemberReference_matchesLeafReferences_countAndOrder(void
     DataAttribute_create("stVal", (ModelNode*) ind, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
     DataAttribute_create("q", (ModelNode*) ind, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList wireTypes = IedModelUseCases_getLeafWireTypesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
@@ -572,6 +575,109 @@ test_getSemanticForMemberReference_none_whenNull(void) {
     TEST_ASSERT_EQUAL_INT(IED_MODEL_DA_SEMANTIC_NONE, IedModelUseCases_getSemanticForMemberReference(handle, NULL));
 }
 
+/* ---- getCategoryForMemberReference / getDescriptionForMemberReference /
+ * getLeafDescriptionsForMemberReference ---- */
+
+void
+test_getCategoryForMemberReference_resolvesLnCategory_regardlessOfLeaf(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* xcbrLn = LogicalNode_create("XCBR1", ld);
+    DataObject* pos = DataObject_create("Pos", (ModelNode*) xcbrLn, 0);
+    DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) pos, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    IedModelLnCategoryEntry categories[] = { { .ln = xcbrLn, .category = IED_MODEL_LN_CATEGORY_CONTROL } };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_ALL, .lnCategories = categories, .lnCategoryCount = 1,
+        .iedName = "Bare" };
+
+    /* Both leaves under the same LN resolve to the same category - and so
+     * does the bare DO-level reference, since category never needs to reach
+     * a terminal DataAttribute at all. */
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_CONTROL,
+            IedModelUseCases_getCategoryForMemberReference(&bareHandle, "BareLD1/XCBR1$ST$Pos$stVal"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_CONTROL,
+            IedModelUseCases_getCategoryForMemberReference(&bareHandle, "BareLD1/XCBR1$ST$Pos$q"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_CONTROL,
+            IedModelUseCases_getCategoryForMemberReference(&bareHandle, "BareLD1/XCBR1$ST$Pos"));
+
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getCategoryForMemberReference_other_whenLnDoesNotResolveOrNull(void) {
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER,
+            IedModelUseCases_getCategoryForMemberReference(handle, "TestIEDLD1/NoSuchLn$ST$Mod$stVal"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER, IedModelUseCases_getCategoryForMemberReference(handle, NULL));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER, IedModelUseCases_getCategoryForMemberReference(NULL, NULL));
+}
+
+void
+test_getDescriptionForMemberReference_returnsCapturedDesc_forMatchingDa(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataObject* pos = DataObject_create("Pos", (ModelNode*) ln0, 0);
+    DataAttribute* stVal = DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) pos, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    IedModelDaDescEntry descriptions[] = { { .da = stVal, .desc = (char*) "Circuit breaker position" } };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_ALL, .daDescriptions = descriptions, .daDescriptionCount = 1,
+        .iedName = "Bare" };
+
+    TEST_ASSERT_EQUAL_STRING("Circuit breaker position",
+            IedModelUseCases_getDescriptionForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Pos$stVal"));
+    /* The sibling leaf has no captured desc entry - must not fall back to
+     * stVal's, must not crash. */
+    TEST_ASSERT_NULL(IedModelUseCases_getDescriptionForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Pos$q"));
+
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getDescriptionForMemberReference_null_whenNoDescCapturedOrUnresolvedOrNull(void) {
+    TEST_ASSERT_NULL(IedModelUseCases_getDescriptionForMemberReference(handle, "TestIEDLD1/LLN0$ST$Mod$stVal"));
+    TEST_ASSERT_NULL(IedModelUseCases_getDescriptionForMemberReference(handle, "TestIEDLD1/NoSuchLn$ST$Mod$stVal"));
+    TEST_ASSERT_NULL(IedModelUseCases_getDescriptionForMemberReference(handle, NULL));
+}
+
+void
+test_getLeafDescriptionsForMemberReference_indexAlignedWithLeafReferences_nullForUncaptured(void) {
+    IedModel* bareModel = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", bareModel);
+    LogicalNode* ln0 = LogicalNode_create("LLN0", ld);
+    DataObject* ind = DataObject_create("Ind", (ModelNode*) ln0, 0);
+    DataAttribute* stVal = DataAttribute_create("stVal", (ModelNode*) ind, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataAttribute_create("q", (ModelNode*) ind, IEC61850_QUALITY, IEC61850_FC_ST, 0, 0, 0);
+
+    IedModelDaDescEntry descriptions[] = { { .da = stVal, .desc = (char*) "Indication status" } };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_ALL, .daDescriptions = descriptions, .daDescriptionCount = 1,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getLeafReferencesForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
+    LinkedList descs = IedModelUseCases_getLeafDescriptionsForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Ind");
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(refs));
+    TEST_ASSERT_EQUAL_INT(LinkedList_size(refs), LinkedList_size(descs));
+
+    LinkedList refElement = LinkedList_getNext(refs);
+    LinkedList descElement = LinkedList_getNext(descs);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$stVal", (const char*) LinkedList_getData(refElement));
+    TEST_ASSERT_EQUAL_STRING("Indication status", (const char*) LinkedList_getData(descElement));
+
+    refElement = LinkedList_getNext(refElement);
+    descElement = LinkedList_getNext(descElement);
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Ind$q", (const char*) LinkedList_getData(refElement));
+    TEST_ASSERT_NULL(LinkedList_getData(descElement));
+
+    LinkedList_destroyDeep(refs, free);
+    LinkedList_destroyStatic(descs); /* borrowed strings - never destroyDeep/free */
+    IedModel_destroy(bareModel);
+}
+
 /* ---- getDataSetMemberLeafWireTypes / dataAttributeTypeMatchesMmsType ----
  * See mms_report_client_usecases.c's decomposedLeafTypesMatch (and its
  * goose_subscriber twin) for what these back: real production hardware
@@ -592,7 +698,7 @@ test_getDataSetMemberLeafWireTypes_decomposesFlatDo_matchesReferenceOrder(void) 
     DataSet* dataSet = DataSet_create("ds1", ln0);
     DataSetEntry_create(dataSet, "BareLD1/LLN0$ST$Pos", -1, NULL);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList leaves = IedModelUseCases_getDataSetMemberLeafWireTypes(&bareHandle, "BareLD1/LLN0$ds1", 0);
@@ -693,7 +799,7 @@ test_getReportableAttributeReferencesForLogicalNode_recursesIntoConstructedAttri
     DataAttribute* cVal = DataAttribute_create("cVal", (ModelNode*) phV, IEC61850_CONSTRUCTED, IEC61850_FC_MX, 0, 0, 0);
     DataAttribute_create("mag", (ModelNode*) cVal, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForLogicalNode(&bareHandle, "BareLD1/LLN0");
@@ -760,7 +866,7 @@ test_getReportableAttributeReferencesForWholeDevice_combinesEveryLdAndLn(void) {
     DataObject* ld2Ind = DataObject_create("Ind1", (ModelNode*) ld2User1, 0);
     DataAttribute_create("mag", (ModelNode*) ld2Ind, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     /* Proves whole-device coverage isn't limited to LNs that happen to host an
@@ -845,7 +951,7 @@ test_getReadTargets_empty_whenModelHasNoStOrMxAttributes(void) {
     DataObject* cf = DataObject_create("Cfg", (ModelNode*) ln0, 0);
     DataAttribute_create("setting", (ModelNode*) cf, IEC61850_INT32, IEC61850_FC_CF, 0, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_ONLY,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_ONLY, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getReadTargets(&bareHandle);
@@ -876,7 +982,7 @@ test_getControlTargets_empty_whenModelHasNoControllableDataObjects(void) {
     DataObject* mod = DataObject_create("Mod", (ModelNode*) ln0, 0);
     DataAttribute_create("stVal", (ModelNode*) mod, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
 
-    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_AND_WRITE,
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_READ_AND_WRITE, .categoryFilter = IED_MODEL_LN_CATEGORY_ALL,
         .iedName = "Bare" };
 
     LinkedList targets = IedModelUseCases_getControlTargets(&bareHandle);
@@ -885,6 +991,150 @@ test_getControlTargets_empty_whenModelHasNoControllableDataObjects(void) {
 
     LinkedList_destroyDeep(targets, free);
     IedModel_destroy(bareModel);
+}
+
+/* ---- categoryFilter ---- */
+
+/* Two LNs, deliberately different classes (XCBR->CONTROL, MMXU->MEASUREMENT,
+ * per IedModelLnCategory_forLnClass's own table), each with a GoCB, an RCB,
+ * and one FC=ST/MX leaf - enough to exercise all three filtered getters
+ * against the same fixture. Caller sets bareHandle's lnCategories/
+ * lnCategoryCount/categoryFilter itself (this only builds the model + LNs). */
+static IedModel*
+buildTwoCategoryFixtureModel(LogicalNode** outXcbrLn, LogicalNode** outMmxuLn) {
+    IedModel* model = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", model);
+
+    LogicalNode* xcbrLn = LogicalNode_create("XCBR1", ld);
+    DataObject* pos = DataObject_create("Pos", (ModelNode*) xcbrLn, 0);
+    DataAttribute_create("stVal", (ModelNode*) pos, IEC61850_BOOLEAN, IEC61850_FC_ST, 0, 0, 0);
+    DataSet* xcbrDs = DataSet_create("dsX", xcbrLn);
+    DataSetEntry_create(xcbrDs, "BareLD1/XCBR1$ST$Pos$stVal", -1, NULL);
+    ReportControlBlock_create("brcbX", xcbrLn, "rptX", true, "dsX", 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
+    GSEControlBlock_create("gcbX", xcbrLn, "1000", "dsX", 1, false, -1, -1);
+
+    LogicalNode* mmxuLn = LogicalNode_create("MMXU1", ld);
+    DataObject* totW = DataObject_create("TotW", (ModelNode*) mmxuLn, 0);
+    DataAttribute_create("mag", (ModelNode*) totW, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+    DataSet* mmxuDs = DataSet_create("dsM", mmxuLn);
+    DataSetEntry_create(mmxuDs, "BareLD1/MMXU1$MX$TotW$mag", -1, NULL);
+    ReportControlBlock_create("brcbM", mmxuLn, "rptM", true, "dsM", 1, TRG_OPT_DATA_CHANGED, RPT_OPT_SEQ_NUM, 0, 0);
+    GSEControlBlock_create("gcbM", mmxuLn, "1001", "dsM", 1, false, -1, -1);
+
+    if (outXcbrLn) *outXcbrLn = xcbrLn;
+    if (outMmxuLn) *outMmxuLn = mmxuLn;
+    return model;
+}
+
+/* RCB/GoCB visibility is deliberately NOT gated by categoryFilter - the
+ * daemon always needs every RCB/GoCB visible to know where every dataset
+ * lives (real SCL very commonly parents every RCB/GoCB on LLN0, which would
+ * make a parent-LN gate useless on such hardware - confirmed against a real
+ * DIGSI 5/SIPROTEC 6MD85 station file). Category filtering happens
+ * per-point instead, downstream in mms_report_client/goose_subscriber - see
+ * their own collectCandidates tests. */
+void
+test_getGooseSubscriptionTargets_ignoresCategoryMask_alwaysIncludesEveryGcb(void) {
+    LogicalNode* xcbrLn;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildTwoCategoryFixtureModel(&xcbrLn, &mmxuLn);
+    IedModelLnCategoryEntry categories[] = {
+        { .ln = xcbrLn, .category = IED_MODEL_LN_CATEGORY_CONTROL },
+        { .ln = mmxuLn, .category = IED_MODEL_LN_CATEGORY_MEASUREMENT },
+    };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_MEASUREMENT, .lnCategories = categories, .lnCategoryCount = 2,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getGooseSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyGooseSubscriptionTarget);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getReportSubscriptionTargets_ignoresCategoryMask_alwaysIncludesEveryRcb(void) {
+    LogicalNode* xcbrLn;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildTwoCategoryFixtureModel(&xcbrLn, &mmxuLn);
+    IedModelLnCategoryEntry categories[] = {
+        { .ln = xcbrLn, .category = IED_MODEL_LN_CATEGORY_CONTROL },
+        { .ln = mmxuLn, .category = IED_MODEL_LN_CATEGORY_MEASUREMENT },
+    };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL, .lnCategories = categories, .lnCategoryCount = 2,
+        .iedName = "Bare" };
+
+    LinkedList targets = IedModelUseCases_getReportSubscriptionTargets(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(targets));
+
+    LinkedList_destroyDeep(targets, IedModelUseCases_destroyReportControlBlockTarget);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getReportableAttributeReferencesForWholeDevice_filtersByCategoryMask_excludesNonMatchingLn(void) {
+    LogicalNode* xcbrLn;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildTwoCategoryFixtureModel(&xcbrLn, &mmxuLn);
+    IedModelLnCategoryEntry categories[] = {
+        { .ln = xcbrLn, .category = IED_MODEL_LN_CATEGORY_CONTROL },
+        { .ln = mmxuLn, .category = IED_MODEL_LN_CATEGORY_MEASUREMENT },
+    };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL, .lnCategories = categories, .lnCategoryCount = 2,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(&bareHandle);
+
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(refs));
+    TEST_ASSERT_EQUAL_STRING("BareLD1/XCBR1$ST$Pos$stVal", firstElement(refs));
+
+    LinkedList_destroyDeep(refs, free);
+    IedModel_destroy(bareModel);
+}
+
+/* The whole-device leaf walk (unlike the RCB/GoCB target getters above) DOES
+ * still filter, per-LN, since that's a decision about which variables a
+ * self-created dynamic dataset should capture - not about RCB/GoCB
+ * visibility. An LN with no lnCategories entry at all degrades to OTHER (see
+ * categoryForLn's own "not found" doc comment), same as any other
+ * unclassified LN. */
+void
+test_getReportableAttributeReferencesForWholeDevice_unclassifiedLn_defaultsToOther_excludedUnlessOtherSelected(void) {
+    LogicalNode* xcbrLn;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildTwoCategoryFixtureModel(&xcbrLn, &mmxuLn);
+    /* No lnCategories entries at all - every LN degrades to OTHER. */
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL, .lnCategories = NULL, .lnCategoryCount = 0,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(&bareHandle);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(refs));
+    LinkedList_destroyDeep(refs, free);
+
+    bareHandle.categoryFilter = IED_MODEL_LN_CATEGORY_OTHER;
+    refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(&bareHandle);
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(refs));
+    LinkedList_destroyDeep(refs, free);
+
+    IedModel_destroy(bareModel);
+}
+
+void
+test_getCategoryFilter_returnsHandlesMask(void) {
+    struct sIedModelHandle bareHandle = { .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL | IED_MODEL_LN_CATEGORY_OTHER };
+    TEST_ASSERT_EQUAL_INT(IED_MODEL_LN_CATEGORY_CONTROL | IED_MODEL_LN_CATEGORY_OTHER,
+            IedModelUseCases_getCategoryFilter(&bareHandle));
+}
+
+void
+test_getCategoryFilter_nullHandle_returnsAll(void) {
+    TEST_ASSERT_EQUAL_INT(IED_MODEL_LN_CATEGORY_ALL, IedModelUseCases_getCategoryFilter(NULL));
 }
 
 int
@@ -923,6 +1173,12 @@ main(void) {
     RUN_TEST(test_getSemanticForMemberReference_none_whenDoLevel_notLeaf);
     RUN_TEST(test_getSemanticForMemberReference_none_whenNull);
 
+    RUN_TEST(test_getCategoryForMemberReference_resolvesLnCategory_regardlessOfLeaf);
+    RUN_TEST(test_getCategoryForMemberReference_other_whenLnDoesNotResolveOrNull);
+    RUN_TEST(test_getDescriptionForMemberReference_returnsCapturedDesc_forMatchingDa);
+    RUN_TEST(test_getDescriptionForMemberReference_null_whenNoDescCapturedOrUnresolvedOrNull);
+    RUN_TEST(test_getLeafDescriptionsForMemberReference_indexAlignedWithLeafReferences_nullForUncaptured);
+
     RUN_TEST(test_getDataSetMemberLeafWireTypes_decomposesFlatDo_matchesReferenceOrder);
     RUN_TEST(test_getDataSetMemberLeafWireTypes_empty_whenMemberIsAlreadyLeafLevel);
     RUN_TEST(test_getDataSetMemberLeafWireTypes_empty_whenDatasetReferenceIsNull);
@@ -946,6 +1202,13 @@ main(void) {
 
     RUN_TEST(test_getControlTargets_includesOnlyDataObjectsWithCoChild);
     RUN_TEST(test_getControlTargets_empty_whenModelHasNoControllableDataObjects);
+
+    RUN_TEST(test_getGooseSubscriptionTargets_ignoresCategoryMask_alwaysIncludesEveryGcb);
+    RUN_TEST(test_getReportSubscriptionTargets_ignoresCategoryMask_alwaysIncludesEveryRcb);
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_filtersByCategoryMask_excludesNonMatchingLn);
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_unclassifiedLn_defaultsToOther_excludedUnlessOtherSelected);
+    RUN_TEST(test_getCategoryFilter_returnsHandlesMask);
+    RUN_TEST(test_getCategoryFilter_nullHandle_returnsAll);
 
     return UNITY_END();
 }

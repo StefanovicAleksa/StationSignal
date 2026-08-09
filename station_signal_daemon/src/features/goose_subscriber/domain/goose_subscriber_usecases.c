@@ -13,6 +13,7 @@ freeEntriesUpTo(GooseSubscriberEntry* entries, int builtCount) {
     for (int i = 0; i < builtCount; i++) {
         if (entries[i].value) MmsValue_delete(entries[i].value);
         free(entries[i].reference);
+        free(entries[i].description);
         if (entries[i].previousValue) MmsValue_delete(entries[i].previousValue);
     }
     free(entries);
@@ -166,7 +167,7 @@ typedef struct {
  * re-clone) previousValue - mirrors mms_report_client's appendEntry exactly. */
 static bool
 appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* reference,
-        MmsValue* previousValue, IedModelDaSemantic semantic) {
+        MmsValue* previousValue, IedModelDaSemantic semantic, LnCategory category, const char* description) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         GooseSubscriberEntry* grown = realloc(builder->entries, sizeof(GooseSubscriberEntry) * (size_t) newCapacity);
@@ -180,6 +181,12 @@ appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* 
     entry->reference = reference ? GooseSubscriberUtils_safeStringDup(reference) : NULL;
     entry->previousValue = previousValue;
     entry->semantic = semantic;
+    entry->category = category;
+    /* Owned copy - description itself is BORROWED (see
+     * GooseSubscriberMemberRefCache.leafDescriptions' own doc comment), but
+     * this struct's own fields are always self-contained, same as
+     * `reference` two lines up. */
+    entry->description = description ? GooseSubscriberUtils_safeStringDup(description) : NULL;
     return true;
 }
 
@@ -190,14 +197,18 @@ appendGooseEntry(GooseEntryBuilder* builder, const MmsValue* value, const char* 
  * actually end up forwarded). slot mirrors shouldForwardAndUpdateCache's own
  * -1-means-"no cache slot" convention. previousValue is populated by
  * shouldForwardAndUpdateCache itself in buildEntries' phase 2a, regardless of
- * this candidate's own forward/drop outcome. semantic is resolved from
- * memberRefCache->leafSemantics[slot] at collection time. */
+ * this candidate's own forward/drop outcome. semantic/category/description
+ * are resolved from memberRefCache's own leafSemantics/leafCategories/
+ * leafDescriptions[slot] at collection time - description stays BORROWED
+ * here too, only appendGooseEntry dups it. */
 typedef struct {
     const MmsValue* value;
     const char* reference;
     int slot;
     MmsValue* previousValue;
     IedModelDaSemantic semantic;
+    LnCategory category;
+    const char* description;
 } EntryCandidate;
 
 typedef struct {
@@ -216,11 +227,42 @@ lookupSemanticForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
     return memberRefCache->leafSemantics[slot];
 }
 
+/* Same shape as lookupSemanticForSlot, for memberRefCache->leafCategories. */
+static LnCategory
+lookupCategoryForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafCategories) return IED_MODEL_LN_CATEGORY_OTHER;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return IED_MODEL_LN_CATEGORY_OTHER;
+    return memberRefCache->leafCategories[slot];
+}
+
+/* Mirrors mms_report_client_usecases.c's own passesCategoryFilter exactly -
+ * see that function's doc comment for the full rationale (checked before
+ * appendCandidate at every call site below, safe against value/quality
+ * splitting because category is a per-LN property; a zero mask degrades to
+ * "unfiltered" rather than "matches nothing," both because production can
+ * never produce one and because this feature's own pre-existing unit tests
+ * zero-initialize GooseSubscriberMemberRefCache without knowing about this
+ * field). */
+static bool
+passesCategoryFilter(GooseSubscriberMemberRefCache* memberRefCache, LnCategory category) {
+    if (!memberRefCache || memberRefCache->categoryFilter == 0) return true;
+    return (memberRefCache->categoryFilter & category) != 0;
+}
+
+/* Same shape as lookupSemanticForSlot, for memberRefCache->leafDescriptions -
+ * returns a BORROWED pointer (or NULL), never free it. */
+static const char*
+lookupDescriptionForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafDescriptions) return NULL;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return NULL;
+    return memberRefCache->leafDescriptions[slot];
+}
+
 /* Same grow-or-skip-on-OOM posture as appendGooseEntry (a single allocation
  * failure drops one candidate rather than aborting the whole record). */
 static void
 appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* reference, int slot,
-        IedModelDaSemantic semantic) {
+        IedModelDaSemantic semantic, LnCategory category, const char* description) {
     if (builder->count == builder->capacity) {
         int newCapacity = (builder->capacity == 0) ? 4 : (builder->capacity * 2);
         EntryCandidate* grown = realloc(builder->items, sizeof(EntryCandidate) * (size_t) newCapacity);
@@ -234,6 +276,8 @@ appendCandidate(CandidateBuilder* builder, const MmsValue* value, const char* re
     c->slot = slot;
     c->previousValue = NULL; /* set later, by shouldForwardAndUpdateCache in buildEntries' phase 2a */
     c->semantic = semantic;
+    c->category = category;
+    c->description = description;
 }
 
 /* Tracks flattened-structure arrays (GooseSubscriberUtils_flattenStructure
@@ -413,8 +457,11 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
                     trackFlattenedArray(flattenedArrays, flattened);
                     for (int k = 0; k < flattenedCount; k++) {
                         int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
+                        LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
+                        if (!passesCategoryFilter(memberRefCache, category)) continue;
                         appendCandidate(candidates, reordered[k], memberRefCache->memberLeafReferences[i][k], slot,
-                                lookupSemanticForSlot(memberRefCache, slot));
+                                lookupSemanticForSlot(memberRefCache, slot), category,
+                                lookupDescriptionForSlot(memberRefCache, slot));
                     }
                     free(reordered);
                     continue; /* raw position i fully handled via decomposition */
@@ -431,7 +478,11 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
         const char* ref = (hasCacheEntry && memberRefCache->memberReferences) ? memberRefCache->memberReferences[i]
                 : NULL;
 
-        appendCandidate(candidates, rawValue, ref, slot, lookupSemanticForSlot(memberRefCache, slot));
+        LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
+        if (!passesCategoryFilter(memberRefCache, category)) continue;
+
+        appendCandidate(candidates, rawValue, ref, slot, lookupSemanticForSlot(memberRefCache, slot), category,
+                lookupDescriptionForSlot(memberRefCache, slot));
     }
 }
 
@@ -593,7 +644,8 @@ buildEntries(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* membe
         }
 
         updateValueDiffCache(memberRefCache, c->slot, c->value);
-        if (!appendGooseEntry(&builder, c->value, c->reference, c->previousValue, c->semantic)) {
+        if (!appendGooseEntry(&builder, c->value, c->reference, c->previousValue, c->semantic, c->category,
+                c->description)) {
             /* appendGooseEntry failed to grow its array (OOM) - it never
              * took ownership of previousValue in that case. */
             if (c->previousValue) MmsValue_delete(c->previousValue);

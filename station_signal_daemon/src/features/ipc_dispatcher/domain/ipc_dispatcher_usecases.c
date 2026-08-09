@@ -168,6 +168,26 @@ IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sour
             if (message->dataPoints[i].hasPreviousLabel) {
                 message->dataPoints[i].previousLabel = extras->pointPreviousLabel[i];
             }
+
+            /* category is never absent (see IpcDataPoint's own doc comment) -
+             * but extras/pointCategory themselves can still be NULL (a caller
+             * that doesn't supply this data at all), which degrades to the
+             * literal "OTHER" here rather than crashing. Deliberately a bare
+             * string literal, not IedModelLnCategory_toString(...) - this
+             * feature has zero third-party/other-feature includes by design
+             * (see this file's own top comment), so the adapters (which DO
+             * already depend on ied_model) are responsible for ever calling
+             * that function; this fallback only needs to match its output
+             * string, not reuse the enum. Also a static string literal -
+             * copied by pointer, never dupString'd, same as label. */
+            message->dataPoints[i].category =
+                    (extras && extras->pointCategory) ? extras->pointCategory[i] : "OTHER";
+
+            message->dataPoints[i].hasDescription = extras && extras->pointHasDescription
+                    && extras->pointHasDescription[i];
+            if (message->dataPoints[i].hasDescription) {
+                message->dataPoints[i].description = dupString(extras->pointDescription[i]);
+            }
         }
         message->dataPointCount = pointCount;
     }
@@ -276,7 +296,8 @@ IpcDispatcherUseCases_freeMessage(IpcMessage* message) {
                         || message->dataPoints[i].previousValue.type == IPC_SCALAR_RAW)) {
             free(message->dataPoints[i].previousValue.value.str);
         }
-        /* label/previousLabel: static string-literal storage, never freed. */
+        /* label/previousLabel/category: static string-literal storage, never freed. */
+        free(message->dataPoints[i].description);
     }
     free(message->dataPoints);
     free(message->sourceReference);

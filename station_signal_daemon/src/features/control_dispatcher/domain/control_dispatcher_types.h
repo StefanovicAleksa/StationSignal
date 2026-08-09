@@ -77,6 +77,10 @@ typedef struct {
     char* sclFilePath;             /* owned, may be NULL */
     char* acseAuthPassword;        /* owned, may be NULL */
     AccessMode accessMode;
+    LnCategoryMask lnCategoryFilter; /* default IED_MODEL_LN_CATEGORY_ALL (unfiltered) when the
+                                         wire request's own "lnCategories" field is absent -
+                                         see parseLnCategoryFilter's own doc comment
+                                         (data/control_dispatcher_json_parser.c) */
 
     /* CONTROL_REQ_STOP_REPORTING fields - unused/zero for other types.
      * Two mutually exclusive forms, discriminated by the parser: deviceId

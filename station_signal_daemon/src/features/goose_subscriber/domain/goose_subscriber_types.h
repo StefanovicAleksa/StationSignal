@@ -67,6 +67,25 @@ typedef struct {
      * genuinely "Dbpos", else IED_MODEL_DA_SEMANTIC_NONE - mirrors
      * MmsReportEntry.semantic exactly. */
     IedModelDaSemantic semantic;
+
+    /* This leaf's LN category, resolved once at GooseSubscription_start time
+     * from IedModel_getCategoryForMemberReference (via the per-slot
+     * memberRefCache->leafCategories cache) - mirrors MmsReportEntry.category
+     * exactly, including the "constant across every leaf under one LN, but
+     * still per-slot rather than per-target" rationale (mms_dataset_manager's
+     * whole-device clustering can assign one Dyn RCB's dataset members from
+     * several LNs; GOOSE datasets are always SCL-static, never
+     * dynamically clustered, but this mirrors the MMS side's own shape for
+     * consistency and because a GOOSE dataset's own FCDAs can still span
+     * multiple LNs per plain SCL authoring). Degrades to
+     * IED_MODEL_LN_CATEGORY_OTHER, never a guess, if unresolved. */
+    LnCategory category;
+
+    /* Owned copy (strdup'd at append time - mirrors MmsReportEntry.description
+     * exactly, including why: this struct's own fields are always self-
+     * contained, even though the underlying source string is borrowed from
+     * the IedModelHandle). NULL if no desc was captured for this leaf. */
+    char* description;
 } GooseSubscriberEntry;
 
 /*
@@ -211,6 +230,34 @@ typedef struct {
      * IED_MODEL_DA_SEMANTIC_NONE everywhere) if allocation failed at build
      * time. */
     IedModelDaSemantic* leafSemantics;
+
+    /* Parallel to leafSemantics (size totalLeafSlots), but resolved once PER
+     * MEMBER, not per leaf - mirrors MmsReportClientMemberRefCacheEntry.leafCategories
+     * exactly (see that field's own doc comment for the full rationale).
+     * Never NULL on successful build (degrades element-wise to
+     * IED_MODEL_LN_CATEGORY_OTHER, same OOM posture as leafSemantics
+     * otherwise). */
+    LnCategory* leafCategories;
+
+    /* This target's connection's active category filter (IedModel_getCategoryFilter),
+     * captured once at GooseSubscription_start time - mirrors
+     * MmsReportClientMemberRefCacheEntry.categoryFilter exactly (see that
+     * field's own doc comment). Compared against leafCategories[slot] in
+     * collectCandidates to decide whether a candidate is even constructed.
+     * MUST be explicitly assigned at build time in resolveMemberReferences -
+     * unlike everPopulated above, a zero/calloc default here is NOT a safe
+     * "unfiltered" value (IED_MODEL_LN_CATEGORY_ALL is a real OR'd bitmask,
+     * not 0), so leaving this unset would silently match nothing. */
+    LnCategoryMask categoryFilter;
+
+    /* Parallel to leafSemantics (size totalLeafSlots) - slot i's captured SCL
+     * desc="...", resolved once at GooseSubscription_start time via
+     * IedModel_getDescriptionForMemberReference/_getLeafDescriptionsForMemberReference.
+     * Elements are BORROWED (point into the IedModelHandle's own owned
+     * daDescriptions array) - this array itself (the pointer table) IS owned
+     * and freed alongside leafSemantics, its contents are not. May be NULL if
+     * allocation failed at build time. */
+    const char** leafDescriptions;
 
     /* Set to true, once, at the end of the first frame this target ever
      * processes (see buildEntries in goose_subscriber_usecases.c) - purely

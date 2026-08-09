@@ -235,7 +235,7 @@ runFromIedModelHandle(OrchestrationHandle handle, IedModelHandle iedModel, const
 static OrchestrationError
 runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOwnedTempFile,
         const char* host, int port, const char* iedName, const char* interfaceId,
-        AccessMode accessMode, OrchestrationErrorDetail* outDetail,
+        AccessMode accessMode, LnCategoryMask lnCategoryFilter, OrchestrationErrorDetail* outDetail,
         bool* outMmsAvailable, bool* outGooseAvailable) {
     /* --- IED-name auto-detection - only entered when iedName is empty. No
      * interactive retry for the ambiguous (0 or >1 <IED>) case; see this
@@ -273,7 +273,8 @@ runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOw
      * of outcome rather than deferring. A caller-supplied local file is left
      * untouched either way - it's not ours to delete. */
     IedModelLoadError modelErr;
-    IedModelHandle iedModel = IedModel_loadFromFile(sclPath, resolvedIedName, accessMode, &modelErr);
+    IedModelHandle iedModel = IedModel_loadFromFile(sclPath, resolvedIedName, accessMode, lnCategoryFilter,
+            &modelErr);
     if (sclPathIsOwnedTempFile) {
         OrchestrationStaging_cleanup(sclPath);
         free((char*) sclPath);
@@ -295,7 +296,7 @@ runFromSclFile(OrchestrationHandle handle, const char* sclPath, bool sclPathIsOw
 
 OrchestrationError
 Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
-        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* iedName, const char* interfaceId, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable) {
     if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
 
@@ -376,7 +377,7 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
     /* --- stages 3-5: shared with Orchestration_runFromLocalFile, see that
      * function's own comment. tempPath is freed/unlinked inside (owned). */
     OrchestrationError runErr = runFromSclFile(handle, tempPath, true, winner->host, winner->port,
-            iedName, interfaceId, accessMode, outDetail, outMmsAvailable, outGooseAvailable);
+            iedName, interfaceId, accessMode, lnCategoryFilter, outDetail, outMmsAvailable, outGooseAvailable);
     SclBootstrap_destroyResult(winner);
 
     return runErr;
@@ -385,7 +386,8 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
 OrchestrationError
 Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePath, const char* host,
         int mmsPort, const char* iedName, const char* interfaceId, AccessMode accessMode,
-        OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable) {
+        LnCategoryMask lnCategoryFilter, OrchestrationErrorDetail* outDetail, bool* outMmsAvailable,
+        bool* outGooseAvailable) {
     if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
 
     if (!handle || handle->running || !sclFilePath || !sclFilePath[0] || !host || !host[0]
@@ -408,12 +410,12 @@ Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePa
      * and left untouched (not ours to delete), see runFromSclFile's own
      * sclPathIsOwnedTempFile doc comment. */
     return runFromSclFile(handle, sclFilePath, false, host, mmsPort, iedName, interfaceId, accessMode,
-            outDetail, outMmsAvailable, outGooseAvailable);
+            lnCategoryFilter, outDetail, outMmsAvailable, outGooseAvailable);
 }
 
 OrchestrationError
 Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* host, int mmsPort,
-        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* iedName, const char* interfaceId, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         const char* acseAuthPassword, OrchestrationErrorDetail* outDetail,
         bool* outMmsAvailable, bool* outGooseAvailable) {
     if (outDetail) memset(outDetail, 0, sizeof(*outDetail));
@@ -443,7 +445,7 @@ Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* hos
      * _runFromLocalFile) an empty iedName is not a resolution stage of its
      * own, it's simply passed through as-is. */
     IedModelOnlineLoaderError loaderErr;
-    IedModelHandle iedModel = IedModelOnlineLoader_build(host, mmsPort, iedName, accessMode,
+    IedModelHandle iedModel = IedModelOnlineLoader_build(host, mmsPort, iedName, accessMode, lnCategoryFilter,
             acseAuthPassword, NULL, &loaderErr);
     if (!iedModel) {
         IpcDispatcher_stop(handle->ipcDispatcher);

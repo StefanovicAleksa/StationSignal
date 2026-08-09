@@ -4,6 +4,7 @@
 #include "features/ied_model_online_loader/data/ied_model_online_loader_connection.h"
 #include "features/ied_model_online_loader/data/ied_model_online_loader_auth.h"
 #include "features/ied_model_online_loader/domain/ied_model_online_loader_usecases.h"
+#include "features/ied_model/service/ied_model_api.h"
 #include "iec61850_dynamic_model.h"
 #include "iec61850_common.h"
 #include "mms_type_spec.h"
@@ -463,8 +464,10 @@ buildGooseControlBlocks(IedConnection conn, const char* lnRef, LogicalNode* ln, 
 
 IedModel*
 IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
-        const IedModelOnlineLoaderConfig* config, IedModelOnlineLoaderError* outError) {
+        const IedModelOnlineLoaderConfig* config, LinkedList* outLnCategories,
+        IedModelOnlineLoaderError* outError) {
     if (outError) *outError = IED_MODEL_ONLINE_LOADER_OK;
+    if (outLnCategories) *outLnCategories = NULL;
     (void) config; /* no per-call tuning beyond the request timeout, which the caller already
                        applies directly to `conn` before invoking this function */
 
@@ -512,6 +515,10 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
      * dynamicDatasetCache, see that feature's own doc comment). */
     LinkedList builtDatasets = LinkedList_create();
 
+    /* One heap-boxed IedModelLnCategoryEntry* per LN built - see this
+     * function's own doc comment (ied_model_online_loader_connection.h). */
+    LinkedList lnCategories = LinkedList_create();
+
     LinkedList ldElement = LinkedList_getNext(ldNames);
     while (ldElement) {
         char* ldName = (char*) LinkedList_getData(ldElement);
@@ -529,6 +536,21 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
                 char* lnName = (char*) LinkedList_getData(lnElement);
                 LogicalNode* ln = LogicalNode_create(lnName, ld);
                 char* lnRef = buildLnRef(ldName, lnName);
+
+                if (lnCategories) {
+                    /* No lnClass attribute is ever available here (only the
+                     * raw concatenated wire instance name) - reverse-match
+                     * via the same dictionary the SCL path's own
+                     * lnClass="..." classification ultimately derives from.
+                     * Never left unclassified: an unmatched name still
+                     * yields OTHER, so this LN is filterable like any other. */
+                    IedModelLnCategoryEntry* entry = malloc(sizeof(IedModelLnCategoryEntry));
+                    if (entry) {
+                        entry->ln = ln;
+                        entry->category = IedModel_categorizeWireInstanceName(lnName);
+                        LinkedList_add(lnCategories, entry);
+                    }
+                }
 
                 if (lnRef) {
                     uint64_t lnStartMs = Hal_getTimeInMs();
@@ -555,14 +577,18 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
     LinkedList_destroyDeep(ldNames, free);
     LinkedList_destroyDeep(builtDatasets, free);
 
+    if (outLnCategories) *outLnCategories = lnCategories;
+    else LinkedList_destroyDeep(lnCategories, free); /* caller doesn't want it - don't leak */
+
     return model;
 }
 
 IedModel*
 IedModelOnlineLoaderConnection_connectAndBuild(const char* host, int port, const char* iedName,
         const char* acseAuthPassword, const IedModelOnlineLoaderConfig* config,
-        IedModelOnlineLoaderError* outError) {
+        LinkedList* outLnCategories, IedModelOnlineLoaderError* outError) {
     if (outError) *outError = IED_MODEL_ONLINE_LOADER_OK;
+    if (outLnCategories) *outLnCategories = NULL;
 
     if (!host || !host[0] || port <= 0) {
         if (outError) *outError = IED_MODEL_ONLINE_LOADER_ERR_INVALID_ARGUMENT;
@@ -593,7 +619,7 @@ IedModelOnlineLoaderConnection_connectAndBuild(const char* host, int port, const
     }
 
     uint64_t buildStartMs = Hal_getTimeInMs();
-    IedModel* model = IedModelOnlineLoaderConnection_build(conn, iedName, config, outError);
+    IedModel* model = IedModelOnlineLoaderConnection_build(conn, iedName, config, outLnCategories, outError);
     fprintf(stderr, "[ied_model_online_loader] %s:%d discovery build done, model=%s (%llums)\n", host,
             port, model ? "ok" : "failed", (unsigned long long) (Hal_getTimeInMs() - buildStartMs));
 

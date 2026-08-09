@@ -105,6 +105,14 @@ void Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
  * picker) knows a host to bootstrap from but not its exact SCL-declared IED
  * name. A non-empty iedName is used exactly as before, unchanged.
  *
+ * lnCategoryFilter: passed straight through to step (3)'s
+ * IedModel_loadFromFile call, stored on the resulting handle - IED_MODEL_LN_CATEGORY_ALL
+ * matches every LN (today's unfiltered behavior); a narrower mask excludes
+ * non-matching LNs from steps (4)/(5)'s subscription target lists and from
+ * mms_report_client's own whole-device dynamic-dataset clustering. See
+ * ied_model's own categoryFilter field (ied_model_types.h) for where
+ * filtering actually happens.
+ *
  * Returns once both long-running workers' own _start() calls have returned
  * - this does NOT mean a report/GOOSE frame has arrived yet or the MMS
  * association is fully up (see MmsReportClient_start/GooseSubscription_start's
@@ -133,7 +141,7 @@ void Orchestration_setBootstrapProgressCallback(OrchestrationHandle handle,
  */
 OrchestrationError
 Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
-        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* iedName, const char* interfaceId, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable);
 
 /*
@@ -163,7 +171,8 @@ Orchestration_run(OrchestrationHandle handle, LinkedList hostList, int mmsPort,
 OrchestrationError
 Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePath, const char* host,
         int mmsPort, const char* iedName, const char* interfaceId, AccessMode accessMode,
-        OrchestrationErrorDetail* outDetail, bool* outMmsAvailable, bool* outGooseAvailable);
+        LnCategoryMask lnCategoryFilter, OrchestrationErrorDetail* outDetail, bool* outMmsAvailable,
+        bool* outGooseAvailable);
 
 /*
  * A THIRD way to obtain the model - for real, connectable IEC 61850 devices
@@ -213,7 +222,7 @@ Orchestration_runFromLocalFile(OrchestrationHandle handle, const char* sclFilePa
  */
 OrchestrationError
 Orchestration_runFromOnlineDiscovery(OrchestrationHandle handle, const char* host, int mmsPort,
-        const char* iedName, const char* interfaceId, AccessMode accessMode,
+        const char* iedName, const char* interfaceId, AccessMode accessMode, LnCategoryMask lnCategoryFilter,
         const char* acseAuthPassword, OrchestrationErrorDetail* outDetail,
         bool* outMmsAvailable, bool* outGooseAvailable);
 
