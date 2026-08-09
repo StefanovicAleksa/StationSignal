@@ -325,12 +325,196 @@ test_gooseRecord_arrivesWithGoCbRefSource(void) {
     free(json);
 }
 
+/*
+ * Proves IpcDispatcherUseCases_shouldForwardWithinProtocol end-to-end for MMS:
+ * two different RCBs (rcbA, rcbB) each independently report the exact same
+ * (reference, value, quality) content - the daemon-side redundant-coverage
+ * signature this whole cache exists to catch (see mms_dataset_manager's own
+ * fix for the actual root cause; this is the last-resort delivery-side net).
+ * Only the FIRST push's data point must reach the client; the second push's
+ * only entry is fully suppressed, so its own envelope arrives with an EMPTY
+ * dataPoints array (same shape as any other "nothing survived filtering"
+ * push - not a missing message, just a content-free one).
+ */
+void
+test_mmsReport_duplicateFromDifferentRcb_isSuppressed(void) {
+    IpcDispatcherConfig config;
+    IpcDispatcherConfig_defaults(&config);
+    config.port = TEST_PORT + 2;
+
+    fixtureHandle = IpcDispatcher_create(&config, NULL);
+    TEST_ASSERT_NOT_NULL(fixtureHandle);
+    TEST_ASSERT_EQUAL(IPC_DISPATCHER_OK, IpcDispatcher_start(fixtureHandle));
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(sock >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(TEST_PORT + 2);
+    inet_pton(AF_INET, TEST_HOST, &addr.sin_addr);
+    TEST_ASSERT_EQUAL_INT(0, connect(sock, (struct sockaddr*) &addr, sizeof(addr)));
+    const char* request =
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    send(sock, request, strlen(request), 0);
+    char buf[1024];
+    size_t total = 0;
+    while (total < sizeof(buf) - 1) {
+        ssize_t n = recv(sock, buf + total, sizeof(buf) - 1 - total, 0);
+        TEST_ASSERT_TRUE(n > 0);
+        total += (size_t) n;
+        buf[total] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break;
+    }
+    TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
+    fixtureSocket = sock;
+
+    MmsReportRecord* recordA = calloc(1, sizeof(MmsReportRecord));
+    recordA->rcbReference = strdup("Reporter1LD1/LLN0.BR.rcbA");
+    recordA->rptId = strdup("rptA");
+    recordA->hasTimestamp = true;
+    recordA->timestampMs = 1751520000000ULL;
+    recordA->entryCount = 1;
+    recordA->entries = calloc(1, sizeof(MmsReportEntry));
+    recordA->entries[0].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$stVal");
+    recordA->entries[0].value = MmsValue_newBoolean(true);
+    recordA->entries[0].ownChangeDetected = true;
+
+    IpcDispatcher_onMmsReport(fixtureHandle, recordA);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived for recordA within timeout");
+    char* jsonA = readOneTextFrame(fixtureSocket);
+    TEST_ASSERT_NOT_NULL(jsonA);
+    cJSON* parsedA = cJSON_Parse(jsonA);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, cJSON_GetArraySize(cJSON_GetObjectItem(parsedA, "dataPoints")),
+            "the first RCB's report must forward its data point normally");
+    cJSON_Delete(parsedA);
+    free(jsonA);
+
+    /* Different RCB, IDENTICAL (reference, value) content, no quality on
+     * either side - the daemon-side cross-RCB duplicate this cache exists to
+     * catch. */
+    MmsReportRecord* recordB = calloc(1, sizeof(MmsReportRecord));
+    recordB->rcbReference = strdup("Reporter1LD1/LLN0.BR.rcbB");
+    recordB->rptId = strdup("rptB");
+    recordB->hasTimestamp = true;
+    recordB->timestampMs = 1751520000001ULL;
+    recordB->entryCount = 1;
+    recordB->entries = calloc(1, sizeof(MmsReportEntry));
+    recordB->entries[0].reference = strdup("Reporter1LD1/LLN0$ST$Ind1$stVal");
+    recordB->entries[0].value = MmsValue_newBoolean(true);
+    recordB->entries[0].ownChangeDetected = true;
+
+    IpcDispatcher_onMmsReport(fixtureHandle, recordB);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived for recordB within timeout");
+    char* jsonB = readOneTextFrame(fixtureSocket);
+    TEST_ASSERT_NOT_NULL(jsonB);
+    cJSON* parsedB = cJSON_Parse(jsonB);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, cJSON_GetArraySize(cJSON_GetObjectItem(parsedB, "dataPoints")),
+            "a different RCB reporting the exact same content must be suppressed as a cross-RCB duplicate");
+    cJSON_Delete(parsedB);
+    free(jsonB);
+}
+
+/*
+ * Proves MMS and GOOSE are deliberately NEVER cross-checked against each
+ * other (see IpcDispatcherDedupCache's own doc comment, ipc_dispatcher_types.h) -
+ * an MMS RCB and a GOOSE GoCB legitimately wired to the same point are two
+ * independent wire paths, and a discrepancy between them is diagnostically
+ * useful, so both must always reach the client even with byte-identical
+ * (reference, value) content.
+ */
+void
+test_mmsReportAndGooseRecord_sameContent_bothArrive(void) {
+    IpcDispatcherConfig config;
+    IpcDispatcherConfig_defaults(&config);
+    config.port = TEST_PORT + 3;
+
+    fixtureHandle = IpcDispatcher_create(&config, NULL);
+    TEST_ASSERT_NOT_NULL(fixtureHandle);
+    TEST_ASSERT_EQUAL(IPC_DISPATCHER_OK, IpcDispatcher_start(fixtureHandle));
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(sock >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(TEST_PORT + 3);
+    inet_pton(AF_INET, TEST_HOST, &addr.sin_addr);
+    TEST_ASSERT_EQUAL_INT(0, connect(sock, (struct sockaddr*) &addr, sizeof(addr)));
+    const char* request =
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    send(sock, request, strlen(request), 0);
+    char buf[1024];
+    size_t total = 0;
+    while (total < sizeof(buf) - 1) {
+        ssize_t n = recv(sock, buf + total, sizeof(buf) - 1 - total, 0);
+        TEST_ASSERT_TRUE(n > 0);
+        total += (size_t) n;
+        buf[total] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break;
+    }
+    TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
+    fixtureSocket = sock;
+
+    MmsReportRecord* mmsRecord = calloc(1, sizeof(MmsReportRecord));
+    mmsRecord->rcbReference = strdup("Reporter1LD1/LLN0.BR.brcbMain");
+    mmsRecord->rptId = strdup("rpt1");
+    mmsRecord->hasTimestamp = true;
+    mmsRecord->timestampMs = 1751520000000ULL;
+    mmsRecord->entryCount = 1;
+    mmsRecord->entries = calloc(1, sizeof(MmsReportEntry));
+    mmsRecord->entries[0].reference = strdup("Breaker1CB1/LLN0$ST$Pos$stVal");
+    mmsRecord->entries[0].value = MmsValue_newIntegerFromInt32(2);
+    mmsRecord->entries[0].ownChangeDetected = true;
+
+    IpcDispatcher_onMmsReport(fixtureHandle, mmsRecord);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived for the MMS report within timeout");
+    char* mmsJson = readOneTextFrame(fixtureSocket);
+    TEST_ASSERT_NOT_NULL(mmsJson);
+    cJSON* mmsParsed = cJSON_Parse(mmsJson);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, cJSON_GetArraySize(cJSON_GetObjectItem(mmsParsed, "dataPoints")),
+            "the MMS report must forward its data point normally");
+    cJSON_Delete(mmsParsed);
+    free(mmsJson);
+
+    /* A GOOSE record over a DIFFERENT protocol, byte-identical (reference,
+     * value) content - must NOT be suppressed, unlike the same scenario
+     * within one protocol (see test_mmsReport_duplicateFromDifferentRcb_isSuppressed
+     * above). */
+    GooseSubscriberRecord* gooseRecord = calloc(1, sizeof(GooseSubscriberRecord));
+    gooseRecord->goCbRef = strdup("Breaker1CB1/LLN0$GO$gcbStatus");
+    gooseRecord->timestampMs = 1751520000001ULL;
+    gooseRecord->entryCount = 1;
+    gooseRecord->entries = calloc(1, sizeof(GooseSubscriberEntry));
+    gooseRecord->entries[0].reference = strdup("Breaker1CB1/LLN0$ST$Pos$stVal");
+    gooseRecord->entries[0].value = MmsValue_newIntegerFromInt32(2);
+
+    IpcDispatcher_onGooseRecord(fixtureHandle, gooseRecord);
+
+    TEST_ASSERT_TRUE_MESSAGE(waitReadable(fixtureSocket, 3000), "no frame arrived for the GOOSE record within timeout");
+    char* gooseJson = readOneTextFrame(fixtureSocket);
+    TEST_ASSERT_NOT_NULL(gooseJson);
+    cJSON* gooseParsed = cJSON_Parse(gooseJson);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, cJSON_GetArraySize(cJSON_GetObjectItem(gooseParsed, "dataPoints")),
+            "the GOOSE record must still forward its data point despite matching a just-forwarded "
+            "MMS report's content - MMS and GOOSE are never cross-checked against each other");
+    cJSON_Delete(gooseParsed);
+    free(gooseJson);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
 
     RUN_TEST(test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint);
     RUN_TEST(test_gooseRecord_arrivesWithGoCbRefSource);
+    RUN_TEST(test_mmsReport_duplicateFromDifferentRcb_isSuppressed);
+    RUN_TEST(test_mmsReportAndGooseRecord_sameContent_bothArrive);
 
     return UNITY_END();
 }

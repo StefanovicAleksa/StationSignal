@@ -185,32 +185,6 @@ void
 MmsReportClientUseCases_resetValueDiffCacheToBootstrap(MmsReportClientMemberRefCacheEntry* entry);
 
 /*
- * Cross-RCB duplicate-content suppression - see MmsReportClientCrossRcbDedupCache's
- * own doc comment for the full rationale (redundant RCB instances on the
- * same LN/dataset reporting the same event independently). Compares
- * (rcbReference, entries[0..entryCount)) against cache's own last-forwarded
- * content: if cache has prior content, rcbReference differs from the one
- * that produced it, AND every (reference, value) pair matches positionally,
- * this is a duplicate - returns false (do not forward), leaving cache
- * untouched. Otherwise (nothing cached yet, same rcbReference as before, or
- * genuinely different content) returns true and replaces cache's content
- * with this call's (rcbReference, entries) - so a suppressed duplicate never
- * disturbs the established baseline, but every other case refreshes it.
- * NULL-safe on cache (returns true, i.e. always forward, if cache is NULL -
- * matches this codebase's "no cache means no filtering" convention).
- */
-bool
-MmsReportClientUseCases_shouldForwardAcrossRcb(MmsReportClientCrossRcbDedupCache* cache,
-        const char* rcbReference, const MmsReportEntry* entries, int entryCount);
-
-/* Frees cache's owned rcbReference/entries and resets it back to empty
- * ("nothing forwarded yet"). NULL-safe. Used both internally by
- * MmsReportClientUseCases_shouldForwardAcrossRcb (to replace stale content)
- * and by MmsReportClient_destroy (final cleanup). */
-void
-MmsReportClientUseCases_destroyCrossRcbDedupCache(MmsReportClientCrossRcbDedupCache* cache);
-
-/*
  * Builds one MmsReportClientMemberRefCacheEntry* from an already-resolved
  * ordered member-reference array ("$"-joined, LD-prefixed "LD/LN$FC$DO[$DA]"
  * wire form - this feature's own convention) plus the dataset identity that

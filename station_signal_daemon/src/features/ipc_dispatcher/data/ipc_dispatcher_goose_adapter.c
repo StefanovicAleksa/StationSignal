@@ -5,6 +5,7 @@
 #include "features/ipc_dispatcher/data/ipc_dispatcher_json_writer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ring_buffer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
+#include "features/ipc_dispatcher/data/ipc_dispatcher_dedup_cache.h"
 
 void
 IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSubscriberRecord* record) {
@@ -42,19 +43,20 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
     if (valueCount > 0 && pointRefs && pointValues && pointHasQuality && pointQuality
             && pointHasPreviousValue && pointPreviousValue && pointHasPreviousQuality && pointPreviousQuality
             && pointHasLabel && pointLabel && pointHasPreviousLabel && pointPreviousLabel) {
+        int out = 0;
         for (int k = 0; k < valueCount; k++) {
             int vi = valueIdx[k];
-            pointRefs[k] = refs[vi];
-            pointValues[k] = IpcDispatcherValueCodec_convert(record->entries[vi].value);
+            pointRefs[out] = refs[vi];
+            pointValues[out] = IpcDispatcherValueCodec_convert(record->entries[vi].value);
 
-            pointHasPreviousValue[k] = record->entries[vi].previousValue != NULL;
-            if (pointHasPreviousValue[k]) {
-                pointPreviousValue[k] = IpcDispatcherValueCodec_convert(record->entries[vi].previousValue);
+            pointHasPreviousValue[out] = record->entries[vi].previousValue != NULL;
+            if (pointHasPreviousValue[out]) {
+                pointPreviousValue[out] = IpcDispatcherValueCodec_convert(record->entries[vi].previousValue);
             }
 
-            pointHasLabel[k] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
-                    record->entries[vi].value, &pointLabel[k]);
-            if (pointHasLabel[k]) {
+            pointHasLabel[out] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
+                    record->entries[vi].value, &pointLabel[out]);
+            if (pointHasLabel[out]) {
                 /* MmsValue_getBitStringAsInteger (the generic raw-bit read
                  * IpcDispatcherValueCodec_convert used above) and
                  * Dbpos_fromMmsValue disagree on bit order for a genuine
@@ -63,26 +65,41 @@ IpcDispatcherGooseAdapter_handleRecord(IpcDispatcherHandle handle, const GooseSu
                  * prefer Dbpos_fromMmsValue's own ordinal for the numeric
                  * value too, so "value" and "label" never contradict each
                  * other in the JSON. */
-                pointValues[k].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].value);
+                pointValues[out].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].value);
             }
-            if (pointHasPreviousValue[k]) {
-                pointHasPreviousLabel[k] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
-                        record->entries[vi].previousValue, &pointPreviousLabel[k]);
-                if (pointHasPreviousLabel[k]) {
-                    pointPreviousValue[k].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].previousValue);
+            if (pointHasPreviousValue[out]) {
+                pointHasPreviousLabel[out] = IpcDispatcherValueCodec_decodeDbposLabel(record->entries[vi].semantic,
+                        record->entries[vi].previousValue, &pointPreviousLabel[out]);
+                if (pointHasPreviousLabel[out]) {
+                    pointPreviousValue[out].value.u64 = (uint64_t) Dbpos_fromMmsValue(record->entries[vi].previousValue);
                 }
             }
 
             int qi = qualityIdx[k];
             if (qi >= 0) {
-                pointHasQuality[k] = IpcDispatcherValueCodec_decodeQuality(record->entries[qi].value, &pointQuality[k]);
+                pointHasQuality[out] = IpcDispatcherValueCodec_decodeQuality(record->entries[qi].value, &pointQuality[out]);
                 if (record->entries[qi].previousValue) {
-                    pointHasPreviousQuality[k] = IpcDispatcherValueCodec_decodeQuality(
-                            record->entries[qi].previousValue, &pointPreviousQuality[k]);
+                    pointHasPreviousQuality[out] = IpcDispatcherValueCodec_decodeQuality(
+                            record->entries[qi].previousValue, &pointPreviousQuality[out]);
                 }
             }
+
+            /* Cross-GoCB dedup, same protocol only - catches the SAME real
+             * change already forwarded by a DIFFERENT GoCB this instant. See
+             * IpcDispatcherUseCases_shouldForwardWithinProtocol's own doc
+             * comment; mirrors the MMS adapter's own check. Must run after
+             * every override above so it compares the FINAL value (post
+             * Dbpos-label correction). */
+            if (!IpcDispatcherDedupCache_shouldForward(handle->gooseDedupCache, record->goCbRef, pointRefs[out],
+                    &pointValues[out], pointHasQuality[out], pointQuality[out])) {
+                IpcDispatcherValueCodec_freeScalar(&pointValues[out]);
+                if (pointHasPreviousValue[out]) IpcDispatcherValueCodec_freeScalar(&pointPreviousValue[out]);
+                continue;
+            }
+
+            out++;
         }
-        builtCount = valueCount;
+        builtCount = out;
     }
 
     IpcDataPointExtras extras = {

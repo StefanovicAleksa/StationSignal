@@ -174,97 +174,82 @@ MmsDatasetManagerUseCases_chunkReferencesByDoGroup(const char* const* references
     return chunks;
 }
 
-/* Whole-device-safe counterpart of MmsDatasetManagerUseCases_extractDoGroupKey:
- * that function's key is deliberately just the bare DO name (e.g. "Mod"),
- * which is only safe when every reference in the list is already known to
- * belong to the same LN (its only caller, chunkReferencesByDoGroup, is only
- * ever fed one LN's own leaf list). Whole-device clustering feeds a
- * flat list spanning every LN in the model, where two DIFFERENT LNs can
- * easily share a DO name (e.g. "Mod"/"Beh"/"Health" common data, or many
- * same-type LN instances like blkGGIO1..blkGGIO18 all starting with the same
- * first DO name) - if the last DO of one LN and the first DO of the next
- * happened to land adjacent in the flat list with an identical bare-DO key,
- * the greedy packer below would wrongly treat them as one atomic group. This
- * key includes the "LD/LN" prefix too, so it can only ever match within the
- * same LN - safe for cross-LN input, while producing IDENTICAL grouping
- * decisions to the bare-DO-name key for any already-single-LN input (every
- * reference in that case already shares the same LD/LN prefix, so including
- * it in the key changes nothing observable there). */
-static char*
-extractLnAndDoGroupKey(const char* memberReference) {
-    if (!memberReference) return NULL;
-
-    /* "LD/LN$FC$DO[$SDO...]$DA" - key is everything up to and including the
-     * DO segment (skip past the FC segment's own '$', then find the end of
-     * the DO segment that follows it). */
-    const char* fcStart = strchr(memberReference, '$');
-    const char* doStart = fcStart ? strchr(fcStart + 1, '$') : NULL;
-    if (!doStart) {
-        /* Fewer than 2 '$'s - malformed, treat the whole string as its own
-         * singleton group rather than erroring, same fallback as
-         * MmsDatasetManagerUseCases_extractDoGroupKey. */
-        return MmsDatasetManagerUtils_safeStringDup(memberReference);
-    }
-    doStart++;
-
-    const char* doEnd = strchr(doStart, '$');
-    size_t len = doEnd ? (size_t) (doEnd - memberReference) : strlen(memberReference);
-
-    char* key = malloc(len + 1);
-    if (!key) return NULL;
-    memcpy(key, memberReference, len);
-    key[len] = '\0';
-    return key;
-}
-
 LinkedList
 MmsDatasetManagerUseCases_chunkReferencesAcrossWholeDevice(const char* const* references, int count,
         int maxAttributes) {
     LinkedList chunks = LinkedList_create();
     if (!references || count <= 0 || maxAttributes <= 0) return chunks;
 
-    char** groupKeys = calloc((size_t) count, sizeof(char*));
-    if (!groupKeys) return chunks;
-    for (int i = 0; i < count; i++) {
-        groupKeys[i] = references[i] ? extractLnAndDoGroupKey(references[i]) : NULL;
-    }
+    /* LN-preserving: pack whole LN groups into a chunk while they fit, and
+     * only ever split a single LN's own leaves across chunk boundaries when
+     * that LN alone exceeds maxAttributes - see this function's own header
+     * doc comment. groupReferencesByLn already walks the flat list in
+     * contiguous "LD/LN"-prefix runs, which is exactly the grouping this
+     * needs, so it's reused directly rather than re-deriving an LN key here. */
+    LinkedList lnGroups = MmsDatasetManagerUseCases_groupReferencesByLn(references, count);
 
     LinkedList currentChunk = NULL;
     int currentChunkSize = 0;
 
-    int i = 0;
-    while (i < count) {
-        if (!references[i]) {
-            i++;
+    for (LinkedList groupEl = LinkedList_getNext(lnGroups); groupEl; groupEl = LinkedList_getNext(groupEl)) {
+        LinkedList lnGroup = (LinkedList) LinkedList_getData(groupEl);
+        int groupSize = LinkedList_size(lnGroup);
+        if (groupSize == 0) continue;
+
+        if (groupSize > maxAttributes) {
+            /* Oversized LN: flush whatever's pending first, then split this
+             * LN's own leaves DO-atomically. Every resulting sub-chunk is
+             * reserved for this LN alone - never left open afterward for the
+             * next LN to pack into, so a chunk containing any leaf from a
+             * split LN never also contains a different LN's leaves. */
+            if (currentChunk) {
+                LinkedList_add(chunks, currentChunk);
+                currentChunk = NULL;
+                currentChunkSize = 0;
+            }
+
+            char** lnLeaves = calloc((size_t) groupSize, sizeof(char*));
+            if (lnLeaves) {
+                int li = 0;
+                for (LinkedList lnEl = LinkedList_getNext(lnGroup); lnEl; lnEl = LinkedList_getNext(lnEl)) {
+                    lnLeaves[li++] = (char*) LinkedList_getData(lnEl);
+                }
+                LinkedList subChunks = MmsDatasetManagerUseCases_chunkReferencesByDoGroup(
+                        (const char* const*) lnLeaves, groupSize, maxAttributes);
+                free(lnLeaves);
+                /* subChunks' inner lists already own their own duplicated
+                 * strings (chunkReferencesByDoGroup dups from lnLeaves,
+                 * itself only borrowing lnGroup's strings) - transfer them
+                 * directly into `chunks` and destroy only the now-empty
+                 * outer container, never Deep. */
+                for (LinkedList subEl = LinkedList_getNext(subChunks); subEl; subEl = LinkedList_getNext(subEl)) {
+                    LinkedList_add(chunks, (LinkedList) LinkedList_getData(subEl));
+                }
+                LinkedList_destroyStatic(subChunks);
+            }
             continue;
         }
 
-        int groupEnd = i + 1;
-        while (groupEnd < count && references[groupEnd] && groupKeys[groupEnd] && groupKeys[i]
-                && strcmp(groupKeys[groupEnd], groupKeys[i]) == 0) {
-            groupEnd++;
-        }
-        int groupSize = groupEnd - i;
-
-        if (currentChunk && currentChunkSize > 0 && currentChunkSize + groupSize > maxAttributes) {
+        if (currentChunk && currentChunkSize + groupSize > maxAttributes) {
             LinkedList_add(chunks, currentChunk);
             currentChunk = NULL;
             currentChunkSize = 0;
         }
         if (!currentChunk) currentChunk = LinkedList_create();
 
-        for (int j = i; j < groupEnd; j++) {
-            LinkedList_add(currentChunk, MmsDatasetManagerUtils_safeStringDup(references[j]));
+        for (LinkedList lnEl = LinkedList_getNext(lnGroup); lnEl; lnEl = LinkedList_getNext(lnEl)) {
+            LinkedList_add(currentChunk, MmsDatasetManagerUtils_safeStringDup((char*) LinkedList_getData(lnEl)));
         }
         currentChunkSize += groupSize;
-
-        i = groupEnd;
     }
 
     if (currentChunk) LinkedList_add(chunks, currentChunk);
 
-    for (int k = 0; k < count; k++) free(groupKeys[k]);
-    free(groupKeys);
+    for (LinkedList groupCleanup = LinkedList_getNext(lnGroups); groupCleanup;
+            groupCleanup = LinkedList_getNext(groupCleanup)) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(groupCleanup), free);
+    }
+    LinkedList_destroyStatic(lnGroups);
 
     return chunks;
 }
@@ -320,6 +305,34 @@ MmsDatasetManagerUseCases_groupReferencesByLn(const char* const* references, int
     free(lnKeys);
 
     return groups;
+}
+
+/* Local, purely-string linear-scan membership check - deliberately not
+ * MmsDatasetManagerNaming_stringListContains (data layer, mms_dataset_manager_naming.h):
+ * this domain layer never includes data-layer headers, so a small duplicated
+ * helper is preferred over reaching across that boundary, same convention as
+ * this file's own stripArrayIndexAnnotation below. */
+static bool
+containsString(LinkedList list, const char* value) {
+    if (!list || !value) return false;
+    for (LinkedList el = LinkedList_getNext(list); el; el = LinkedList_getNext(el)) {
+        const char* candidate = (const char*) LinkedList_getData(el);
+        if (candidate && strcmp(candidate, value) == 0) return true;
+    }
+    return false;
+}
+
+LinkedList
+MmsDatasetManagerUseCases_filterOutClaimedLeaves(const char* const* leaves, int count, LinkedList claimedLeaves) {
+    LinkedList result = LinkedList_create();
+    if (!leaves || count <= 0) return result;
+
+    for (int i = 0; i < count; i++) {
+        if (!leaves[i]) continue;
+        if (containsString(claimedLeaves, leaves[i])) continue;
+        LinkedList_add(result, MmsDatasetManagerUtils_safeStringDup(leaves[i]));
+    }
+    return result;
 }
 
 /* Removes any "(...)" array-index annotation from one dot-separated path

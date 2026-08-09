@@ -36,6 +36,7 @@ $(BIN): e2e_test_ipc_dispatcher.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \

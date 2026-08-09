@@ -13,10 +13,68 @@
  */
 
 /*
+ * Runs tiers 2 (pull-live) and 3 (adopt) for every non-SCL target in
+ * handle->targets, IN ORDER, BEFORE the whole-device cluster plan exists -
+ * called from MmsDatasetManager_beginCycle, immediately before
+ * MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan. Order matters:
+ * tier 3's own claim ordering (session->claimedDatasetNames - first-claimed
+ * wins among targets sharing an LD) depends on running every target's tier
+ * 2/3 in the same order enableOneTarget's own live loop would have, so a
+ * lazy/incremental "resolve tier 4 as we go, retroactively deduct" approach
+ * was rejected: it can only ever know what targets EARLIER in the loop
+ * claimed, never what a LATER target will - see this feature's own
+ * CLAUDE.md/plan history for the full reasoning. A true up-front pass is the
+ * only way to know the complete claimed-leaf set before ANY tier-4 cluster is
+ * handed out.
+ *
+ * Populates handle->session.preResolvedEntries with one
+ * MmsDatasetManagerPreResolvedEntry per target that resolved via tier 2 or 3
+ * here, and accumulates every one of those targets' member references
+ * (deduplicated) into *outClaimedLeaves - buildWholeDeviceClusterPlan
+ * subtracts this set from the whole-device leaf pool before chunking, and
+ * excludes any target with an entry here from its own slot list, so a leaf
+ * already covered by a tier 2/3 dataset is never also handed to a different
+ * target's freshly self-created tier-4 cluster.
+ *
+ * Fetches each non-SCL target's live ClientReportControlBlock itself
+ * (IedConnection_getRCBValues, read-only, destroyed before returning) purely
+ * to evaluate tier 2 here - enableOneTarget still performs its OWN
+ * getRCBValues later for the real enable sequence, so this is a genuine
+ * second read per non-SCL target per connect cycle, not reused between the
+ * two. Accepted for v1: bounded, read-only cost - see this function's own
+ * entry in the fix plan for the tradeoff against caching/handing back the
+ * fetched RCB instead (deferred pending real-device measurement). A target
+ * whose getRCBValues fails here is simply left with no preResolvedEntries
+ * entry - it becomes a genuine tier-4 candidate, exactly as if this pass had
+ * never run for it; enableOneTarget's own later getRCBValues will surface the
+ * same failure through its existing handling if it's persistent.
+ *
+ * Never touches tier 4 (self-create) or the cluster plan - those still only
+ * happen inside MmsDatasetManager_resolveForTarget/buildWholeDeviceClusterPlan.
+ * *outClaimedLeaves is always set to a non-NULL (possibly empty) LinkedList
+ * the caller owns: LinkedList_destroyDeep(list, free).
+ */
+void
+MmsDatasetManagerProvisioning_runClaimPass(MmsDatasetManagerHandle handle, LinkedList* outClaimedLeaves);
+
+/* Looks up one target's tier 2/3 outcome from runClaimPass's own
+ * preResolvedEntries list, or NULL if that target never resolved via tier
+ * 2/3 this cycle (a genuine tier-4 candidate). Borrowed - owned by the
+ * session's own preResolvedEntries list. Used by both
+ * buildWholeDeviceClusterPlan (to exclude an already-resolved target from
+ * the slot pool) and MmsDatasetManager_resolveForTarget (to return the
+ * cached outcome instead of re-resolving). */
+MmsDatasetManagerPreResolvedEntry*
+MmsDatasetManagerProvisioning_findPreResolvedEntry(LinkedList preResolvedEntries, const char* rcbReference);
+
+/*
  * Computes, once per connect cycle (called from MmsDatasetManager_beginCycle),
  * a device-WIDE dataset plan covering every "Dyn" (SCL datSet="Dyn",
  * target->datasetReference == NULL) RCB slot on this IED - not just the ones
- * parented on an LN that itself has a Dyn RCB. A Dyn RCB's own parent LN does
+ * parented on an LN that itself has a Dyn RCB, AND not just the ones that
+ * didn't already resolve via MmsDatasetManagerProvisioning_runClaimPass's own
+ * tier 2/3 claim pass (see that function's own doc comment - this is why it
+ * must run first). A Dyn RCB's own parent LN does
  * NOT restrict what a dataset assigned to it can report on (dataset members
  * are independently addressed per-element, not tied to any one LN -
  * IedModel_getReportableAttributeReferencesForWholeDevice's own doc comment
@@ -65,17 +123,31 @@
  * cycle; more slots than clusters means some RCB instances simply have
  * nothing left to assign (the device is already fully covered).
  *
- * Recomputed fresh every connect cycle rather than cached on the handle: a
- * pure function of already-static data (handle->iedModel, handle->targets,
- * both fixed for the handle's whole lifetime), so recomputation is cheap
- * (string work over the model's own size, no wire calls) and idempotent.
+ * Recomputed fresh every connect cycle rather than cached on the handle:
+ * besides handle->iedModel/handle->targets (both fixed for the handle's
+ * whole lifetime), it also depends on `claimedLeaves` - MmsDatasetManagerProvisioning_runClaimPass's
+ * own output, genuinely different every cycle - so recomputation is cheap
+ * (string work over the model's own size, no wire calls) and necessary, not
+ * just idempotent bookkeeping.
+ *
+ * `claimedLeaves` (borrowed, owned char* list - normally
+ * MmsDatasetManagerProvisioning_runClaimPass's own *outClaimedLeaves, called
+ * immediately before this) is subtracted from the whole-device leaf pool
+ * BEFORE chunking (MmsDatasetManagerUseCases_filterOutClaimedLeaves), and the
+ * slot list additionally excludes any target already present in
+ * handle->session.preResolvedEntries - together these two exclusions are what
+ * stop the same reference from landing in both a tier 2/3 target's dataset
+ * and a different target's freshly self-created tier-4 cluster this same
+ * cycle. NULL/empty is a legitimate "nothing was pre-resolved this cycle" and
+ * changes nothing (every reportable leaf and every non-SCL target remains
+ * eligible, same behavior as before this exclusion existed).
  *
  * Returns a LinkedList of owned MmsDatasetManagerChunkAssignment* (never
  * NULL, empty if there is nothing to plan). Caller owns:
  * LinkedList_destroyDeep(list, MmsDatasetManagerProvisioning_destroyChunkAssignment).
  */
 LinkedList
-MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandle handle);
+MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandle handle, LinkedList claimedLeaves);
 
 /* Looks up the cluster this cycle's plan assigned to one RCB, or NULL if that
  * slot got none (the device's reportable data was already fully covered by
@@ -158,5 +230,10 @@ MmsDatasetManagerProvisioning_destroyCacheEntry(void* entry);
 
 void
 MmsDatasetManagerProvisioning_destroyChunkAssignment(void* entry);
+
+/* Same convention, for MmsDatasetManagerProvisioning_runClaimPass's own
+ * session->preResolvedEntries list. NULL-safe. */
+void
+MmsDatasetManagerProvisioning_destroyPreResolvedEntry(void* entry);
 
 #endif /* MMS_DATASET_MANAGER_PROVISIONING_H_ */

@@ -159,6 +159,33 @@ typedef struct {
 } MmsDatasetManagerChunkAssignment;
 
 /*
+ * One target's tier 2/3 outcome, resolved during beginCycle's own claim pass
+ * (MmsDatasetManagerProvisioning_runClaimPass) BEFORE the whole-device
+ * cluster plan is built - see that function's own doc comment for why this
+ * has to be a genuine up-front pass rather than resolved lazily per target.
+ * MmsDatasetManager_resolveForTarget consults this first (after tier 1) and
+ * returns it directly, with no further wire call, if present. A target with
+ * NO entry here never resolved via tier 2/3 this cycle and is a real tier-4
+ * (self-create) candidate - buildWholeDeviceClusterPlan's own slot list is
+ * exactly "every non-SCL target with no entry here".
+ *
+ * Exists so a leaf already covered by one target's tier 2/3 dataset is never
+ * ALSO handed to a different target's freshly self-created tier-4 cluster -
+ * before this, the whole-device leaf pool was built once, upfront, from every
+ * reportable leaf regardless of what tier 2/3 already claimed elsewhere that
+ * same cycle, so the same reference could end up in two different Dyn-managed
+ * datasets bound to two different RCBs - the actual mechanism behind a real
+ * device reporting the same value change 3+ times over different RCBs.
+ */
+typedef struct {
+    char* rcbReference;          /* owned; == the target's own objectReference */
+    char* datasetReference;      /* owned */
+    MmsDatasetTier tier;         /* MMS_DATASET_TIER_LIVE or _ADOPTED only */
+    LinkedList memberReferences; /* owned char* list - this target's real decode shape,
+                                     same convention as MmsDatasetResolution's own field */
+} MmsDatasetManagerPreResolvedEntry;
+
+/*
  * Everything one connect cycle needs: the existing per-target dedup cache,
  * plus TWO budget counters seeded from SCL's own <Services> declarations - one
  * per dataset pool a createDataSet attempt can actually draw from:
@@ -217,6 +244,11 @@ typedef struct {
     LinkedList claimedDatasetNames; /* owned char* list - tracks which existingServerDatasets
                                      entries have already been tried/claimed this cycle, whether
                                      successfully adopted or found unusable. */
+    LinkedList preResolvedEntries; /* owned MmsDatasetManagerPreResolvedEntry* list - every
+                                     target's tier 2/3 outcome, resolved up front by
+                                     MmsDatasetManagerProvisioning_runClaimPass before the
+                                     whole-device cluster plan exists. See that struct's own
+                                     doc comment. */
     bool associationSpecificCreateRejected; /* Latched the first time an association-specific
                                      ("@"-prefixed) createDataSet fails and the domain-scoped
                                      fallback then succeeds. Some real devices (confirmed:

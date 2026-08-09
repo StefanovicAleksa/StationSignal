@@ -279,44 +279,6 @@ typedef struct {
 } MmsReportClientMemberRefCacheEntry;
 
 /*
- * One (reference, value) pair kept by MmsReportClientCrossRcbDedupCache -
- * deliberately not MmsReportEntry itself (which also carries a `reason` this
- * comparison doesn't care about). reference/value are both owned.
- */
-typedef struct {
-    char* reference;
-    MmsValue* value;
-} MmsReportClientDedupEntry;
-
-/*
- * Cross-RCB duplicate-content suppression: a deep copy of the last record
- * this client actually forwarded to reportCallback, from ANY RCB - not to be
- * confused with MmsReportClientMemberRefCacheEntry's per-RCB value-diff
- * cache, which only ever compares a report against that SAME RCB's own
- * history. Some real devices configure multiple reserved/redundant RCB
- * instances on the same LN/dataset for multi-client redundancy (e.g.
- * "urcbA01"/"urcbB01") - both instances report the exact same underlying
- * event at nearly the same moment, and since each RCB's own value-diff cache
- * starts independent, both reports survive their own per-RCB hybrid filter
- * and would otherwise both reach the websocket as apparent duplicates.
- * MmsReportClientUseCases_shouldForwardAcrossRcb is the single decision
- * point: a record whose (reference, value) content exactly matches this
- * cache AND whose rcbReference differs from the one that produced it is
- * suppressed; anything else (first-ever content, a genuine change, or a
- * repeat from the SAME rcbReference - already the per-RCB filter's own
- * concern) updates this cache and is forwarded. Persists across reconnects,
- * same as the per-RCB caches - deliberately not reset in enableOneTarget
- * (unlike MmsReportClientMemberRefCacheEntry.lastForwardedValues), since the
- * duplicate-suppression concern this cache addresses is orthogonal to "did
- * this RCB's own state resync on reconnect".
- */
-typedef struct {
-    char* rcbReference;                  /* owned; NULL means nothing forwarded yet */
-    MmsReportClientDedupEntry* entries;   /* owned array of entryCount owned entries */
-    int entryCount;
-} MmsReportClientCrossRcbDedupCache;
-
-/*
  * A single fully-decoded, fully-owned report. Delivered to the caller's
  * MmsReportClientCallback; the caller owns it after the callback returns and
  * must free it with MmsReportClient_destroyReportRecord.
@@ -393,9 +355,6 @@ struct sMmsReportClientHandle {
                                    from before the disconnect instead of a wiped-clean
                                    cache. See MmsReportClientMemberRefCacheEntry's own
                                    doc comment for the full design. */
-    MmsReportClientCrossRcbDedupCache crossRcbDedupCache; /* zero-initialized by calloc in
-                                   MmsReportClient_create (NULL rcbReference means "nothing
-                                   forwarded yet") - see its own doc comment above */
 
     /* Owned. Everything about WHICH dataset each RCB should report on lives
      * behind this handle - discovering what already exists on the device

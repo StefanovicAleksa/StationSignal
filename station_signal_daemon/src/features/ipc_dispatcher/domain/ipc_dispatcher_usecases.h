@@ -111,4 +111,33 @@ IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sour
 void
 IpcDispatcherUseCases_freeMessage(IpcMessage* message);
 
+/*
+ * True (forward) unless an entry already in `cache` has the SAME reference,
+ * SAME value (deep compare) AND SAME (hasQuality, quality) as this candidate,
+ * but a DIFFERENT sourceId - i.e. a different RCB/GoCB of the SAME protocol
+ * just forwarded this exact content, the daemon-side redundant-coverage
+ * signature this exists to catch (see IpcDispatcherDedupCache's own doc
+ * comment, ipc_dispatcher_types.h). A repeat from the SAME sourceId is left
+ * entirely to that source's own per-position value-diff cache
+ * (mms_report_client's/goose_subscriber's own, unchanged) - this function
+ * only ever concerns itself with cross-source duplication within one
+ * protocol's own cache instance.
+ *
+ * ALWAYS inserts/overwrites a ring slot with this (sourceId, reference,
+ * value, quality) regardless of the outcome, so a later duplicate from a
+ * THIRD source can still match against it. Caller must call this once per
+ * candidate data point, in point order, before deciding whether to include
+ * it in the outbound message. Not thread-safe on its own - see
+ * data/ipc_dispatcher_dedup_cache.h for the lock-guarded wrapper both
+ * adapters actually call.
+ */
+bool
+IpcDispatcherUseCases_shouldForwardWithinProtocol(IpcDispatcherDedupCache* cache, const char* sourceId,
+        const char* reference, const IpcScalarValue* value, bool hasQuality, IpcQuality quality);
+
+/* Frees every owned string/value in `cache`'s filled slots and resets it to
+ * empty. NULL-safe, safe to call twice. */
+void
+IpcDispatcherUseCases_destroyDedupCache(IpcDispatcherDedupCache* cache);
+
 #endif /* IPC_DISPATCHER_USECASES_H_ */

@@ -118,39 +118,6 @@ uint32_t
 GooseSubscriberUseCases_computeLivenessPollIntervalMs(uint32_t configuredMs, int32_t minTalMs);
 
 /*
- * Cross-target duplicate-content suppression - see
- * GooseSubscriberRecentForwardCache's own doc comment for the full
- * rationale (independent GoCBs publishing the same underlying event).
- *
- * Filters entries IN PLACE, per individual entry rather than the whole
- * record at once: any entry whose (reference, value) exactly matches a
- * recently-forwarded entry from a DIFFERENT goCbRef is the same physical
- * event already reported by another GoCB, and is dropped (its owned
- * value/reference/previousValue freed) - unlike a whole-record comparison,
- * this survives two GoCBs whose datasets differ in shape/order/count, since
- * only the genuinely-shared reference needs to match, not the rest of each
- * dataset. Surviving entries are compacted to the front of `entries` and
- * recorded into the cache under this record's own goCbRef, so a later
- * GoCB's matching entry is caught too - a suppressed duplicate never
- * disturbs established history, but every surviving entry extends it.
- * Deliberately content-only, no timestamp - see the cache struct's own doc
- * comment for why an earlier timestamp-gated revision let real duplicates
- * through. Returns the surviving entry count (0 means nothing left to
- * forward from this record; unchanged from entryCount if cache is NULL).
- */
-int
-GooseSubscriberUseCases_filterRecentForwardDuplicates(GooseSubscriberRecentForwardCache* cache,
-        const char* goCbRef, GooseSubscriberEntry* entries, int entryCount);
-
-/* Frees every filled slot's owned goCbRef/reference/value and resets the
- * cache back to empty ("nothing forwarded yet"). NULL-safe. Used both
- * internally by GooseSubscriberUseCases_filterRecentForwardDuplicates (to
- * evict the oldest slot on wraparound) and by GooseSubscription_destroy
- * (final cleanup). */
-void
-GooseSubscriberUseCases_destroyRecentForwardCache(GooseSubscriberRecentForwardCache* cache);
-
-/*
  * Pure GOOSE-heartbeat dedup check. A publisher retransmits at every
  * MinTime/MaxTime interval regardless of whether the data changed (sqNum
  * increments on every retransmit; stNum only increments on an actual

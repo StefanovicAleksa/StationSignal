@@ -153,32 +153,25 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     }
 
     /* record->entryCount > 0: survived the per-RCB hybrid event filter.
-     * shouldForwardAcrossRcb is the second, independent gate: even a report
-     * that's genuinely new/changed AS FAR AS THIS RCB IS CONCERNED can still
-     * be an exact duplicate of what a DIFFERENT (often redundant/reserved)
-     * RCB on this same client just forwarded a moment earlier - see
-     * MmsReportClientCrossRcbDedupCache's own doc comment. */
-    if (record->entryCount > 0 && MmsReportClientUseCases_shouldForwardAcrossRcb(
-            &handle->crossRcbDedupCache, record->rcbReference, record->entries, record->entryCount)) {
+     * Cross-RCB duplicate-content suppression (a different, often
+     * redundant/reserved RCB forwarding this exact same content) is no
+     * longer this feature's concern - ipc_dispatcher's own dedup cache
+     * (IpcDispatcherUseCases_shouldForwardWithinProtocol) catches it
+     * downstream instead, at the one point both this feature's RCBs AND
+     * goose_subscriber's GoCBs actually converge. */
+    if (record->entryCount > 0) {
         fprintf(stderr, "[mms_report_client] forwarding report for '%s' (%d entr%s) to ipc_dispatcher\n",
                 rcbReference ? rcbReference : "?", record->entryCount, record->entryCount == 1 ? "y" : "ies");
         handle->reportCallback(handle->reportCallbackParam, record);
     } else {
-        /* Either every entry was filtered by the per-RCB hybrid event filter
-         * (a periodic/no-reason entry whose value matched the last one
-         * forwarded for THIS RCB), or this exact content was just forwarded
-         * a moment ago from a different RCB - nothing worth forwarding to
-         * ipc_dispatcher either way. The callback (which would otherwise own
-         * destroying this record) never runs, so free it here instead. */
-        if (record->entryCount == 0) {
-            fprintf(stderr, "[mms_report_client] report for '%s' had %d raw entr%s, 0 survived the "
-                    "per-RCB value-diff filter (bootstrap-seed or unchanged) - nothing forwarded\n",
-                    rcbReference ? rcbReference : "?", entryCount, entryCount == 1 ? "y" : "ies");
-        } else {
-            fprintf(stderr, "[mms_report_client] report for '%s' (%d entr%s) dropped by cross-RCB dedup - "
-                    "identical content already forwarded from another RCB\n",
-                    rcbReference ? rcbReference : "?", record->entryCount, record->entryCount == 1 ? "y" : "ies");
-        }
+        /* Every entry was filtered by the per-RCB hybrid event filter (a
+         * periodic/no-reason entry whose value matched the last one forwarded
+         * for THIS RCB) - nothing worth forwarding to ipc_dispatcher. The
+         * callback (which would otherwise own destroying this record) never
+         * runs, so free it here instead. */
+        fprintf(stderr, "[mms_report_client] report for '%s' had %d raw entr%s, 0 survived the "
+                "per-RCB value-diff filter (bootstrap-seed or unchanged) - nothing forwarded\n",
+                rcbReference ? rcbReference : "?", entryCount, entryCount == 1 ? "y" : "ies");
         MmsReportClientUseCases_freeReportRecord(record);
     }
 }

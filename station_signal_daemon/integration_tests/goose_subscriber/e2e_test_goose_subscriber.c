@@ -53,14 +53,33 @@ static char lastEntry1Reference[256];
 static void
 onStatus(void* userParam, const char* goCbRef, GooseSubscriberStatus status, GooseParseError lastParseError) {
     (void) userParam;
-    (void) goCbRef;
     (void) lastParseError;
+    /* This fixture also declares "gcbDup" (same ds1 dataset as gcbInd,
+     * reproducing a real network's redundant-publisher pattern) - these two
+     * tests are specifically about gcbInd's own bootstrap-suppression/
+     * data-change behavior, so gcbDup's own independent status transitions
+     * must not be observed here. Cross-target duplicate content is no longer
+     * suppressed at this layer at all (see
+     * test_crossTargetDuplicateContent_bothIdenticalGoCbsReachCallback_dedupMovedDownstream
+     * below) - both gcbInd and gcbDup now genuinely reach a real callback,
+     * so a test that only cares about one of them must filter for it
+     * itself. */
+    if (goCbRef && strcmp(goCbRef, EXPECTED_GOCB_REF) != 0) return;
     if (status == GOOSE_SUBSCRIBER_STATUS_VALID) sawValidStatus = true;
 }
 
 static void
 onRecord(void* userParam, const GooseSubscriberRecord* record) {
     (void) userParam;
+
+    /* Same gcbInd-only scoping as onStatus above - gcbDup's own independent
+     * reports (real, no longer suppressed) must not be observed by these two
+     * gcbInd-specific tests. */
+    if (!record->goCbRef || strcmp(record->goCbRef, EXPECTED_GOCB_REF) != 0) {
+        GooseSubscription_destroyRecord((GooseSubscriberRecord*) record);
+        return;
+    }
+
     anyRecordReceived = true;
 
     strncpy(lastGoCbRef, record->goCbRef ? record->goCbRef : "", sizeof(lastGoCbRef) - 1);
@@ -281,15 +300,23 @@ waitUntilAtLeast(volatile int* counter, int threshold) {
 }
 
 /*
- * Proves GooseSubscriberUseCases_filterRecentForwardDuplicates end-to-end:
+ * Proves goose_subscriber's own recordCallback is now deliberately NOT the
+ * layer that suppresses cross-GoCB duplicate content - that job moved to
+ * ipc_dispatcher's own per-protocol dedup cache
+ * (IpcDispatcherUseCases_shouldForwardWithinProtocol, proven in
+ * integration_tests/ipc_dispatcher/ and unit-tested in
+ * tests/ipc_dispatcher/test_ipc_dispatcher_usecases.c), the one place both
+ * this feature's GoCBs AND mms_report_client's RCBs actually converge.
+ *
  * gcbInd and gcbDup (fixtures/reporter1.cid) are two independently-subscribed
  * GoCBs publishing the IDENTICAL ds1 dataset - reproducing a real network's
  * redundant-publisher pattern. Flipping GGIO1.Ind1.stVal changes both
- * publishers' state at nearly the same moment; only one of the two resulting
- * identical-content records must ever reach the record callback.
+ * publishers' state at nearly the same moment; BOTH resulting
+ * identical-content records must now reach the record callback - this
+ * feature no longer decides which of them is "the" real one.
  */
 void
-test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback(void) {
+test_crossTargetDuplicateContent_bothIdenticalGoCbsReachCallback_dedupMovedDownstream(void) {
     SimServer sim = SimServer_create();
     SimServer_start(sim, TEST_TCP_PORT);
 
@@ -316,17 +343,18 @@ test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback(void)
 
     SimServer_setIndication(sim, true);
 
-    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.gcbIndOrDupRecordCount, 1),
-            "expected at least one of gcbInd/gcbDup's identical new-value frames to reach the callback");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.gcbIndOrDupRecordCount, 2),
+            "expected BOTH gcbInd's and gcbDup's identical new-value frames to reach the callback - "
+            "goose_subscriber itself no longer suppresses cross-GoCB duplicates, ipc_dispatcher's "
+            "own dedup cache does that downstream instead");
 
-    /* Generous settle window for a hypothetical duplicate (the bug this test
-     * guards against) to also arrive - loopback GOOSE delivery is on the
-     * order of a few ms, so this is a large safety margin, not a tight race. */
+    /* Generous settle window to make sure no MORE than 2 ever arrive (a
+     * regression the other direction - e.g. a redelivery bug). */
     Thread_sleep(500);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, state.gcbIndOrDupRecordCount,
-            "gcbInd and gcbDup publish byte-identical content (same ds1 dataset) - only one must "
-            "reach the callback, the other must be suppressed as a cross-target duplicate");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, state.gcbIndOrDupRecordCount,
+            "gcbInd and gcbDup publish byte-identical content (same ds1 dataset) - both must reach "
+            "this feature's own callback now; suppression is entirely ipc_dispatcher's concern");
 
     GooseSubscription_destroy(handle);
     IedModel_release(iedModel);
@@ -340,7 +368,7 @@ main(void) {
 
     RUN_TEST(test_dataChangeOnServer_triggersGooseRecordWithNewValue);
     RUN_TEST(test_firstFrameEverPerTarget_neverReachesCallback);
-    RUN_TEST(test_crossTargetDuplicateContent_onlyOneOfTwoIdenticalGoCbsReachesCallback);
+    RUN_TEST(test_crossTargetDuplicateContent_bothIdenticalGoCbsReachCallback_dedupMovedDownstream);
 
     return UNITY_END();
 }

@@ -95,12 +95,11 @@ MmsDatasetManagerUseCases_extractDoGroupKey(const char* memberReference);
  * once that path has discovered a working size limit some other way; it
  * doesn't care where maxAttributes came from.
  *
- * NOTE: currently has NO production caller - whole-device clustering
- * (MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan) supplanted it
- * with the cross-LN-safe _chunkReferencesAcrossWholeDevice below. Kept, and
- * kept under test, because it is the per-LN granularity the deferred no-SCL
- * path above would want back; deleting it is a separate decision from the
- * feature split that moved it here.
+ * Also the split strategy _chunkReferencesAcrossWholeDevice below falls back
+ * to for a single oversized LN's own leaves (a whole-device chunk may never
+ * mix a different LN's leaves with a split LN's spillover - see that
+ * function's own doc comment), on top of remaining the per-LN granularity a
+ * deferred no-SCL empirical-discovery path would want back.
  *
  * maxAttributes <= 0 or count <= 0 returns an empty list (nothing to chunk).
  * Returns a LinkedList of LinkedList-of-owned-char*, one inner list per chunk
@@ -112,23 +111,49 @@ LinkedList
 MmsDatasetManagerUseCases_chunkReferencesByDoGroup(const char* const* references, int count, int maxAttributes);
 
 /*
- * Whole-device counterpart of MmsDatasetManagerUseCases_chunkReferencesByDoGroup -
- * identical greedy, order-preserving, DO-atomic packing strategy and identical
- * calling convention/ownership rules, but safe for `references` spanning
- * MULTIPLE LNs (e.g. IedModel_getReportableAttributeReferencesForWholeDevice's
- * own output) rather than one LN's own leaf list. The only difference is the
- * internal grouping key: it includes the "LD/LN" prefix, not just the bare DO
- * name, so two different LNs that happen to share a DO name (e.g. "Mod") can
- * never be wrongly merged into one atomic group just because they land
- * adjacent in the flat list - see the .c file's extractLnAndDoGroupKey for
- * the full reasoning. A resulting chunk MAY legitimately span several
- * different (small) LNs' worth of leaves when they fit together under
- * maxAttributes, maximizing device coverage within a tight total
- * dataset-count budget - this is the intended behavior, not a bug.
+ * Whole-device counterpart of MmsDatasetManagerUseCases_chunkReferencesByDoGroup,
+ * safe for `references` spanning MULTIPLE LNs (e.g.
+ * IedModel_getReportableAttributeReferencesForWholeDevice's own output)
+ * rather than one LN's own leaf list. LN-preserving: internally groups by LN
+ * first (via groupReferencesByLn) and packs WHOLE LN groups into a chunk
+ * while they fit under maxAttributes - a resulting chunk MAY legitimately
+ * span several different (small) LNs' worth of leaves when EVERY contributing
+ * LN fits entirely, maximizing device coverage within a tight total
+ * dataset-count budget (this combining is the intended behavior, not a bug).
+ * What it never does: mix a different LN's leaves into a chunk that already
+ * holds a PARTIAL spillover from a different, oversized LN - a single LN
+ * whose own leaf count exceeds maxAttributes is instead split DO-atomically
+ * (via chunkReferencesByDoGroup, scoped to that LN alone) into one or more
+ * chunks reserved for that LN only. Earlier versions of this function grouped
+ * purely by "LD/LN$FC$DO" key and bin-packed consecutive DO-groups by fit
+ * alone, with no LN-boundary awareness at all - a chunk (and therefore the
+ * one RCB dataset it becomes) could freely mix the tail of one LN with the
+ * head of a completely unrelated one, with no functional/semantic
+ * relationship between the values it grouped together. That "no intent"
+ * grouping is fixed here; see MmsDatasetManagerProvisioning_runClaimPass for
+ * the separate (and more consequential) fix to the same-reference-in-two-
+ * datasets duplication this whole-device pool could otherwise still produce.
  */
 LinkedList
 MmsDatasetManagerUseCases_chunkReferencesAcrossWholeDevice(const char* const* references, int count,
         int maxAttributes);
+
+/*
+ * String-set difference: returns the subset of `leaves` NOT present in
+ * `claimedLeaves` (owned char* list), preserving `leaves`' own order. Used by
+ * MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan to exclude
+ * whatever MmsDatasetManagerProvisioning_runClaimPass's own tier 2/3 claim
+ * pass already covered elsewhere this cycle, before chunking the remainder -
+ * see that pass's own doc comment for why this exclusion matters. `leaves`
+ * NULL/count<=0 or `claimedLeaves` NULL/empty returns a full copy (nothing to
+ * exclude). Pure string comparison, no third-party/network calls - takes a
+ * LinkedList for `claimedLeaves` (rather than a plain array like `leaves`)
+ * purely because that's the natural shape the claim pass already builds it
+ * in; still no library/data-layer dependency. Caller owns the result:
+ * LinkedList_destroyDeep(result, free).
+ */
+LinkedList
+MmsDatasetManagerUseCases_filterOutClaimedLeaves(const char* const* leaves, int count, LinkedList claimedLeaves);
 
 /*
  * Groups `references` (spanning multiple LNs, e.g.

@@ -612,26 +612,21 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * self-create) and every rule behind it. This feature only consumes the
      * answer: bind it, enable the RCB, decode its reports.
      *
-     * `rcb` is passed in already-fetched and is only READ there (tier 2 needs
-     * this RCB's own live DatSet), so resolution costs no extra round-trip and
-     * cannot mutate anything the sequence below depends on.
+     * Tiers 2/3 no longer read `rcb` here at all - mms_dataset_manager's own
+     * claim pass (MmsDatasetManagerProvisioning_runClaimPass, run once for
+     * every target from MmsDatasetManager_beginCycle, before this cycle's
+     * whole-device cluster plan even exists) already resolved them with its
+     * own separately-fetched RCB, so this call is a pure lookup for tiers 1-3
+     * and only touches the wire itself for a genuine tier-4 self-create.
      *
      * The resolution owns its own strings; resolution.datasetReference is an
-     * OWNED copy, deliberately not the borrowed pointer the tiers work with
-     * internally. Tier 2's borrowed pointer would alias `rcb`'s internal
-     * MmsValue buffer (ClientReportControlBlock_getDataSetReference returns
-     * MmsValue_toString of rcb->datSet), and the step-1 write below feeds it
-     * straight back into ClientReportControlBlock_setDataSetReference, whose
-     * MmsValue_setVisibleString frees and reallocates that exact buffer
-     * whenever the new string is longer than the old one - i.e. the argument
-     * and the destination would be the same allocation. Benign in practice
-     * (same string, same length, so the realloc branch is never taken), but it
-     * is the identical aliasing bug already fixed once on the stop path, and
-     * owning the string removes the hazard outright.
+     * OWNED copy, deliberately not a borrowed alias into anything internal to
+     * mms_dataset_manager - see MmsDatasetResolution's own doc comment
+     * (mms_dataset_manager_types.h) for the aliasing hazard this avoids.
      *
      * Every exit path from here on MUST MmsDatasetManager_destroyResolution. */
     MmsDatasetResolution resolution;
-    MmsDatasetManager_resolveForTarget(handle->datasetManager, target, rcb, &resolution);
+    MmsDatasetManager_resolveForTarget(handle->datasetManager, target, &resolution);
 
     /* Decode-shape reconciliation stays HERE, not in the dataset manager: it
      * mutates THIS feature's own memberRefCache under THIS feature's own

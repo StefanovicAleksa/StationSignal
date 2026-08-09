@@ -153,6 +153,45 @@ typedef struct {
 } IpcDispatcherConfig;
 
 /*
+ * One recently-forwarded data point's content plus which source produced it -
+ * sourceId is the MMS rcbReference or GOOSE goCbRef that forwarded it. Used
+ * by IpcDispatcherUseCases_shouldForwardWithinProtocol (domain/ipc_dispatcher_usecases.h)
+ * to catch the SAME real change forwarded redundantly by two DIFFERENT
+ * sources of the SAME protocol (e.g. three MMS RCBs all covering the same
+ * underlying reference) - see that function's own doc comment. Two separate
+ * instances exist (data/ipc_dispatcher_dedup_cache.c wraps one each for MMS
+ * and GOOSE, on sIpcDispatcherHandle below) - MMS and GOOSE are never
+ * cross-checked against each other, since a real SCL can legitimately wire
+ * both protocols to the same point on purpose (two independent wire paths),
+ * unlike two RCBs/GoCBs of the SAME protocol landing on the same content,
+ * which is the daemon's own dataset-assignment redundancy this exists to
+ * catch. A bounded ring, not a single slot - a single "last forwarded" slot
+ * (this codebase's own earlier per-feature designs, both since superseded by
+ * this shared cache) is too easily defeated by interleaved traffic from
+ * unrelated sources: an unrelated report/frame landing between two
+ * duplicates clobbers the one slot before the real duplicate arrives.
+ */
+typedef struct {
+    char* sourceId;   /* owned; NULL means an empty slot */
+    char* reference;  /* owned */
+    IpcScalarValue value; /* owned deep copy - see cloneScalarValue in ipc_dispatcher_usecases.c */
+    bool hasQuality;
+    IpcQuality quality;
+} IpcDispatcherDedupEntry;
+
+/* Ring capacity - mirrors GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY's own
+ * proven-sufficient sizing (goose_subscriber_types.h), generous enough that
+ * an interleaved burst of unrelated traffic from other sources doesn't evict
+ * the entry a later duplicate needs to match against. */
+#define IPC_DISPATCHER_DEDUP_CAPACITY 128
+
+typedef struct {
+    IpcDispatcherDedupEntry history[IPC_DISPATCHER_DEDUP_CAPACITY];
+    int count;    /* valid slots filled so far, caps at capacity */
+    int nextSlot; /* ring write cursor - wraps and overwrites the oldest slot once full */
+} IpcDispatcherDedupCache;
+
+/*
  * Opaque forward declarations only - full struct defs live entirely inside
  * data/ipc_dispatcher_ring_buffer.c / data/ipc_dispatcher_ws_server.c (unlike
  * every sibling feature's struct s*Handle, nothing outside those two .c files
@@ -163,6 +202,7 @@ typedef struct {
  */
 struct sIpcDispatcherRingBuffer;
 struct sIpcDispatcherWsServer;
+struct sIpcDispatcherDedupCache;
 
 /*
  * Internal representation. Defined here (rather than hidden behind an
@@ -177,6 +217,12 @@ struct sIpcDispatcherHandle {
     struct sIpcDispatcherRingBuffer* ringBuffer; /* owned, created in IpcDispatcher_create */
     struct sIpcDispatcherWsServer* wsServer;     /* owned, created/destroyed in _start/_stop - NULL when not running */
     volatile bool running;
+
+    /* One dedup cache per protocol - see IpcDispatcherDedupCache's own doc
+     * comment for why MMS and GOOSE are never cross-checked against each
+     * other. Owned, created in IpcDispatcher_create, destroyed in _destroy. */
+    struct sIpcDispatcherDedupCache* mmsDedupCache;
+    struct sIpcDispatcherDedupCache* gooseDedupCache;
 };
 
 typedef struct sIpcDispatcherHandle* IpcDispatcherHandle;

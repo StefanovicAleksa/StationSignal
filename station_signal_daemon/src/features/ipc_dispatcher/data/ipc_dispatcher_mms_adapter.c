@@ -5,6 +5,7 @@
 #include "features/ipc_dispatcher/data/ipc_dispatcher_json_writer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ring_buffer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
+#include "features/ipc_dispatcher/data/ipc_dispatcher_dedup_cache.h"
 
 void
 IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReportRecord* record) {
@@ -94,6 +95,19 @@ IpcDispatcherMmsAdapter_handleReport(IpcDispatcherHandle handle, const MmsReport
                     pointHasPreviousQuality[out] = IpcDispatcherValueCodec_decodeQuality(
                             record->entries[qi].previousValue, &pointPreviousQuality[out]);
                 }
+            }
+
+            /* Cross-RCB dedup, same protocol only - catches the SAME real
+             * change already forwarded by a DIFFERENT MMS RCB this instant
+             * (e.g. a Dyn-managed dataset that still overlaps another RCB's
+             * static/adopted one) - see IpcDispatcherUseCases_shouldForwardWithinProtocol's
+             * own doc comment. Must run after every override above so it
+             * compares the FINAL value (post Dbpos-label correction). */
+            if (!IpcDispatcherDedupCache_shouldForward(handle->mmsDedupCache, record->rcbReference, pointRefs[out],
+                    &pointValues[out], pointHasQuality[out], pointQuality[out])) {
+                IpcDispatcherValueCodec_freeScalar(&pointValues[out]);
+                if (pointHasPreviousValue[out]) IpcDispatcherValueCodec_freeScalar(&pointPreviousValue[out]);
+                continue;
             }
 
             out++;

@@ -249,7 +249,6 @@ MmsReportClient_destroy(MmsReportClientHandle client) {
     if (client->memberRefCache) {
         LinkedList_destroyDeep(client->memberRefCache, MmsReportClientUseCases_destroyMemberRefCacheEntry);
     }
-    MmsReportClientUseCases_destroyCrossRcbDedupCache(&client->crossRcbDedupCache);
     free(client->host);
     free(client->ownedAuthPassword);
     free(client);

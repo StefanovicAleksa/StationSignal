@@ -384,6 +384,50 @@ test_chunkReferencesAcrossWholeDevice_oversizedSingleDoGroup_becomesItsOwnChunkE
 }
 
 void
+test_chunkReferencesAcrossWholeDevice_oversizedLnSpilloverNeverMixesWithDifferentLn(void) {
+    /* LN_A (LLN0, 2 members) fits comfortably. It's immediately followed by
+     * LN_B (blkGGIO5), whose own two DOs total 7 members - more than
+     * maxAttributes=5, so LN_B alone must be split. The old (pre-LN-
+     * preserving) algorithm would have merged LN_A's 2 members with LN_B's
+     * first DO-group (2 members, size 4 <= 5) into one chunk, mixing two
+     * unrelated LNs' data in a single RCB's dataset purely because they fit -
+     * exactly the "no intent" bug. The fix must instead give LN_A its own,
+     * untouched chunk, and split LN_B's own leaves DO-atomically into chunks
+     * reserved for LN_B alone. */
+    const char* refs[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q",
+        "IED1LD1/blkGGIO5$ST$Ind1$stVal", "IED1LD1/blkGGIO5$ST$Ind1$q",
+        "IED1LD1/blkGGIO5$ST$Ind2$stVal", "IED1LD1/blkGGIO5$ST$Ind2$q",
+        "IED1LD1/blkGGIO5$ST$Ind2$t", "IED1LD1/blkGGIO5$ST$Ind2$subEna",
+        "IED1LD1/blkGGIO5$ST$Ind2$blkEna",
+    };
+    LinkedList chunks = MmsDatasetManagerUseCases_chunkReferencesAcrossWholeDevice(refs, 9, 5);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, LinkedList_size(chunks),
+            "LN_A, LN_B's Ind1 group, and LN_B's Ind2 group must each land in their own chunk - "
+            "never mixed with each other");
+
+    LinkedList chunk0 = (LinkedList) LinkedList_getData(LinkedList_getNext(chunks));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, LinkedList_size(chunk0), "LN_A's own chunk must contain ONLY its own 2 members");
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk0)));
+
+    LinkedList chunk1 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(chunks)));
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(chunk1));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/blkGGIO5$ST$Ind1$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk1)));
+
+    LinkedList chunk2 = (LinkedList) LinkedList_getData(LinkedList_getNext(LinkedList_getNext(LinkedList_getNext(chunks))));
+    TEST_ASSERT_EQUAL_INT(5, LinkedList_size(chunk2));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/blkGGIO5$ST$Ind2$stVal", (char*) LinkedList_getData(LinkedList_getNext(chunk2)));
+
+    LinkedList chunkElement = LinkedList_getNext(chunks);
+    while (chunkElement) {
+        LinkedList_destroyDeep((LinkedList) LinkedList_getData(chunkElement), free);
+        chunkElement = LinkedList_getNext(chunkElement);
+    }
+    LinkedList_destroyStatic(chunks);
+}
+
+void
 test_chunkReferencesAcrossWholeDevice_maxAttributesZeroOrNegative_returnsEmpty(void) {
     const char* refs[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
 
@@ -466,6 +510,83 @@ test_groupReferencesByLn_nullReferences_returnsEmpty(void) {
     TEST_ASSERT_NOT_NULL(groups);
     TEST_ASSERT_EQUAL_INT(0, LinkedList_size(groups));
     LinkedList_destroyStatic(groups);
+}
+
+/* ---- filterOutClaimedLeaves (whole-device clustering: excludes leaves
+ * another target already claimed via tier 2/3 this cycle, before chunking -
+ * see MmsDatasetManagerProvisioning_runClaimPass's own doc comment) ---- */
+
+void
+test_filterOutClaimedLeaves_emptyClaimedSet_returnsFullCopyUnchanged(void) {
+    const char* leaves[] = { "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q" };
+    LinkedList claimed = LinkedList_create();
+
+    LinkedList result = MmsDatasetManagerUseCases_filterOutClaimedLeaves(leaves, 2, claimed);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(result));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/LLN0$ST$Mod$stVal", (char*) LinkedList_getData(LinkedList_getNext(result)));
+
+    LinkedList_destroyDeep(result, free);
+    LinkedList_destroyStatic(claimed);
+}
+
+void
+test_filterOutClaimedLeaves_fullOverlap_returnsEmpty(void) {
+    const char* leaves[] = { "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/LLN0$ST$Mod$q" };
+    LinkedList claimed = LinkedList_create();
+    LinkedList_add(claimed, strdup("IED1LD1/LLN0$ST$Mod$stVal"));
+    LinkedList_add(claimed, strdup("IED1LD1/LLN0$ST$Mod$q"));
+
+    LinkedList result = MmsDatasetManagerUseCases_filterOutClaimedLeaves(leaves, 2, claimed);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, LinkedList_size(result), "every leaf already claimed - nothing left over");
+
+    LinkedList_destroyStatic(result);
+    LinkedList_destroyDeep(claimed, free);
+}
+
+void
+test_filterOutClaimedLeaves_partialOverlap_keepsOnlyUnclaimed(void) {
+    const char* leaves[] = {
+        "IED1LD1/LLN0$ST$Mod$stVal", "IED1LD1/blkGGIO2$ST$Ind1$stVal", "IED1LD1/blkGGIO2$ST$Ind1$q",
+    };
+    LinkedList claimed = LinkedList_create();
+    LinkedList_add(claimed, strdup("IED1LD1/LLN0$ST$Mod$stVal"));
+
+    LinkedList result = MmsDatasetManagerUseCases_filterOutClaimedLeaves(leaves, 3, claimed);
+
+    TEST_ASSERT_EQUAL_INT(2, LinkedList_size(result));
+    TEST_ASSERT_EQUAL_STRING("IED1LD1/blkGGIO2$ST$Ind1$stVal",
+            (char*) LinkedList_getData(LinkedList_getNext(result)));
+
+    LinkedList_destroyDeep(result, free);
+    LinkedList_destroyDeep(claimed, free);
+}
+
+void
+test_filterOutClaimedLeaves_nullClaimedList_returnsFullCopy(void) {
+    const char* leaves[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList result = MmsDatasetManagerUseCases_filterOutClaimedLeaves(leaves, 1, NULL);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(result));
+    LinkedList_destroyDeep(result, free);
+}
+
+void
+test_filterOutClaimedLeaves_nullLeavesOrZeroCount_returnsEmpty(void) {
+    LinkedList claimed = LinkedList_create();
+
+    LinkedList resultNull = MmsDatasetManagerUseCases_filterOutClaimedLeaves(NULL, 3, claimed);
+    TEST_ASSERT_NOT_NULL(resultNull);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(resultNull));
+    LinkedList_destroyStatic(resultNull);
+
+    const char* leaves[] = { "IED1LD1/LLN0$ST$Mod$stVal" };
+    LinkedList resultZero = MmsDatasetManagerUseCases_filterOutClaimedLeaves(leaves, 0, claimed);
+    TEST_ASSERT_NOT_NULL(resultZero);
+    TEST_ASSERT_EQUAL_INT(0, LinkedList_size(resultZero));
+    LinkedList_destroyStatic(resultZero);
+
+    LinkedList_destroyStatic(claimed);
 }
 
 /* ---- convertAcsiRefToMemberReference (tier-2 pulled-dataset ACSI -> this
@@ -567,6 +688,7 @@ main(void) {
     RUN_TEST(test_chunkReferencesAcrossWholeDevice_combinesTwoSmallLnsIntoOneChunk);
     RUN_TEST(test_chunkReferencesAcrossWholeDevice_sameDoNameOnDifferentLns_neverMergedAsOneGroup);
     RUN_TEST(test_chunkReferencesAcrossWholeDevice_oversizedSingleDoGroup_becomesItsOwnChunkExceedingCap);
+    RUN_TEST(test_chunkReferencesAcrossWholeDevice_oversizedLnSpilloverNeverMixesWithDifferentLn);
     RUN_TEST(test_chunkReferencesAcrossWholeDevice_maxAttributesZeroOrNegative_returnsEmpty);
     RUN_TEST(test_chunkReferencesAcrossWholeDevice_nullReferences_returnsEmpty);
 
@@ -574,6 +696,12 @@ main(void) {
     RUN_TEST(test_groupReferencesByLn_noSizeCap_oneLnWithManyLeavesStaysOneGroup);
     RUN_TEST(test_groupReferencesByLn_countZeroOrNegative_returnsEmpty);
     RUN_TEST(test_groupReferencesByLn_nullReferences_returnsEmpty);
+
+    RUN_TEST(test_filterOutClaimedLeaves_emptyClaimedSet_returnsFullCopyUnchanged);
+    RUN_TEST(test_filterOutClaimedLeaves_fullOverlap_returnsEmpty);
+    RUN_TEST(test_filterOutClaimedLeaves_partialOverlap_keepsOnlyUnclaimed);
+    RUN_TEST(test_filterOutClaimedLeaves_nullClaimedList_returnsFullCopy);
+    RUN_TEST(test_filterOutClaimedLeaves_nullLeavesOrZeroCount_returnsEmpty);
 
     RUN_TEST(test_convertAcsiRefToMemberReference_doLevelRef_preservesLdPrefix);
     RUN_TEST(test_convertAcsiRefToMemberReference_leafRef_joinsDoAndDaWithDollar);

@@ -175,6 +175,93 @@ IpcDispatcherUseCases_assembleMessage(IpcSourceType sourceType, const char* sour
     return message;
 }
 
+static bool
+scalarValuesEqual(const IpcScalarValue* a, const IpcScalarValue* b) {
+    if (a->type != b->type) return false;
+    switch (a->type) {
+        case IPC_SCALAR_BOOL: return a->value.b == b->value.b;
+        case IPC_SCALAR_INT64: return a->value.i64 == b->value.i64;
+        case IPC_SCALAR_UINT64: return a->value.u64 == b->value.u64;
+        case IPC_SCALAR_DOUBLE: return a->value.d == b->value.d;
+        case IPC_SCALAR_STRING:
+        case IPC_SCALAR_RAW:
+            if (!a->value.str || !b->value.str) return a->value.str == b->value.str;
+            return strcmp(a->value.str, b->value.str) == 0;
+        default: return false;
+    }
+}
+
+static void
+freeDedupEntry(IpcDispatcherDedupEntry* slot) {
+    free(slot->sourceId);
+    free(slot->reference);
+    if (slot->value.type == IPC_SCALAR_STRING || slot->value.type == IPC_SCALAR_RAW) {
+        free(slot->value.value.str);
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
+static bool
+dedupEntryMatches(const IpcDispatcherDedupEntry* slot, const char* sourceId, const char* reference,
+        const IpcScalarValue* value, bool hasQuality, IpcQuality quality) {
+    /* Same source (or either side missing an id) is not this layer's concern -
+     * left to that source's own per-position value-diff cache. */
+    if (!slot->sourceId || !sourceId || strcmp(slot->sourceId, sourceId) == 0) return false;
+
+    if ((slot->reference == NULL) != (reference == NULL)) return false;
+    if (slot->reference && reference && strcmp(slot->reference, reference) != 0) return false;
+
+    if (!scalarValuesEqual(&slot->value, value)) return false;
+
+    if (slot->hasQuality != hasQuality) return false;
+    if (hasQuality && (slot->quality.validity != quality.validity || slot->quality.detailFlags != quality.detailFlags)) {
+        return false;
+    }
+
+    return true;
+}
+
+static void
+pushDedupEntry(IpcDispatcherDedupCache* cache, const char* sourceId, const char* reference,
+        const IpcScalarValue* value, bool hasQuality, IpcQuality quality) {
+    IpcDispatcherDedupEntry* slot = &cache->history[cache->nextSlot];
+    if (cache->count == IPC_DISPATCHER_DEDUP_CAPACITY) freeDedupEntry(slot);
+
+    slot->sourceId = dupString(sourceId);
+    slot->reference = dupString(reference);
+    slot->value = cloneScalarValue(value);
+    slot->hasQuality = hasQuality;
+    slot->quality = quality;
+
+    cache->nextSlot = (cache->nextSlot + 1) % IPC_DISPATCHER_DEDUP_CAPACITY;
+    if (cache->count < IPC_DISPATCHER_DEDUP_CAPACITY) cache->count++;
+}
+
+bool
+IpcDispatcherUseCases_shouldForwardWithinProtocol(IpcDispatcherDedupCache* cache, const char* sourceId,
+        const char* reference, const IpcScalarValue* value, bool hasQuality, IpcQuality quality) {
+    if (!cache) return true;
+
+    for (int i = 0; i < cache->count; i++) {
+        if (dedupEntryMatches(&cache->history[i], sourceId, reference, value, hasQuality, quality)) {
+            return false;
+        }
+    }
+
+    pushDedupEntry(cache, sourceId, reference, value, hasQuality, quality);
+    return true;
+}
+
+void
+IpcDispatcherUseCases_destroyDedupCache(IpcDispatcherDedupCache* cache) {
+    if (!cache) return;
+    for (int i = 0; i < cache->count; i++) {
+        freeDedupEntry(&cache->history[i]);
+    }
+    cache->count = 0;
+    cache->nextSlot = 0;
+}
+
 void
 IpcDispatcherUseCases_freeMessage(IpcMessage* message) {
     if (!message) return;

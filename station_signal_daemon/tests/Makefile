@@ -247,6 +247,7 @@ test_orchestration_api: orchestration/test_orchestration_api.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
@@ -285,6 +286,7 @@ test_ipc_dispatcher_api: ipc_dispatcher/test_ipc_dispatcher_api.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
@@ -490,6 +492,7 @@ test_device_manager_api: device_manager/test_device_manager_api.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
@@ -594,6 +597,7 @@ test_control_dispatcher_usecases: control_dispatcher/test_control_dispatcher_use
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \
@@ -677,6 +681,7 @@ test_control_dispatcher_api: control_dispatcher/test_control_dispatcher_api.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_ws_server.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_mms_adapter.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_goose_adapter.c \
+		$(IPC_DISPATCHER)/data/ipc_dispatcher_dedup_cache.c \
 		$(IPC_DISPATCHER)/data/ipc_dispatcher_conn_state_adapter.c \
 		$(IPC_DISPATCHER)/domain/ipc_dispatcher_usecases.c \
 		$(IPC_DISPATCHER)/utils/ipc_dispatcher_value_codec.c \

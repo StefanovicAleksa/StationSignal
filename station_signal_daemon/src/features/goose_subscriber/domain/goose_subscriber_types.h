@@ -272,71 +272,6 @@ typedef struct {
 } GooseSubscriberTargetEntry;
 
 /*
- * Cross-target duplicate-content suppression - the GOOSE equivalent of
- * mms_report_client's MmsReportClientCrossRcbDedupCache (see its own doc
- * comment for the full rationale: some real networks configure multiple
- * GoCBs across independent LNs that publish the exact same underlying
- * event, mirroring the MMS redundant-RCB pattern - each target's own
- * per-position filter starts independent, so both frames would otherwise
- * survive their own filter and reach the websocket as apparent duplicates).
- *
- * Keyed per INDIVIDUAL ENTRY, not per whole record - an earlier revision
- * compared two records' entire entry sets positionally (same count, same
- * order), which only caught the case where two GoCBs' datasets were
- * byte-identical in shape. Real SCL configures GoCBs whose datasets share
- * one DA but otherwise differ in member count/order (e.g. one dataset
- * carries a sibling `q` the other doesn't), which the positional compare
- * let straight through as an apparent non-duplicate. A candidate entry is
- * a duplicate - and dropped from its record - only if its (reference,
- * value) content exactly matches a slot in this history AND its goCbRef
- * differs from the one that produced that slot; a repeat from the SAME
- * goCbRef is left entirely to that target's own per-position filter, same
- * as MMS leaves same-RCB repeats to its own per-RCB filter. Deliberately
- * content-only, no timestamp involved (an earlier revision required an
- * exact match on GOOSE's `t` field too, on the theory that independent
- * GoCBs republishing "the same" event would carry the same `t` - real
- * hardware disproved that: two independent publishers stamp their own `t`
- * independently and can differ by more than 0ms even for the same
- * underlying change, so requiring an exact match silently let real
- * cross-GoCB duplicates back through).
- *
- * A single "last forwarded, from any target" slot (the original design,
- * mirroring MMS's) only catches this when nothing else is forwarded in
- * between - GOOSE, unlike MMS, typically has many GoCBs streaming
- * concurrently on one IED, so an unrelated target's frame landing between
- * two duplicates routinely clobbers the one slot before the real duplicate
- * arrives. This struct is instead a small bounded ring of the most
- * recently forwarded entries (any target), so a duplicate is still caught
- * even with unrelated traffic interleaved.
- *
- * Not to be confused with GooseSubscriberMemberRefCache's per-target
- * value-diff cache, which only ever compares a frame against that SAME
- * target's own history and knows nothing about content across targets.
- */
-typedef struct {
-    char* goCbRef;    /* owned; which GoCB forwarded this entry. NULL means an empty slot */
-    char* reference;  /* owned */
-    MmsValue* value;  /* owned clone */
-} GooseSubscriberRecentForwardEntry;
-
-/* Ring capacity in individual entries (previously 32 whole-record slots,
- * before the switch to per-entry granularity above) - sized generously
- * above what several concurrent GoCBs' simultaneously-changing entries look
- * like on a real IED (single devices seen streaming 8-10+ concurrent LN
- * datasets) so an interleaved burst of unrelated GOOSE traffic doesn't
- * evict the entry a later duplicate needs to match against. Correctness of
- * the dedup decision doesn't depend on this size - the content-only
- * (reference, value) match with a required differing goCbRef is what
- * prevents false-positive suppression, not ring depth. */
-#define GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY 128
-
-typedef struct {
-    GooseSubscriberRecentForwardEntry history[GOOSE_SUBSCRIBER_RECENT_FORWARD_CAPACITY];
-    int count;     /* valid slots filled so far, caps at capacity */
-    int nextSlot;  /* ring write cursor - wraps and overwrites the oldest slot once full */
-} GooseSubscriberRecentForwardCache;
-
-/*
  * Internal representation. Defined here (rather than hidden behind an
  * additional internal-only header) because every file within this feature
  * needs field access, mirroring mms_report_client's struct
@@ -352,9 +287,6 @@ struct sGooseSubscriberHandle {
     GooseReceiver receiver;                     /* owned */
     GooseSubscriberTargetEntry* targetEntries;  /* owned array */
     int targetCount;
-    GooseSubscriberRecentForwardCache recentForwardCache; /* zero-initialized by
-                                   calloc in GooseSubscription_create (count == 0 means
-                                   "nothing forwarded yet") - see its own doc comment above */
 
     GooseSubscriberCallback recordCallback;
     void* recordCallbackParam;

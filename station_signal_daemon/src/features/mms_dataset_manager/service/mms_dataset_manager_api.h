@@ -93,9 +93,15 @@ MmsDatasetManager_beginCycle(MmsDatasetManagerHandle handle);
  *                   the instant the connection closes - which a real device
  *                   rejects assigning to a buffered RCB outright.
  *
- * `rcb` is the caller's ALREADY-FETCHED ClientReportControlBlock for this
- * target - tier 2 reads its live DatSet from it directly, so this costs no
- * extra round-trip. It is only read, never mutated.
+ * Tiers 2 and 3 no longer run live, per target, here: MmsDatasetManager_beginCycle's
+ * own claim pass (MmsDatasetManagerProvisioning_runClaimPass) already ran
+ * both, for every target, before this cycle's whole-device cluster plan even
+ * existed - see that function's own doc comment for why tier 3's adoption
+ * ordering across targets sharing an LD requires a genuine up-front pass
+ * rather than resolving lazily per target. This call just returns that
+ * cached outcome (or, if none exists, resolves tier 4 fresh) - no wire call
+ * of its own for tiers 1-3, and no `rcb` parameter needed (the claim pass
+ * fetches its own).
  *
  * *outResolution is fully written on every path, including total failure
  * (datasetReference NULL). The caller owns it and MUST release it with
@@ -106,7 +112,7 @@ MmsDatasetManager_beginCycle(MmsDatasetManagerHandle handle);
  */
 void
 MmsDatasetManager_resolveForTarget(MmsDatasetManagerHandle handle, ReportControlBlockTarget* target,
-        ClientReportControlBlock rcb, MmsDatasetResolution* outResolution);
+        MmsDatasetResolution* outResolution);
 
 /* Frees a resolution's owned fields and resets it to empty. NULL-safe, and
  * safe to call twice on the same resolution. */

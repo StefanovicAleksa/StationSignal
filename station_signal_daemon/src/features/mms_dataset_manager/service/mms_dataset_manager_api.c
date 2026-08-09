@@ -69,7 +69,15 @@ MmsDatasetManager_beginCycle(MmsDatasetManagerHandle handle) {
     handle->session.claimedDatasetNames = LinkedList_create();
     handle->session.associationSpecificCreateRejected = false;
     handle->session.active = true;
-    handle->session.chunkAssignments = MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(handle);
+
+    /* Must run BEFORE the whole-device cluster plan below - it decides which
+     * leaves/slots are still genuinely up for grabs. See
+     * MmsDatasetManagerProvisioning_runClaimPass's own doc comment for why
+     * this has to be a true up-front pass. */
+    LinkedList claimedLeaves = NULL;
+    MmsDatasetManagerProvisioning_runClaimPass(handle, &claimedLeaves);
+    handle->session.chunkAssignments = MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(handle, claimedLeaves);
+    LinkedList_destroyDeep(claimedLeaves, free);
 
     /* One-line, always-on summary of this cycle's real dataset budgets -
      * previously only inferable indirectly, either from the one-shot "budget
@@ -100,9 +108,29 @@ copyChunkMemberReferences(const MmsDatasetManagerChunkAssignment* chunk) {
     return list;
 }
 
+/* Deep-copies a LinkedList of owned char* into a freshly-owned list, same
+ * "the resolution owns its own copy, never a borrowed alias into the claim
+ * pass's own preResolvedEntries" rationale as MmsDatasetResolution.datasetReference's
+ * own doc comment. NULL in, NULL out (mirrors MmsDatasetResolution.memberReferences'
+ * own NULL-vs-empty distinction - a pre-resolved entry's memberReferences is
+ * never NULL in practice, since tier 2/3 only ever populate a preResolvedEntry
+ * on success with a non-empty member list, but this stays defensive rather
+ * than assuming that invariant here too). */
+static LinkedList
+copyOwnedStringList(LinkedList source) {
+    if (!source) return NULL;
+
+    LinkedList list = LinkedList_create();
+    if (!list) return NULL;
+    for (LinkedList el = LinkedList_getNext(source); el; el = LinkedList_getNext(el)) {
+        LinkedList_add(list, MmsDatasetManagerUtils_safeStringDup((char*) LinkedList_getData(el)));
+    }
+    return list;
+}
+
 void
 MmsDatasetManager_resolveForTarget(MmsDatasetManagerHandle handle, ReportControlBlockTarget* target,
-        ClientReportControlBlock rcb, MmsDatasetResolution* outResolution) {
+        MmsDatasetResolution* outResolution) {
     if (!outResolution) return;
     memset(outResolution, 0, sizeof(*outResolution));
     outResolution->tier = MMS_DATASET_TIER_NONE;
@@ -117,43 +145,42 @@ MmsDatasetManager_resolveForTarget(MmsDatasetManagerHandle handle, ReportControl
         outResolution->tier = MMS_DATASET_TIER_SCL;
         outResolution->tierName = "SCL";
     } else {
-        LinkedList pulledMemberRefs = NULL;
-        /* TIER 2 - PULL LIVE. */
-        if (MmsDatasetManagerDiscovery_pullLiveDataset(handle, target, rcb, &pulledMemberRefs)) {
-            const char* liveDataset = ClientReportControlBlock_getDataSetReference(rcb);
-            outResolution->datasetReference = MmsDatasetManagerUtils_safeStringDup(liveDataset);
-            outResolution->memberReferences = pulledMemberRefs;
-            outResolution->tier = MMS_DATASET_TIER_LIVE;
-            outResolution->tierName = "live";
+        /* TIER 2/3 - already resolved for this target, up front, by this
+         * cycle's own MmsDatasetManagerProvisioning_runClaimPass (called from
+         * MmsDatasetManager_beginCycle, before the whole-device cluster plan
+         * even exists) - return that cached outcome directly, no further wire
+         * call. See MmsDatasetManagerPreResolvedEntry's own doc comment for
+         * why tier 2/3 can no longer be resolved live, per target, here. */
+        MmsDatasetManagerPreResolvedEntry* preResolved =
+                MmsDatasetManagerProvisioning_findPreResolvedEntry(handle->session.preResolvedEntries,
+                        target->objectReference);
+        if (preResolved) {
+            outResolution->datasetReference = MmsDatasetManagerUtils_safeStringDup(preResolved->datasetReference);
+            outResolution->memberReferences = copyOwnedStringList(preResolved->memberReferences);
+            outResolution->tier = preResolved->tier;
+            outResolution->tierName = preResolved->tier == MMS_DATASET_TIER_LIVE ? "live" : "adopted";
         } else {
-            LinkedList adoptedMemberRefs = NULL;
-            /* TIER 3 - ADOPT UNCLAIMED. */
-            const char* adopted =
-                    MmsDatasetManagerDiscovery_adoptUnclaimedDataset(handle, target, &adoptedMemberRefs);
-            if (adopted) {
-                outResolution->datasetReference = MmsDatasetManagerUtils_safeStringDup(adopted);
-                outResolution->memberReferences = adoptedMemberRefs;
-                outResolution->tier = MMS_DATASET_TIER_ADOPTED;
-                outResolution->tierName = "adopted";
-            } else {
-                /* TIER 4 - SELF-CREATE. */
-                bool wasNeeded = false;
-                const char* created =
-                        MmsDatasetManagerProvisioning_getOrCreateDataset(handle, target, &wasNeeded);
-                outResolution->datasetReference = created
-                        ? MmsDatasetManagerUtils_safeStringDup(created) : NULL;
-                outResolution->wasNeeded = wasNeeded;
-                outResolution->tier = MMS_DATASET_TIER_SELF_CREATED;
-                outResolution->tierName = "self-created";
-                /* Only meaningful once a dataset actually resolved - a NULL
-                 * created means the caller has nothing to reconcile a shape
-                 * against anyway, and its own reconciliation returns early on
-                 * a NULL reference regardless. */
-                if (created) {
-                    outResolution->memberReferences = copyChunkMemberReferences(
-                            MmsDatasetManagerProvisioning_findChunkAssignment(&handle->session,
-                                    target->objectReference));
-                }
+            /* TIER 4 - SELF-CREATE. The only tier left uncomputed by the claim
+             * pass - buildWholeDeviceClusterPlan's own slot list already
+             * excludes every target with a preResolved entry above, so
+             * reaching here means this target genuinely had no tier 2/3
+             * outcome this cycle. */
+            bool wasNeeded = false;
+            const char* created =
+                    MmsDatasetManagerProvisioning_getOrCreateDataset(handle, target, &wasNeeded);
+            outResolution->datasetReference = created
+                    ? MmsDatasetManagerUtils_safeStringDup(created) : NULL;
+            outResolution->wasNeeded = wasNeeded;
+            outResolution->tier = MMS_DATASET_TIER_SELF_CREATED;
+            outResolution->tierName = "self-created";
+            /* Only meaningful once a dataset actually resolved - a NULL
+             * created means the caller has nothing to reconcile a shape
+             * against anyway, and its own reconciliation returns early on
+             * a NULL reference regardless. */
+            if (created) {
+                outResolution->memberReferences = copyChunkMemberReferences(
+                        MmsDatasetManagerProvisioning_findChunkAssignment(&handle->session,
+                                target->objectReference));
             }
         }
     }
@@ -202,6 +229,10 @@ MmsDatasetManager_endCycle(MmsDatasetManagerHandle handle, bool runOrphanCleanup
     }
     if (handle->session.claimedDatasetNames) {
         LinkedList_destroyDeep(handle->session.claimedDatasetNames, free);
+    }
+    if (handle->session.preResolvedEntries) {
+        LinkedList_destroyDeep(handle->session.preResolvedEntries,
+                MmsDatasetManagerProvisioning_destroyPreResolvedEntry);
     }
 
     memset(&handle->session, 0, sizeof(handle->session));

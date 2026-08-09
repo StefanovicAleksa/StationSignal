@@ -129,34 +129,14 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
         }
 
         /* record->entryCount > 0: survived this target's own per-position
-         * value-diff filter. filterRecentForwardDuplicates is the second,
-         * independent gate: even entries that are genuinely new/changed AS
-         * FAR AS THIS TARGET IS CONCERNED can still be an exact content
-         * duplicate of something a DIFFERENT GoCB recently forwarded for the
-         * same underlying event - see GooseSubscriberRecentForwardCache's
-         * own doc comment. Filters per entry (not the whole record), so a
-         * record that's only partially a duplicate still forwards its
-         * genuinely-unique entries. */
+         * value-diff filter. Cross-GoCB duplicate-content suppression (a
+         * different GoCB recently forwarding this exact same content) is no
+         * longer this feature's own concern - ipc_dispatcher's own dedup
+         * cache (IpcDispatcherUseCases_shouldForwardWithinProtocol) catches
+         * it downstream instead, at the one point both this feature's GoCBs
+         * AND mms_report_client's RCBs actually converge. */
         if (record->entryCount > 0) {
-            int originalCount = record->entryCount;
-            record->entryCount = GooseSubscriberUseCases_filterRecentForwardDuplicates(
-                    &handle->recentForwardCache, record->goCbRef, record->entries, record->entryCount);
-
-            if (record->entryCount > 0) {
-                if (record->entryCount < originalCount) {
-                    fprintf(stderr, "[goose_subscriber] report for '%s': %d of %d entries dropped by "
-                            "recent-forward dedup - identical content already forwarded from another GoCB\n",
-                            record->goCbRef ? record->goCbRef : "?",
-                            originalCount - record->entryCount, originalCount);
-                }
-                handle->recordCallback(handle->recordCallbackParam, record);
-            } else {
-                fprintf(stderr, "[goose_subscriber] report for '%s' (%d entr%s) dropped entirely by "
-                        "recent-forward dedup - identical content already forwarded from another GoCB\n",
-                        record->goCbRef ? record->goCbRef : "?", originalCount,
-                        originalCount == 1 ? "y" : "ies");
-                GooseSubscriberUseCases_freeRecord(record);
-            }
+            handle->recordCallback(handle->recordCallbackParam, record);
         } else {
             GooseSubscriberUseCases_freeRecord(record);
         }

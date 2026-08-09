@@ -410,7 +410,6 @@ GooseSubscription_destroy(GooseSubscriberHandle handle) {
     GooseSubscriberConnection_stop(handle);
     GooseSubscriberConnection_destroy(handle);
     freeTargetEntries(handle);
-    GooseSubscriberUseCases_destroyRecentForwardCache(&handle->recentForwardCache);
     free(handle->interfaceId);
     free(handle);
 }

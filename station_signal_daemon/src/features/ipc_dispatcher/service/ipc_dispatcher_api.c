@@ -2,6 +2,7 @@
 #include "features/ipc_dispatcher/service/ipc_dispatcher_api.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ring_buffer.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
+#include "features/ipc_dispatcher/data/ipc_dispatcher_dedup_cache.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_mms_adapter.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_goose_adapter.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_conn_state_adapter.h"
@@ -37,6 +38,17 @@ IpcDispatcher_create(const IpcDispatcherConfig* config, IpcDispatcherError* outE
 
     handle->ringBuffer = IpcDispatcherRingBuffer_create(handle->config.ringBufferCapacity);
     if (!handle->ringBuffer) {
+        free(handle);
+        if (outError) *outError = IPC_DISPATCHER_ERR_OUT_OF_MEMORY;
+        return NULL;
+    }
+
+    handle->mmsDedupCache = IpcDispatcherDedupCache_create();
+    handle->gooseDedupCache = IpcDispatcherDedupCache_create();
+    if (!handle->mmsDedupCache || !handle->gooseDedupCache) {
+        IpcDispatcherDedupCache_destroy(handle->mmsDedupCache);
+        IpcDispatcherDedupCache_destroy(handle->gooseDedupCache);
+        IpcDispatcherRingBuffer_destroy(handle->ringBuffer);
         free(handle);
         if (outError) *outError = IPC_DISPATCHER_ERR_OUT_OF_MEMORY;
         return NULL;
@@ -92,6 +104,8 @@ IpcDispatcher_destroy(IpcDispatcherHandle handle) {
         IpcDispatcherRingBuffer_destroy(handle->ringBuffer);
         handle->ringBuffer = NULL;
     }
+    IpcDispatcherDedupCache_destroy(handle->mmsDedupCache);
+    IpcDispatcherDedupCache_destroy(handle->gooseDedupCache);
     free(handle);
 }
 

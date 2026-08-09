@@ -221,11 +221,20 @@ onReport(void* userParam, const MmsReportRecord* record) {
     lastRcbReference[sizeof(lastRcbReference) - 1] = '\0';
     lastEntryCount = record->entryCount;
     if (record->entryCount > 0 && record->entries[0].value) {
-        lastEntryValue = MmsValue_getBoolean(record->entries[0].value);
+        /* lastEntryValue/lastEntry0PreviousValue are boolean-only captures
+         * (most fixtures' flipped point, GGIO1.Ind1.stVal/SPCSO1.stVal, is
+         * MMS_BOOLEAN) - MmsValue_getBoolean on a non-boolean value (e.g.
+         * LLN0.Mod.stVal, MMS_INTEGER) is undefined, so this guards against
+         * that rather than assuming every test's entries[0] is boolean. */
+        if (MmsValue_getType(record->entries[0].value) == MMS_BOOLEAN) {
+            lastEntryValue = MmsValue_getBoolean(record->entries[0].value);
+            lastEntry0HasPreviousValue = record->entries[0].previousValue != NULL;
+            lastEntry0PreviousValue = lastEntry0HasPreviousValue
+                    && MmsValue_getBoolean(record->entries[0].previousValue);
+        } else {
+            lastEntry0HasPreviousValue = record->entries[0].previousValue != NULL;
+        }
         lastReason = record->entries[0].reason;
-        lastEntry0HasPreviousValue = record->entries[0].previousValue != NULL;
-        lastEntry0PreviousValue = lastEntry0HasPreviousValue
-                && MmsValue_getBoolean(record->entries[0].previousValue);
     }
     if (record->entryCount > 0) {
         strncpy(lastEntry0Reference, record->entries[0].reference ? record->entries[0].reference : "",
@@ -519,34 +528,59 @@ test_authRequired_wrongPassword_firesConnectionRejectedCallback(void) {
  * exactly as they do against a real device like E13_6MD. Instead,
  * mms_report_client's whole-device clustering (buildWholeDeviceClusterPlan)
  * covers every FC=ST/MX leaf across the ENTIRE device - not just each Dyn
- * RCB's own parent LN - and assigns clusters to Dyn slots in model-
- * declaration order. Since LLN0 is declared before GGIO1 in this fixture, and
- * "urcbDyn" (unbuffered, parented under GGIO1) is the first Dyn slot while
- * "brcbDyn" (buffered, also parented under GGIO1) is the second, the
- * assignment lands: urcbDyn <- LLN0's own cluster (Mod/Beh/Health, 9 leaves),
- * brcbDyn <- GGIO1's own cluster (Ind1.stVal/q/t, SPCSO1.stVal/q/t, 6 leaves)
- * - a real, deterministic consequence of a Dyn RCB's parent LN no longer
- * constraining what it reports on (see buildWholeDeviceClusterPlan's own doc
- * comment). This test exercises the GGIO1 cluster and its real data-change
- * flip via brcbDyn, matching this test's original intent (proving a
- * self-created dataset genuinely reports GGIO1's real content) even though
- * the specific RCB it lands on shifted with this feature.
+ * RCB's own parent LN.
+ *
+ * "urcbDyn" (unbuffered, parented under GGIO1) never reaches tier 4 here at
+ * all: this fixture's shared simulator model always carries a pre-existing
+ * dataset "Reporter1LD1/LLN0$ds2" (sim_server.c, used elsewhere by
+ * "rcbMulti01") whose one and only member is GGIO1.Ind1.stVal, and
+ * MmsDatasetManagerProvisioning_runClaimPass's own claim pass resolves urcbDyn
+ * against it via tier 3 (ADOPT) before the whole-device cluster plan is even
+ * built - see that function's own doc comment. That leaves "brcbDyn"
+ * (buffered, also parented under GGIO1) as the ONLY genuine Dyn slot this
+ * cycle, and GGIO1.Ind1.stVal itself excluded from the whole-device leaf pool
+ * (already covered by urcbDyn's adopted dataset - see
+ * MmsDatasetManagerUseCases_filterOutClaimedLeaves). With no
+ * <DynDataSet>/<ConfDataSet> maxAttributes declared, clustering falls back to
+ * one dataset per LN (MmsDatasetManagerUseCases_groupReferencesByLn) -
+ * producing two clusters, LLN0's own Mod/Beh/Health (9 leaves) and GGIO1's
+ * OWN REMAINING leaves (Ind1.q/Ind1.t/SPCSO1.stVal/q/t, 5 leaves, Ind1.stVal
+ * already excluded) - for the one remaining slot. Clusters are assigned in
+ * model-declaration order and LLN0 is declared before GGIO1 in this fixture,
+ * so brcbDyn's own self-created dataset ends up covering LLN0's Mod/Beh/Health
+ * instead - GGIO1's own leftover 5 leaves go unreported THIS cycle (logged,
+ * not a failure - the honest "more clusters than slots" outcome
+ * buildWholeDeviceClusterPlan's own doc comment already describes).
+ *
+ * This is a real coverage IMPROVEMENT over this test's own prior behavior,
+ * not a regression: before mms_dataset_manager's own tier 2/3 claim pass
+ * existed, urcbDyn's own zipped tier-4 cluster assignment (also LLN0, since
+ * it was the first Dyn slot in declaration order) was silently WASTED the
+ * instant urcbDyn actually resolved via tier 3 instead - LLN0's own
+ * Mod/Beh/Health leaves went completely unreported by ANYTHING, while
+ * brcbDyn's own self-created dataset REDUNDANTLY duplicated GGIO1.Ind1.stVal
+ * coverage that urcbDyn's adopted dataset already provided (the exact
+ * multi-RCB duplicate-report bug this feature exists to fix). Now the one
+ * real available slot goes to the part of the device that had NO other
+ * coverage at all, rather than to a part already partially covered elsewhere.
  *
  * This client now deterministically requests GI on every enable, purely to
- * seed the value-diff cache - brcbDyn's GI-triggered snapshot seeds all 6
+ * seed the value-diff cache - brcbDyn's GI-triggered snapshot seeds all 9
  * dataset members (cached == NULL for each) and is itself bootstrap-suppressed
  * regardless of its own reason (see shouldForwardAndUpdateCache's own doc
  * comment for why a real-change reason is never trusted to bypass this, even
  * on a first observation - the same real-hardware finding that fixed the
  * flooding bug also rules out narrowly trusting reason bits here). Because GI
  * already seeded the cache with every member's live default, one single flip
- * afterward is itself a genuine, immediately-forwarded change - no throwaway
- * warm-up flip needed. On that flip, only Ind1's own group (stVal + its q/t
- * siblings, dragged along by group-extension) survives - SPCSO1's unrelated
- * group stays suppressed (its own cache was seeded by GI too, and SPCSO1's
- * value never itself changes, so nothing in that group individually qualifies
- * and nothing drags it in). Expected surviving entries: Ind1.stVal, Ind1.q,
- * Ind1.t (3, not all 6 dataset members).
+ * afterward (SimServer_setModStVal, LLN0.Mod's own INT32 stVal - TRG_OPT_DATA_CHANGED,
+ * unlike Health.stVal which no test ever flips) is itself a genuine,
+ * immediately-forwarded change - no throwaway warm-up flip needed. On that
+ * flip, only Mod's own group (stVal + its q/t siblings, dragged along by
+ * group-extension) survives - Beh's/Health's unrelated groups stay suppressed
+ * (their own caches were seeded by GI too, and neither's value itself changes,
+ * so nothing in either group individually qualifies and nothing drags it in).
+ * Expected surviving entries: Mod.stVal, Mod.q, Mod.t (3, not all 9 dataset
+ * members).
  */
 void
 test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
@@ -579,32 +613,31 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
     TEST_ASSERT_FALSE_MESSAGE(dynamicBufferedRcbFailed,
             "brcbDyn must not fail after this feature exists - it used to fail with error 32 (OBJECT_VALUE_INVALID)");
 
-    /* brcbDyn's GI-triggered snapshot (all 6 dataset members, live defaults)
-     * seeds the cache and must never itself reach the callback. */
+    /* brcbDyn's GI-triggered snapshot (all 9 dataset members - LLN0's own
+     * Mod/Beh/Health, live defaults, see this test's own doc comment for why
+     * brcbDyn's dataset now covers LLN0 rather than GGIO1) seeds the cache and
+     * must never itself reach the callback. */
     TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&reportReceived),
             "brcbDyn's GI snapshot must never reach the callback - it silently seeds the cache "
-            "for all 6 dataset members instead");
+            "for all 9 dataset members instead");
 
     /* Because GI already seeded the cache, this single flip is itself a
      * genuine, immediately-forwarded change - no throwaway warm-up flip
      * needed. */
-    SimServer_setIndication(sim, true);
+    SimServer_setModStVal(sim, 1);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&reportReceived),
-            "expected a report from brcbDyn's dynamically-created dataset after flipping Ind1.stVal");
+            "expected a report from brcbDyn's dynamically-created dataset after flipping LLN0.Mod.stVal");
 
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1.BR.brcbDyn", lastRcbReference);
     TEST_ASSERT_EQUAL_INT_MESSAGE(3, lastEntryCount,
-            "only Ind1's own group (stVal + its q/t siblings, dragged along by group-extension) "
-            "should survive - SPCSO1's unrelated group stays suppressed (unchanged since the GI seed)");
-    TEST_ASSERT_TRUE(lastEntryValue);
+            "only Mod's own group (stVal + its q/t siblings, dragged along by group-extension) "
+            "should survive - Beh's/Health's unrelated groups stay suppressed (unchanged since the GI seed)");
     TEST_ASSERT_TRUE_MESSAGE((lastReason & IEC61850_REASON_DATA_CHANGE) != 0,
             "expected the report's reason-for-inclusion to include data-change");
-    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", lastEntry0Reference);
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0$ST$Mod$stVal", lastEntry0Reference);
     TEST_ASSERT_TRUE_MESSAGE(lastEntry0HasPreviousValue,
             "the GI snapshot's value must surface as this entry's previousValue");
-    TEST_ASSERT_FALSE_MESSAGE(lastEntry0PreviousValue,
-            "previousValue must be the GI-seeded live default (false), not the flipped-to value");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -637,18 +670,12 @@ test_dynamicDataset_createdOnEnable_andReportsRealChange(void) {
  * must treat that as success, not fail brcbDyn's re-enable.
  *
  * Deliberately does NOT assert a flipped value reaches the report callback
- * (unlike test_dynamicDataset_createdOnEnable_andReportsRealChange above):
- * brcbDyn and urcbDyn are both Dyn RCBs on the very same LN (GGIO1), so they
- * always cover the identical leaf set and always report byte-identical
- * content for the same underlying change - MmsReportClientUseCases_shouldForwardAcrossRcb's
- * cross-RCB dedup (proven separately in
- * test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback)
- * correctly drops brcbDyn's own copy as a duplicate of urcbDyn's, since
- * urcbDyn's own GI-then-flip cycle always reaches the callback first. That's
- * correct, expected behavior, not something this test should fight - proving
- * per-report delivery for a Dyn dataset is already this suite's other test's
- * job; this test's job is proving the dataset itself can be created,
- * assigned, and reused for a BUFFERED target at all.
+ * (unlike test_dynamicDataset_createdOnEnable_andReportsRealChange above,
+ * which exercises brcbDyn's own real dataset content on this exact fixture in
+ * detail) - proving per-report delivery for a Dyn dataset is already that
+ * other test's job; this test's job is proving the dataset itself can be
+ * created, assigned, and reused for a BUFFERED target at all, across a
+ * reconnect.
  */
 void
 test_dynamicDataset_bufferedRcb_createdOnEnable_andSurvivesReconnect(void) {
@@ -1141,14 +1168,14 @@ test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix(void) {
  * Deliberately uses SPCSO1 (flipped via SimServer_setSpcso1Indication), NOT
  * Ind1 (SimServer_setIndication): brcbMain/brcbDup (always enabled alongside
  * urcbDyn in this fixture) already report Ind1.stVal+Ind1.q via their own
- * "ds1" dataset, and MmsReportClientUseCases_shouldForwardAcrossRcb's
- * cross-RCB duplicate-content suppression (proven in
- * test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback)
- * would otherwise legitimately treat urcbDyn's own Ind1 report as an
- * exact-content duplicate of what brcbMain/brcbDup just forwarded a moment
- * earlier - not a bug in the tier-2 pull logic this test targets, but a
- * confound worth avoiding by construction. SPCSO1 is not a member of any
- * other RCB's dataset in this fixture, so its content can never collide.
+ * "ds1" dataset. Cross-RCB duplicate-content suppression is no longer this
+ * feature's own concern (it moved downstream to ipc_dispatcher - see
+ * test_crossRcbDuplicateContent_bothIdenticalRcbsReachCallback_dedupMovedDownstream),
+ * so this is no longer strictly required to avoid a confound at THIS layer -
+ * kept anyway since it's still the cleaner, more targeted choice: SPCSO1 is
+ * not a member of any other RCB's dataset in this fixture, so this test's own
+ * assertions are unambiguously about urcbDyn's own pulled dataset alone,
+ * never entangled with brcbMain/brcbDup's own independent Ind1 reports.
  *
  * The load-bearing assertion is the survivor count on the post-GI flip: 2
  * (stVal + its quality sibling q, dragged along by group-extension - the
@@ -1404,7 +1431,7 @@ test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreserve
 }
 
 /*
- * Isolated callback state for test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback
+ * Isolated callback state for test_crossRcbDuplicateContent_bothIdenticalRcbsReachCallback_dedupMovedDownstream
  * below - deliberately NOT the shared globals every other test in this file
  * uses, since this test needs to distinguish three concurrently-enabling
  * RCBs (brcbMain/brcbDup/urcbDyn) and count reports rather than just track
@@ -1441,25 +1468,35 @@ onReportForCrossRcbDedupTest(void* userParam, const MmsReportRecord* record) {
 }
 
 /*
- * Proves MmsReportClientUseCases_shouldForwardAcrossRcb end-to-end: brcbMain
- * and brcbDup (fixtures/reporter1.cid) are two independently-enabled RCBs
- * over the IDENTICAL ds1 dataset/TrgOps/OptFields - reproducing a real
+ * Proves mms_report_client's own reportCallback is now deliberately NOT the
+ * layer that suppresses cross-RCB duplicate content - that job moved to
+ * ipc_dispatcher's own per-protocol dedup cache
+ * (IpcDispatcherUseCases_shouldForwardWithinProtocol, proven in
+ * integration_tests/ipc_dispatcher/ and unit-tested in
+ * tests/ipc_dispatcher/test_ipc_dispatcher_usecases.c), the one place both
+ * mms_report_client's RCBs AND goose_subscriber's GoCBs actually converge -
+ * see this feature's own CLAUDE.md/CHANGELOG.md for why a per-feature
+ * cross-RCB cache here could never also catch an MMS/GOOSE duplicate, and was
+ * removed in favor of the shared one downstream.
+ *
+ * brcbMain and brcbDup (fixtures/reporter1.cid) are two independently-enabled
+ * RCBs over the IDENTICAL ds1 dataset/TrgOps/OptFields - reproducing a real
  * device's redundant/reserved RCB pattern (e.g. "urcbA01"/"urcbB01"). Both
  * get RptEna+GI on connect (this client now deterministically requests GI on
  * every enable), but each one's GI-triggered snapshot is cache-seed-only and
- * never reaches the callback at all (bootstrap suppression) - so cross-RCB
- * dedup can't be proven against that snapshot. Instead, this test flips
- * GGIO1.Ind1.stVal AFTER both RCBs are enabled: because GI already seeded
- * both RCBs' independent caches with the live default, this single flip is
- * itself a genuine, immediately-forwarded change from each - each
+ * never reaches the callback at all (bootstrap suppression) - so this test
+ * flips GGIO1.Ind1.stVal AFTER both RCBs are enabled: because GI already
+ * seeded both RCBs' independent caches with the live default, this single
+ * flip is itself a genuine, immediately-forwarded change from each - each
  * independently produces a real, byte-identical DATA_CHANGE report at nearly
- * the same moment, and only one of the two must ever reach the report
- * callback. urcbDyn (also declared in this fixture) reports a different,
- * larger dataset, so it's unaffected and used here only to confirm the
- * client is otherwise fully connected/enabled.
+ * the same moment, and BOTH must now reach mms_report_client's own report
+ * callback (this feature no longer decides which of them is "the" real one -
+ * that decision belongs entirely downstream). urcbDyn (also declared in this
+ * fixture) reports a different, larger dataset, so it's unaffected and used
+ * here only to confirm the client is otherwise fully connected/enabled.
  */
 void
-test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback(void) {
+test_crossRcbDuplicateContent_bothIdenticalRcbsReachCallback_dedupMovedDownstream(void) {
     SimServer sim = SimServer_create();
     SimServer_start(sim, TEST_PORT_CROSS_RCB_DEDUP);
 
@@ -1495,17 +1532,18 @@ test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback(void) {
      * independently-enabled RCB (no throwaway warm-up flip needed). */
     SimServer_setIndication(sim, true);
 
-    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.brcbMainOrDupReportCount, 1),
-            "expected at least one of brcbMain/brcbDup's identical data-change reports to reach the callback");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilAtLeast(&state.brcbMainOrDupReportCount, 2),
+            "expected BOTH brcbMain's and brcbDup's identical data-change reports to reach the "
+            "callback - mms_report_client itself no longer suppresses cross-RCB duplicates, "
+            "ipc_dispatcher's own dedup cache does that downstream instead");
 
-    /* Generous settle window for a hypothetical duplicate (the bug this test
-     * guards against) to also arrive - loopback round-trips are on the order
-     * of a few ms, so this is a large safety margin, not a tight race. */
+    /* Generous settle window to make sure no MORE than 2 ever arrive (a
+     * regression the other direction - e.g. a redelivery bug). */
     Thread_sleep(500);
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, state.brcbMainOrDupReportCount,
-            "brcbMain and brcbDup report byte-identical content (same ds1 dataset) - only one must "
-            "reach the callback, the other must be suppressed as a cross-RCB duplicate");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, state.brcbMainOrDupReportCount,
+            "brcbMain and brcbDup report byte-identical content (same ds1 dataset) - both must reach "
+            "this feature's own callback now; suppression is entirely ipc_dispatcher's concern");
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -1766,31 +1804,44 @@ test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog(void) {
 }
 
 /*
- * Proves DO-grouped chunking (buildWholeDeviceClusterPlan/getOrCreateDynamicDataset,
+ * Proves DO-grouped, LN-preserving chunking
+ * (buildWholeDeviceClusterPlan/getOrCreateDynamicDataset,
  * mms_report_client_connection.c): fixtures/reporter1_chunking.cid declares
- * <Services><DynDataSet max="10" maxAttributes="3"/></Services>, so the
- * WHOLE device's 15-leaf set (LLN0's Mod/Beh/Health, 9 leaves, walked before
- * GGIO1's Ind1/SPCSO1, 6 leaves, per LD/LN declaration order) is packed into
- * five 3-member DO-atomic chunks - Mod, Beh, Health, Ind1, SPCSO1, in that
- * order, and buildWholeDeviceClusterPlan assigns cluster i to Dyn slot i
- * (urcbDyn, urcbDyn2, both unbuffered, in that declaration order) - so urcbDyn
- * is PLANNED to get LLN0's Mod chunk and urcbDyn2 LLN0's Beh chunk.
+ * <Services><DynDataSet max="10" maxAttributes="3"/></Services>.
  *
- * But tier "adopt" runs BEFORE tier "self-create" for every target (see
- * enableOneTarget's own doc comment - "primarily try to use existing/foreign
- * datasets and create our own only via necessity"), and the shared simulator
- * always has a pre-existing, SCL-unclaimed domain-scoped dataset ("ds2",
- * GGIO1.Ind1.stVal only) sitting on it regardless of which fixture the
- * client loads. urcbDyn (processed first) adopts THAT instead of ever
- * reaching its own planned Mod chunk - a real, correct consequence of
- * adoption taking priority, not a bug; the Mod chunk simply goes unused this
- * cycle. urcbDyn2 (processed second, after ds2 is already claimed and ds1 is
- * excluded as brcbMain's own SCL-known dataset) finds no adoption candidate
- * left and falls through to its own planned Beh chunk exactly as designed.
- * This test exercises both paths: urcbDyn proves adoption pre-empting a
- * planned cluster, urcbDyn2 proves the chunking/assignment mechanism itself.
- * The simulator's own device-side caps (SimServer_createWithDatasetLimits)
- * are configured generously (would happily accept every chunk as one large
+ * MmsDatasetManagerProvisioning_runClaimPass's own claim pass runs tier
+ * "adopt" for EVERY non-SCL target up front, before any whole-device
+ * clustering happens at all (see that function's own doc comment - this is
+ * why urcbDyn/urcbDyn2 below no longer compete for a chunk the same way
+ * SCL-static targets never do). The shared simulator always has a
+ * pre-existing, SCL-unclaimed domain-scoped dataset ("ds2", GGIO1.Ind1.stVal
+ * only) sitting on it regardless of which fixture the client loads; urcbDyn
+ * (processed first in the claim pass) adopts it - a real, correct consequence
+ * of "primarily try to use existing/foreign datasets," not a bug - and is
+ * therefore EXCLUDED from the whole-device tier-4 slot pool entirely, with
+ * Ind1.stVal itself excluded from the leaf pool clustering draws from
+ * (MmsDatasetManagerUseCases_filterOutClaimedLeaves). urcbDyn2 (processed
+ * second, ds2 already claimed, ds1 excluded as brcbMain's own SCL-known
+ * dataset) finds no adoption candidate and remains the ONLY genuine tier-4
+ * slot this cycle.
+ *
+ * With maxAttributes=3 known, the remaining 14-leaf pool (LLN0's Mod/Beh/
+ * Health, 9 leaves, walked before GGIO1's own residual - Ind1.q/Ind1.t plus
+ * SPCSO1, 5 leaves, since Ind1.stVal was excluded) is chunked LN-preservingly:
+ * LLN0 alone (9) exceeds maxAttributes, so it splits DO-atomically into three
+ * of its own chunks (Mod, Beh, Health, each exactly 3) BEFORE GGIO1's own
+ * (also oversized, 5) residual splits into its own two chunks (Ind1-residual
+ * 2, SPCSO1 3) - a chunk from one LN is never mixed with another's. With only
+ * ONE real slot (urcbDyn2) and clusters assigned strictly in that order,
+ * urcbDyn2 gets the FIRST cluster - LLN0's own Mod chunk, not Beh's; Beh/
+ * Health/Ind1-residual/SPCSO1 simply go unused this cycle (the same "more
+ * clusters than slots" shortfall as before, just landing on a different
+ * cluster now that the slot list is correctly narrowed to genuine tier-4
+ * candidates only). This test exercises both paths: urcbDyn proves adoption
+ * pre-empting tier-4 entirely (and being excluded from the pool because of
+ * it), urcbDyn2 proves the chunking/assignment mechanism itself. The
+ * simulator's own device-side caps (SimServer_createWithDatasetLimits) are
+ * configured generously (would happily accept every chunk as one large
  * dataset too) so any failure here is provably ours, not the device's.
  */
 void
@@ -1835,27 +1886,27 @@ test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances(void) {
     SimServer_setIndication(sim, true);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDynGotReport),
-            "expected urcbDyn (adopted the existing 'ds2' dataset instead of its own planned Mod "
-            "chunk - the shared simulator's own SCL-unclaimed 'ds2' pre-exists on every test's "
-            "server, and tier-3 adoption correctly prefers it over self-creating) to report the "
-            "Ind1.stVal flip");
+            "expected urcbDyn (adopted the existing 'ds2' dataset via tier 3, before any whole-device "
+            "cluster is ever planned for it - the shared simulator's own SCL-unclaimed 'ds2' "
+            "pre-exists on every test's server) to report the Ind1.stVal flip");
     TEST_ASSERT_FALSE_MESSAGE(urcbDyn2GotReport,
-            "urcbDyn2's own chunk (Beh) must not report an Ind1 change it has no member for");
+            "urcbDyn2's own chunk (Mod) must not report an Ind1 change it has no member for");
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, urcbDynEntryCount,
             "urcbDyn adopted 'ds2', which contains only Ind1.stVal (no q/t siblings) - so exactly 1 "
             "entry, not a 3-member DO group");
     TEST_ASSERT_EQUAL_STRING("Reporter1LD1/GGIO1$ST$Ind1$stVal", urcbDynEntry0Reference);
 
     urcbDynGotReport = false;
-    SimServer_setBehStVal(sim, 1);
+    SimServer_setModStVal(sim, 1);
 
     TEST_ASSERT_TRUE_MESSAGE(waitUntil(&urcbDyn2GotReport),
-            "expected urcbDyn2 (assigned LLN0's Beh chunk) to report the Beh.stVal flip");
+            "expected urcbDyn2 (the only genuine tier-4 slot this cycle, assigned LLN0's Mod chunk - "
+            "the first cluster in whole-device order) to report the Mod.stVal flip");
     TEST_ASSERT_FALSE_MESSAGE(urcbDynGotReport,
-            "urcbDyn's own chunk (Mod) must not report a Beh change it has no member for");
+            "urcbDyn adopted ds2 (Ind1.stVal only) and has no Mod member to report a change for");
     TEST_ASSERT_EQUAL_INT_MESSAGE(3, urcbDyn2EntryCount,
-            "urcbDyn2's own chunk is exactly Beh's DO group (stVal + its q/t siblings)");
-    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0$ST$Beh$stVal", urcbDyn2Entry0Reference);
+            "urcbDyn2's own chunk is exactly Mod's DO group (stVal + its q/t siblings)");
+    TEST_ASSERT_EQUAL_STRING("Reporter1LD1/LLN0$ST$Mod$stVal", urcbDyn2Entry0Reference);
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
@@ -2101,7 +2152,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix);
     RUN_TEST(test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated);
     RUN_TEST(test_reconnect_afterServerRestart_redeliverySuppressed_thenChangeReportsPreservedPreviousValue);
-    RUN_TEST(test_crossRcbDuplicateContent_onlyOneOfTwoIdenticalRcbsReachesCallback);
+    RUN_TEST(test_crossRcbDuplicateContent_bothIdenticalRcbsReachCallback_dedupMovedDownstream);
     RUN_TEST(test_secondReconnectWithNoNewChanges_doesNotRedeliverBacklog);
     RUN_TEST(test_entryIdStaleGuard_doesNotSuppressLegitimateMultiEntryBacklog);
     RUN_TEST(test_dynamicDataset_maxAttributesExceeded_chunksOntoSpareRcbInstances);

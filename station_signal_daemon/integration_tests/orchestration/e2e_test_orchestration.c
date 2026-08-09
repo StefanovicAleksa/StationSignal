@@ -286,8 +286,17 @@ test_fullSequence_bootstrapModelReportAndGoose_endToEnd(void) {
                 sawReport = true;
             }
         } else if (type && source && strcmp(type->valuestring, "GOOSE") == 0) {
+            /* This fixture also declares "gcbDup" (same ds1 dataset as
+             * gcbInd, reproducing a real network's redundant-publisher
+             * pattern) - cross-protocol/cross-GoCB duplicate suppression is
+             * ipc_dispatcher's own concern now (see
+             * IpcDispatcherUseCases_shouldForwardWithinProtocol), not
+             * suppressed here, so gcbDup's own independent GOOSE message can
+             * genuinely arrive on this same websocket. This test is
+             * specifically about gcbInd, so gcbDup's own frames must be
+             * ignored rather than racily overwriting lastGoCbRef. */
             cJSON* goCbRef = cJSON_GetObjectItem(source, "goCbRef");
-            if (goCbRef && goCbRef->valuestring) {
+            if (goCbRef && goCbRef->valuestring && strcmp(goCbRef->valuestring, EXPECTED_GOCB_REF) == 0) {
                 strncpy(lastGoCbRef, goCbRef->valuestring, sizeof(lastGoCbRef) - 1);
                 sawGoose = true;
             }
@@ -408,8 +417,14 @@ test_onlineDiscoveryFallback_afterNoSclFileFound_endToEnd(void) {
         if (type && source && strcmp(type->valuestring, "MMS_REPORT") == 0) {
             sawReport = true;
         } else if (type && source && strcmp(type->valuestring, "GOOSE") == 0) {
+            /* Same gcbInd-only scoping as test_fullSequence_bootstrapModelReportAndGoose_endToEnd's
+             * own loop above - the online-discovered model also picks up
+             * "gcbDup" (same ds1 dataset), whose own independent GOOSE
+             * message can genuinely arrive on this websocket now that
+             * cross-GoCB dedup is ipc_dispatcher's concern, not this
+             * feature's. */
             cJSON* goCbRef = cJSON_GetObjectItem(source, "goCbRef");
-            if (goCbRef && goCbRef->valuestring) {
+            if (goCbRef && goCbRef->valuestring && strcmp(goCbRef->valuestring, EXPECTED_GOCB_REF) == 0) {
                 strncpy(lastGoCbRef, goCbRef->valuestring, sizeof(lastGoCbRef) - 1);
                 sawGoose = true;
             }

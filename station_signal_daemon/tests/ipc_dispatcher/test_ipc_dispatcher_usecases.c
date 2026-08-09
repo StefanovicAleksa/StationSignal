@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "unity.h"
@@ -344,6 +345,146 @@ test_freeMessage_doesNotCrash_onNull(void) {
     IpcDispatcherUseCases_freeMessage(NULL);
 }
 
+/* ---- shouldForwardWithinProtocol (cross-source, same-protocol dedup - see
+ * IpcDispatcherDedupCache's own doc comment, ipc_dispatcher_types.h) ---- */
+
+static IpcScalarValue
+boolValue(bool b) {
+    IpcScalarValue v;
+    v.type = IPC_SCALAR_BOOL;
+    v.value.b = b;
+    return v;
+}
+
+void
+test_shouldForwardWithinProtocol_firstEverContent_isForwardedAndSeedsCache(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcScalarValue value = boolValue(true);
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+
+    bool forwarded = IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &value, true, quality);
+
+    TEST_ASSERT_TRUE(forwarded);
+    TEST_ASSERT_EQUAL_INT(1, cache.count);
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_sameSourceRepeat_stillForwarded(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcScalarValue value = boolValue(true);
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &value, true, quality));
+    /* Identical content, SAME source - this layer only concerns itself with
+     * CROSS-source duplication, so a same-source repeat is left entirely to
+     * that source's own per-position value-diff cache. */
+    TEST_ASSERT_TRUE_MESSAGE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA",
+            "LD0/LLN0$ST$Ind1$stVal", &value, true, quality),
+            "a same-source repeat must not be suppressed by this layer");
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_differentSourceIdenticalContent_isSuppressed(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcScalarValue value = boolValue(true);
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &value, true, quality));
+    TEST_ASSERT_FALSE_MESSAGE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbB",
+            "LD0/LLN0$ST$Ind1$stVal", &value, true, quality),
+            "a different source forwarding the SAME reference/value/quality must be suppressed");
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_differentSourceDifferentValue_isForwarded(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcScalarValue valueA = boolValue(true);
+    IpcScalarValue valueB = boolValue(false);
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &valueA, true, quality));
+    TEST_ASSERT_TRUE_MESSAGE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbB",
+            "LD0/LLN0$ST$Ind1$stVal", &valueB, true, quality),
+            "a genuinely different value from a different source must still be forwarded");
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_differentSourceDifferentQuality_isForwarded(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcScalarValue value = boolValue(true);
+    IpcQuality qualityGood = { IPC_QUALITY_GOOD, 0 };
+    IpcQuality qualityInvalid = { IPC_QUALITY_INVALID, 0 };
+
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &value, true, qualityGood));
+    TEST_ASSERT_TRUE_MESSAGE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbB",
+            "LD0/LLN0$ST$Ind1$stVal", &value, true, qualityInvalid),
+            "a genuinely different quality from a different source must still be forwarded");
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_ringWraparound_evictsOldestWithoutFalseSuppression(void) {
+    IpcDispatcherDedupCache cache;
+    memset(&cache, 0, sizeof(cache));
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+
+    /* Fill the ring past capacity with distinct (reference, source) entries -
+     * the very first entry must eventually be evicted and no longer able to
+     * cause a false suppression. */
+    char sourceBuf[32];
+    char refBuf[64];
+    for (int i = 0; i < IPC_DISPATCHER_DEDUP_CAPACITY + 10; i++) {
+        snprintf(sourceBuf, sizeof(sourceBuf), "rcb%d", i);
+        snprintf(refBuf, sizeof(refBuf), "LD0/LLN0$ST$Ind%d$stVal", i);
+        IpcScalarValue value = boolValue(true);
+        TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, sourceBuf, refBuf, &value, true,
+                quality));
+    }
+    TEST_ASSERT_EQUAL_INT(IPC_DISPATCHER_DEDUP_CAPACITY, cache.count);
+
+    /* The very first entry ("rcb0"/"Ind0") was evicted long ago - a new,
+     * different source forwarding that exact old content must not be
+     * suppressed by a stale, already-overwritten slot. */
+    IpcScalarValue value = boolValue(true);
+    TEST_ASSERT_TRUE_MESSAGE(IpcDispatcherUseCases_shouldForwardWithinProtocol(&cache, "rcbNew",
+            "LD0/LLN0$ST$Ind0$stVal", &value, true, quality),
+            "an evicted entry must never cause a false suppression");
+
+    IpcDispatcherUseCases_destroyDedupCache(&cache);
+}
+
+void
+test_shouldForwardWithinProtocol_nullCache_alwaysForwards(void) {
+    IpcScalarValue value = boolValue(true);
+    IpcQuality quality = { IPC_QUALITY_GOOD, 0 };
+    TEST_ASSERT_TRUE(IpcDispatcherUseCases_shouldForwardWithinProtocol(NULL, "rcbA", "LD0/LLN0$ST$Ind1$stVal",
+            &value, true, quality));
+}
+
+void
+test_destroyDedupCache_doesNotCrash_onNull(void) {
+    IpcDispatcherUseCases_destroyDedupCache(NULL);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -373,6 +514,15 @@ main(void) {
     RUN_TEST(test_assembleMessage_extrasNull_everyHasFlagFalse);
     RUN_TEST(test_assembleMessage_extrasPopulated_roundTripsEveryField);
     RUN_TEST(test_freeMessage_doesNotCrash_onNull);
+
+    RUN_TEST(test_shouldForwardWithinProtocol_firstEverContent_isForwardedAndSeedsCache);
+    RUN_TEST(test_shouldForwardWithinProtocol_sameSourceRepeat_stillForwarded);
+    RUN_TEST(test_shouldForwardWithinProtocol_differentSourceIdenticalContent_isSuppressed);
+    RUN_TEST(test_shouldForwardWithinProtocol_differentSourceDifferentValue_isForwarded);
+    RUN_TEST(test_shouldForwardWithinProtocol_differentSourceDifferentQuality_isForwarded);
+    RUN_TEST(test_shouldForwardWithinProtocol_ringWraparound_evictsOldestWithoutFalseSuppression);
+    RUN_TEST(test_shouldForwardWithinProtocol_nullCache_alwaysForwards);
+    RUN_TEST(test_destroyDedupCache_doesNotCrash_onNull);
 
     return UNITY_END();
 }

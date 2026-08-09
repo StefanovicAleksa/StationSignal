@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "features/mms_dataset_manager/data/mms_dataset_manager_provisioning.h"
+#include "features/mms_dataset_manager/data/mms_dataset_manager_discovery.h"
 #include "features/mms_dataset_manager/data/mms_dataset_manager_naming.h"
 #include "features/mms_dataset_manager/domain/mms_dataset_manager_usecases.h"
 #include "features/mms_dataset_manager/utils/mms_dataset_manager_utils.h"
@@ -27,6 +28,108 @@ MmsDatasetManagerProvisioning_destroyChunkAssignment(void* entry) {
         free(e->memberReferences);
     }
     free(e);
+}
+
+void
+MmsDatasetManagerProvisioning_destroyPreResolvedEntry(void* entry) {
+    if (!entry) return;
+    MmsDatasetManagerPreResolvedEntry* e = (MmsDatasetManagerPreResolvedEntry*) entry;
+    free(e->rcbReference);
+    free(e->datasetReference);
+    if (e->memberReferences) LinkedList_destroyDeep(e->memberReferences, free);
+    free(e);
+}
+
+MmsDatasetManagerPreResolvedEntry*
+MmsDatasetManagerProvisioning_findPreResolvedEntry(LinkedList preResolvedEntries, const char* rcbReference) {
+    if (!preResolvedEntries || !rcbReference) return NULL;
+    for (LinkedList el = LinkedList_getNext(preResolvedEntries); el; el = LinkedList_getNext(el)) {
+        MmsDatasetManagerPreResolvedEntry* entry = (MmsDatasetManagerPreResolvedEntry*) LinkedList_getData(el);
+        if (entry->rcbReference && strcmp(entry->rcbReference, rcbReference) == 0) return entry;
+    }
+    return NULL;
+}
+
+void
+MmsDatasetManagerProvisioning_runClaimPass(MmsDatasetManagerHandle handle, LinkedList* outClaimedLeaves) {
+    LinkedList claimedLeaves = LinkedList_create();
+    if (outClaimedLeaves) *outClaimedLeaves = claimedLeaves;
+
+    handle->session.preResolvedEntries = LinkedList_create();
+    if (!handle->targets) return;
+
+    int preResolvedCount = 0;
+    LinkedList element = LinkedList_getNext(handle->targets);
+    while (element) {
+        ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+        element = LinkedList_getNext(element);
+
+        /* SCL-static targets never enter the Dyn pool at all - nothing to
+         * pre-resolve, tier 1 already covers them unconditionally in
+         * MmsDatasetManager_resolveForTarget. */
+        if (target->datasetReference) continue;
+
+        IedClientError err = IED_ERROR_OK;
+        ClientReportControlBlock rcb =
+                IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
+        if (!rcb) {
+            fprintf(stderr, "[mms_dataset_manager] claim pass: getRCBValues failed for '%s': %s (%d) - "
+                    "leaving it as a tier-4 (self-create) candidate\n",
+                    target->objectReference, IedClientError_toString(err), err);
+            continue;
+        }
+
+        LinkedList memberRefs = NULL;
+        MmsDatasetTier tier = MMS_DATASET_TIER_NONE;
+        const char* datasetReference = NULL;
+
+        if (MmsDatasetManagerDiscovery_pullLiveDataset(handle, target, rcb, &memberRefs)) {
+            /* Copy BEFORE destroying rcb below - this pointer aliases rcb's
+             * own internal MmsValue buffer (ClientReportControlBlock_getDataSetReference
+             * returns MmsValue_toString of rcb->datSet), same hazard
+             * MmsDatasetResolution.datasetReference's own doc comment
+             * describes. */
+            datasetReference = ClientReportControlBlock_getDataSetReference(rcb);
+            tier = MMS_DATASET_TIER_LIVE;
+        } else {
+            const char* adopted = MmsDatasetManagerDiscovery_adoptUnclaimedDataset(handle, target, &memberRefs);
+            if (adopted) {
+                datasetReference = adopted;
+                tier = MMS_DATASET_TIER_ADOPTED;
+            }
+        }
+
+        if (datasetReference) {
+            MmsDatasetManagerPreResolvedEntry* entry = malloc(sizeof(MmsDatasetManagerPreResolvedEntry));
+            if (entry) {
+                entry->rcbReference = MmsDatasetManagerUtils_safeStringDup(target->objectReference);
+                entry->datasetReference = MmsDatasetManagerUtils_safeStringDup(datasetReference);
+                entry->tier = tier;
+                entry->memberReferences = memberRefs;
+                LinkedList_add(handle->session.preResolvedEntries, entry);
+                preResolvedCount++;
+
+                for (LinkedList m = LinkedList_getNext(memberRefs); m; m = LinkedList_getNext(m)) {
+                    char* ref = (char*) LinkedList_getData(m);
+                    if (!MmsDatasetManagerNaming_stringListContains(claimedLeaves, ref)) {
+                        LinkedList_add(claimedLeaves, MmsDatasetManagerUtils_safeStringDup(ref));
+                    }
+                }
+                fprintf(stderr, "[mms_dataset_manager] claim pass: '%s' pre-resolved via %s: '%s' (%d member(s)) "
+                        "- excluded from this cycle's whole-device tier-4 pool\n", target->objectReference,
+                        tier == MMS_DATASET_TIER_LIVE ? "live" : "adopted", datasetReference,
+                        LinkedList_size(memberRefs));
+            } else if (memberRefs) {
+                LinkedList_destroyDeep(memberRefs, free);
+            }
+        }
+
+        ClientReportControlBlock_destroy(rcb);
+    }
+
+    fprintf(stderr, "[mms_dataset_manager] claim pass complete: %d target(s) pre-resolved via tier 2/3, %d "
+            "distinct leaf(ves) already covered and excluded from this cycle's whole-device tier-4 clustering\n",
+            preResolvedCount, LinkedList_size(claimedLeaves));
 }
 
 static const char*
@@ -429,22 +532,28 @@ MmsDatasetManagerProvisioning_getOrCreateDataset(MmsDatasetManagerHandle handle,
 }
 
 LinkedList
-MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandle handle) {
+MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandle handle, LinkedList claimedLeaves) {
     LinkedList plan = LinkedList_create();
     if (!handle->targets) return plan;
 
-    /* Slot pool: every Dyn target on the WHOLE device, in handle->targets'
-     * own existing order - a list of BORROWED ReportControlBlockTarget*
-     * (owned by handle->targets itself), destroyed with
-     * LinkedList_destroyStatic below, never Deep. Unlike the old per-LN
-     * chunk plan, this is not filtered/grouped by LN at all - every Dyn
-     * target anywhere on the device is one fungible slot in one combined
-     * pool. */
+    /* Slot pool: every Dyn target on the WHOLE device that did NOT already
+     * resolve via MmsDatasetManagerProvisioning_runClaimPass's own tier 2/3
+     * claim pass (handle->session.preResolvedEntries - see that function's
+     * own doc comment), in handle->targets' own existing order - a list of
+     * BORROWED ReportControlBlockTarget* (owned by handle->targets itself),
+     * destroyed with LinkedList_destroyStatic below, never Deep. Unlike the
+     * old per-LN chunk plan, this is not filtered/grouped by LN at all -
+     * every eligible Dyn target anywhere on the device is one fungible slot
+     * in one combined pool. */
     LinkedList slots = LinkedList_create();
     LinkedList slotScan = LinkedList_getNext(handle->targets);
     while (slotScan) {
         ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotScan);
-        if (!t->datasetReference) LinkedList_add(slots, t);
+        if (!t->datasetReference
+                && !MmsDatasetManagerProvisioning_findPreResolvedEntry(handle->session.preResolvedEntries,
+                        t->objectReference)) {
+            LinkedList_add(slots, t);
+        }
         slotScan = LinkedList_getNext(slotScan);
     }
     if (LinkedList_size(slots) == 0) {
@@ -462,8 +571,8 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
     }
 
     LinkedList wholeDeviceLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(handle->iedModel);
-    int leafCount = wholeDeviceLeaves ? LinkedList_size(wholeDeviceLeaves) : 0;
-    if (leafCount == 0) {
+    int rawLeafCount = wholeDeviceLeaves ? LinkedList_size(wholeDeviceLeaves) : 0;
+    if (rawLeafCount == 0) {
         fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: the model has NO reportable (FC=ST/MX) "
                 "attributes anywhere - no Dyn RCB can be given a dataset this cycle\n");
         if (wholeDeviceLeaves) LinkedList_destroyDeep(wholeDeviceLeaves, free);
@@ -471,16 +580,48 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
         return plan;
     }
     fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: %d reportable attribute(s) across the "
-            "whole device to distribute\n", leafCount);
+            "whole device (before excluding what the claim pass already covered)\n", rawLeafCount);
 
-    char** leafArray = calloc((size_t) leafCount, sizeof(char*));
-    if (!leafArray) {
+    char** rawLeafArray = calloc((size_t) rawLeafCount, sizeof(char*));
+    if (!rawLeafArray) {
         LinkedList_destroyDeep(wholeDeviceLeaves, free);
         LinkedList_destroyStatic(slots);
         return plan;
     }
-    int leafIdx = 0;
+    int rawLeafIdx = 0;
     for (LinkedList el = LinkedList_getNext(wholeDeviceLeaves); el; el = LinkedList_getNext(el)) {
+        rawLeafArray[rawLeafIdx++] = (char*) LinkedList_getData(el);
+    }
+
+    /* Exclude whatever MmsDatasetManagerProvisioning_runClaimPass's own tier
+     * 2/3 pass already covered this cycle - see this function's own doc
+     * comment for why. unclaimedLeaves owns its own duplicated strings,
+     * independent of wholeDeviceLeaves, which is freed right after. */
+    LinkedList unclaimedLeaves = MmsDatasetManagerUseCases_filterOutClaimedLeaves(
+            (const char* const*) rawLeafArray, rawLeafCount, claimedLeaves);
+    free(rawLeafArray);
+    LinkedList_destroyDeep(wholeDeviceLeaves, free);
+
+    int leafCount = LinkedList_size(unclaimedLeaves);
+    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: %d attribute(s) already covered by this "
+            "cycle's tier 2/3 claim pass excluded - %d remain to distribute across %d Dyn slot(s)\n",
+            rawLeafCount - leafCount, leafCount, LinkedList_size(slots));
+    if (leafCount == 0) {
+        fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: nothing left to cluster - the "
+                "device's reportable data is already fully covered by this cycle's tier 2/3 claims\n");
+        LinkedList_destroyStatic(unclaimedLeaves);
+        LinkedList_destroyStatic(slots);
+        return plan;
+    }
+
+    char** leafArray = calloc((size_t) leafCount, sizeof(char*));
+    if (!leafArray) {
+        LinkedList_destroyDeep(unclaimedLeaves, free);
+        LinkedList_destroyStatic(slots);
+        return plan;
+    }
+    int leafIdx = 0;
+    for (LinkedList el = LinkedList_getNext(unclaimedLeaves); el; el = LinkedList_getNext(el)) {
         leafArray[leafIdx++] = (char*) LinkedList_getData(el);
     }
 
@@ -501,7 +642,7 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
                     (const char* const*) leafArray, leafCount, maxAttributes)
             : MmsDatasetManagerUseCases_groupReferencesByLn((const char* const*) leafArray, leafCount);
     free(leafArray);
-    LinkedList_destroyDeep(wholeDeviceLeaves, free);
+    LinkedList_destroyDeep(unclaimedLeaves, free);
 
     int totalClusters = LinkedList_size(clusterLists);
     int slotCount = LinkedList_size(slots);
