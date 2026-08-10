@@ -29,14 +29,52 @@ IedModelLnCategory_forLnClass(const char* lnClass);
  * lnClass field available separately - used only by
  * ied_model_online_loader's no-SCL fallback path, where MMS ACSI directory
  * browsing returns only this already-built name. Strips the trailing digit
- * run (inst) then suffix-matches the remainder against the full IEC 61850-7-4
- * standard LN class name dictionary, longest match wins (handles an
- * arbitrary vendor prefix glued directly in front with no delimiter). Never
- * guesses: no confident match returns IED_MODEL_LN_CATEGORY_OTHER, same as
- * an unrecognized group letter. NULL/empty input also returns OTHER.
+ * run (inst), then two stages:
+ *
+ *   1. suffix-match the remainder against the IEC 61850-7-4 standard LN class
+ *      name dictionary, longest match wins (handles an arbitrary vendor
+ *      prefix glued directly in front with no delimiter);
+ *   2. failing that, read the last FOUR characters as the class name and
+ *      classify by its first letter - IEC 61850-6 fixes an LN class at
+ *      exactly four characters, so this classifies standard classes the
+ *      dictionary happens to omit and vendor extensions alike, without
+ *      needing an entry for either.
+ *
+ * Returns IED_MODEL_LN_CATEGORY_OTHER when neither stage yields a known group
+ * letter, when fewer than four characters remain, and for NULL/empty input.
  */
 LnCategory
 IedModelLnCategory_forWireInstanceName(const char* wireName);
+
+/*
+ * Whether an LN of this class is exempt from category filtering entirely -
+ * true for exactly "LLN0", false for everything else. LLN0 is an LD's own
+ * status node (Mod/Beh/Health/NamPlt): it is what tells a consumer whether
+ * that whole Logical Device is on, blocked, or faulted, so it must reach the
+ * frontend whatever categories the technician picked. Its group letter is
+ * 'L', so IedModelLnCategory_forLnClass classifies it OTHER - it is
+ * deliberately left classified that way (ipc_dispatcher's outbound
+ * `category` string, and therefore the frontend, is unchanged); this
+ * predicate is a SEPARATE, orthogonal exemption honored at every filter
+ * site, never a fifth category. Deliberately LLN0 only, not LPHD or the rest
+ * of the 'L' group - those are ordinary reportable data with no
+ * whole-LD-status role. NULL/empty returns false.
+ */
+bool
+IedModelLnCategory_isAlwaysIncludedLnClass(const char* lnClass);
+
+/*
+ * Wire-instance-name counterpart of IedModelLnCategory_isAlwaysIncludedLnClass,
+ * for ied_model_online_loader's no-SCL fallback path (no separate lnClass
+ * field - see IedModelLnCategory_forWireInstanceName's own doc comment).
+ * Deliberately does NOT reuse that function's dictionary match: its trailing
+ * digit-strip removes LLN0's own '0' (which is part of the class name, not an
+ * SCL inst), leaving "LLN", which matches nothing. LLN0 also never carries a
+ * prefix or an inst per IEC 61850-6, so an exact "LLN0" comparison is both
+ * correct and complete here. NULL/empty returns false.
+ */
+bool
+IedModelLnCategory_isAlwaysIncludedWireInstanceName(const char* wireName);
 
 /*
  * Canonical uppercase name for a single LnCategory value ("CONTROL",

@@ -236,6 +236,20 @@ typedef struct {
      * frees this. */
     LnCategory* leafCategories;
 
+    /* Parallel to leafCategories, same size and same per-member resolution
+     * (IedModel_isMemberReferenceAlwaysIncluded, replicated across the
+     * member's leaf-slot range): slot i's LN is exempt from categoryFilter
+     * entirely - true only for LLN0 today, see
+     * IedModelLnCategory_isAlwaysIncludedLnClass's own doc comment. Kept as
+     * its own array rather than folded into leafCategories precisely so
+     * leafCategories stays the value ipc_dispatcher DISPLAYS (an LLN0 leaf
+     * still reports OTHER on the wire) while this one alone decides
+     * visibility. May be NULL if allocation failed at build time, which
+     * degrades to "no exemptions" - i.e. exactly the pre-exemption behavior,
+     * never anything worse. Only MmsReportClientUseCases_destroyMemberRefCacheEntry
+     * frees this. */
+    bool* leafAlwaysInclude;
+
     /* This RCB's connection's active category filter (IedModel_getCategoryFilter),
      * captured once at buildMemberRefCacheEntry time - connection-lifetime-invariant
      * (the same IedModelHandle, and therefore the same filter, for as long as this

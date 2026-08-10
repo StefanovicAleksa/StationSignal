@@ -798,14 +798,27 @@ buildGseControls(mxml_node_t* lnNode, LogicalNode* ln, LoaderContext* ctx, const
         if (!isElement(gseNode, "GSEControl")) continue;
 
         const char* name = IedModelUtils_attrRequired(gseNode, "name");
-        /* Unlike ReportControl's datSet (made optional above), GSEControl's
-         * datSet is deliberately kept required: reconsidered for symmetry
-         * with that fix, but every real GSEControl sample in this repo's
-         * own SCDs (86/86 across both files) populates it, so loosening
-         * this would be speculative rather than evidence-driven. */
-        const char* datSet = IedModelUtils_attrRequired(gseNode, "datSet");
-        if (!name || !datSet) {
-            fprintf(stderr, "[ied_model] WARN: skipping malformed GSEControl under LN '%s'\n", ln->name);
+        /*
+         * datSet is OPTIONAL per IEC 61850-6 (tControlWithIEDName) - it is
+         * this daemon that requires one, because GOOSE carries no reference
+         * on the wire: without a dataset there is no member list to resolve
+         * each frame position against, so such a GoCB is unsubscribable, not
+         * malformed. Reported separately from the genuinely-malformed case
+         * below for exactly that reason - a real ABB station file has six of
+         * these (TRIPW1/2/3_GCB, appID="UNKNOWN") and calling a
+         * spec-conformant file malformed sends whoever reads the log after
+         * the wrong problem.
+         */
+        const char* datSet = IedModelUtils_attrOrDefault(gseNode, "datSet", NULL);
+        if (name && !datSet) {
+            fprintf(stderr, "[ied_model] GSEControl '%s' under LN '%s' declares no datSet - skipping it, since "
+                    "GOOSE frames carry no reference and there is no member list to decode them against "
+                    "(legal per IEC 61850-6, just not subscribable)\n", name, ln->name);
+            continue;
+        }
+        if (!name) {
+            fprintf(stderr, "[ied_model] WARN: skipping malformed GSEControl under LN '%s' (missing name)\n",
+                    ln->name);
             continue;
         }
 
@@ -888,6 +901,7 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
         if (entry) {
             entry->ln = ln;
             entry->category = IedModelLnCategory_forLnClass(lnClass);
+            entry->alwaysInclude = IedModelLnCategory_isAlwaysIncludedLnClass(lnClass);
             LinkedList_add(ctx->lnCategories, entry);
         }
     }

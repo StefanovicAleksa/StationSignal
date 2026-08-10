@@ -575,7 +575,10 @@ test_categoryFilter_wholeDeviceReportableAttributes_filteredByEachLeafsOwnLn(voi
     LinkedList_destroyDeep(allLeaves, free);
     IedModel_release(allHandle);
 
-    /* CONTROL-only must include XCBR1's own leaves and exclude every other LN's. */
+    /* CONTROL-only must include XCBR1's own leaves and exclude every other
+     * LN's - EXCEPT LLN0, which is exempt from filtering entirely (an LD's own
+     * Mod/Beh/Health has to reach the frontend whatever was selected; see
+     * IedModelLnCategory_isAlwaysIncludedLnClass's own doc comment). */
     IedModelHandle controlHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
             IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_CONTROL, &error);
     TEST_ASSERT_NOT_NULL(controlHandle);
@@ -583,35 +586,72 @@ test_categoryFilter_wholeDeviceReportableAttributes_filteredByEachLeafsOwnLn(voi
     int controlCount = LinkedList_size(controlLeaves);
     TEST_ASSERT_TRUE_MESSAGE(controlCount > 0, "expected XCBR1's own leaves to survive a CONTROL-only filter");
     TEST_ASSERT_TRUE_MESSAGE(controlCount < allCount,
-            "a CONTROL-only filter must exclude at least the MEASUREMENT/PROTECTION/OTHER leaves");
+            "a CONTROL-only filter must exclude at least the MEASUREMENT/PROTECTION leaves");
 
-    bool foundNonXcbrLeaf = false;
+    bool foundXcbrLeaf = false, foundLln0Leaf = false, foundOtherLnLeaf = false;
     LinkedList element = LinkedList_getNext(controlLeaves);
     while (element) {
         const char* ref = (const char*) LinkedList_getData(element);
-        if (!strstr(ref, "/XCBR1")) foundNonXcbrLeaf = true;
+        if (strstr(ref, "/XCBR1")) foundXcbrLeaf = true;
+        else if (strstr(ref, "/LLN0")) foundLln0Leaf = true;
+        else foundOtherLnLeaf = true;
         element = LinkedList_getNext(element);
     }
-    TEST_ASSERT_FALSE_MESSAGE(foundNonXcbrLeaf, "a CONTROL-only filter must exclude every non-XCBR1 leaf");
+    TEST_ASSERT_TRUE_MESSAGE(foundXcbrLeaf, "a CONTROL-only filter must keep XCBR1's own leaves");
+    TEST_ASSERT_TRUE_MESSAGE(foundLln0Leaf,
+            "LLN0 is exempt from category filtering - its leaves must survive a CONTROL-only filter");
+    TEST_ASSERT_FALSE_MESSAGE(foundOtherLnLeaf,
+            "a CONTROL-only filter must still exclude every LN that is neither XCBR1 nor the exempt LLN0");
     LinkedList_destroyDeep(controlLeaves, free);
     IedModel_release(controlHandle);
 
-    /* PROTECTION-only must include only PTOC1's own leaves. */
+    /* PROTECTION-only must include only PTOC1's own leaves, plus the same
+     * always-included LLN0 ones. */
     IedModelHandle protectionHandle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
             IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_PROTECTION, &error);
     TEST_ASSERT_NOT_NULL(protectionHandle);
     LinkedList protectionLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(protectionHandle);
     TEST_ASSERT_TRUE(LinkedList_size(protectionLeaves) > 0);
-    bool foundNonPtocLeaf = false;
+    bool foundPtocLeaf = false;
+    foundLln0Leaf = false;
+    foundOtherLnLeaf = false;
     element = LinkedList_getNext(protectionLeaves);
     while (element) {
         const char* ref = (const char*) LinkedList_getData(element);
-        if (!strstr(ref, "/PTOC1")) foundNonPtocLeaf = true;
+        if (strstr(ref, "/PTOC1")) foundPtocLeaf = true;
+        else if (strstr(ref, "/LLN0")) foundLln0Leaf = true;
+        else foundOtherLnLeaf = true;
         element = LinkedList_getNext(element);
     }
-    TEST_ASSERT_FALSE_MESSAGE(foundNonPtocLeaf, "a PROTECTION-only filter must exclude every non-PTOC1 leaf");
+    TEST_ASSERT_TRUE_MESSAGE(foundPtocLeaf, "a PROTECTION-only filter must keep PTOC1's own leaves");
+    TEST_ASSERT_TRUE_MESSAGE(foundLln0Leaf,
+            "LLN0 is exempt from category filtering - its leaves must survive a PROTECTION-only filter too");
+    TEST_ASSERT_FALSE_MESSAGE(foundOtherLnLeaf,
+            "a PROTECTION-only filter must still exclude every LN that is neither PTOC1 nor the exempt LLN0");
     LinkedList_destroyDeep(protectionLeaves, free);
     IedModel_release(protectionHandle);
+}
+
+/* The exemption is orthogonal to the category: LLN0 must keep reporting OTHER
+ * on the wire (that is the value ipc_dispatcher tags each data point with),
+ * while isMemberReferenceAlwaysIncluded alone decides visibility. Proven here
+ * against real SCL rather than a hand-built dynamic model. */
+void
+test_categoryFilter_lln0IsAlwaysIncludedButStillCategorizedOther(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(CATEGORY_FIXTURE_PATH, "CatFilterIED",
+            IED_MODEL_ACCESS_REPORT_ONLY, IED_MODEL_LN_CATEGORY_CONTROL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    TEST_ASSERT_TRUE(IedModel_isMemberReferenceAlwaysIncluded(handle, "CatFilterIEDCB1/LLN0$ST$Mod$stVal"));
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER,
+            IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/LLN0$ST$Mod$stVal"));
+
+    TEST_ASSERT_FALSE(IedModel_isMemberReferenceAlwaysIncluded(handle, "CatFilterIEDCB1/XCBR1$ST$Pos$stVal"));
+    TEST_ASSERT_FALSE(IedModel_isMemberReferenceAlwaysIncluded(handle, "CatFilterIEDCB1/MMXU1$MX$TotW$mag$f"));
+    TEST_ASSERT_FALSE(IedModel_isMemberReferenceAlwaysIncluded(handle, "CatFilterIEDCB1/PTOC1$ST$Str$general"));
+
+    IedModel_release(handle);
 }
 
 void
@@ -637,6 +677,122 @@ test_categoryFilter_descCapturedFromRealScl_bothTemplateLevelLeaves(void) {
     TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER,
             IedModel_getCategoryForMemberReference(handle, "CatFilterIEDCB1/LLN0$ST$Mod$stVal"));
 
+    IedModel_release(handle);
+}
+
+/* ---- vendor-neutrality shapes (see fixtures/vendor_abb_shapes.cid) ----
+ *
+ * Every assertion below is a shape a real ABB station file uses that no
+ * Siemens export in this repo does - see that fixture's own header comment
+ * for what each one is and why it's here. */
+
+#define ABB_FIXTURE_PATH "fixtures/vendor_abb_shapes.cid"
+
+static bool
+listContainsString(LinkedList list, const char* needle) {
+    for (LinkedList e = LinkedList_getNext(list); e; e = LinkedList_getNext(e)) {
+        if (strcmp((const char*) LinkedList_getData(e), needle) == 0) return true;
+    }
+    return false;
+}
+
+static bool
+listHasAnyContaining(LinkedList list, const char* needle) {
+    for (LinkedList e = LinkedList_getNext(list); e; e = LinkedList_getNext(e)) {
+        if (strstr((const char*) LinkedList_getData(e), needle)) return true;
+    }
+    return false;
+}
+
+void
+test_vendorAbb_dottedFcdaShorthand_expandedToDollarJoinedReference(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(ABB_FIXTURE_PATH, "AbbIED", IED_MODEL_ACCESS_REPORT_ONLY,
+            IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    LinkedList members = IedModel_getDataSetMemberReferences(handle, "AbbIEDLD0/LLN0$MeasFltA");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, LinkedList_size(members),
+            "every FCDA must still produce exactly one entry - a dropped one would shift every later "
+            "wire position and mislabel unrelated members");
+
+    /* doName="SeqA.c3" is an SDO chain, daName="mag.f" a BDA chain. */
+    TEST_ASSERT_TRUE_MESSAGE(listContainsString(members, "AbbIEDLD0/CMSQI1$MX$SeqA$c3"),
+            "a dotted doName must expand to \"$\"-joined segments");
+    TEST_ASSERT_TRUE_MESSAGE(listContainsString(members, "AbbIEDLD0/TR8ATCC1$MX$BusV$mag$f"),
+            "a dotted daName must expand to \"$\"-joined segments");
+    TEST_ASSERT_FALSE_MESSAGE(listHasAnyContaining(members, "."),
+            "no resolved member reference may keep a raw '.' - nothing downstream can match one, "
+            "and Gap-4 decomposition/semantics/desc all resolve by walking \"$\" segments");
+
+    LinkedList_destroyDeep(members, free);
+    IedModel_release(handle);
+}
+
+void
+test_vendorAbb_datSetLessGseControl_skippedWithoutBreakingTheRest(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(ABB_FIXTURE_PATH, "AbbIED", IED_MODEL_ACCESS_REPORT_ONLY,
+            IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    /* TRIPW1_GCB has no datSet (legal per IEC 61850-6, just unsubscribable);
+     * gcb_A does and must be unaffected by its sibling being skipped. */
+    LinkedList targets = IedModel_getGooseSubscriptionTargets(handle);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(targets));
+    GooseSubscriptionTarget* target = (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
+    TEST_ASSERT_EQUAL_STRING("AbbIEDLD0/LLN0$GO$gcb_A", target->objectReference);
+
+    LinkedList_destroyDeep(targets, IedModel_destroyGooseSubscriptionTarget);
+    IedModel_release(handle);
+}
+
+void
+test_vendorAbb_gseAddressing_hexAppidAndVlanParsedFromCommunication(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(ABB_FIXTURE_PATH, "AbbIED", IED_MODEL_ACCESS_REPORT_ONLY,
+            IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    LinkedList targets = IedModel_getGooseSubscriptionTargets(handle);
+    GooseSubscriptionTarget* target = (GooseSubscriptionTarget*) LinkedList_getData(LinkedList_getNext(targets));
+
+    /* APPID/VLAN-ID are hex strings per IEC 61850-6, never decimal - "3018"
+     * is 0x3018, "002" is 0x002. The Siemens files carry no <GSE><Address>
+     * at all, so this is the first fixture that actually exercises it. */
+    TEST_ASSERT_TRUE_MESSAGE(target->hasAddress, "ABB does populate <GSE><Address>, unlike the Siemens exports");
+    TEST_ASSERT_EQUAL_HEX(0x3018, target->appId);
+    TEST_ASSERT_EQUAL_HEX(0x002, target->vlanId);
+    TEST_ASSERT_EQUAL_HEX(0x01, target->dstMac[0]);
+    TEST_ASSERT_EQUAL_HEX(0x0C, target->dstMac[1]);
+    TEST_ASSERT_EQUAL_HEX(0xCD, target->dstMac[2]);
+    TEST_ASSERT_EQUAL_HEX(0x13, target->dstMac[5]);
+
+    LinkedList_destroyDeep(targets, IedModel_destroyGooseSubscriptionTarget);
+    IedModel_release(handle);
+}
+
+void
+test_vendorAbb_qGroupLn_classifiesAsMeasurement_andRptEnabledMaxSuffixApplied(void) {
+    IedModelLoadError error;
+    IedModelHandle handle = IedModel_loadFromFile(ABB_FIXTURE_PATH, "AbbIED", IED_MODEL_ACCESS_REPORT_ONLY,
+            IED_MODEL_LN_CATEGORY_ALL, &error);
+    TEST_ASSERT_NOT_NULL(handle);
+
+    /* QVVR is IEC 61850-7-4 Ed2 group Q (power quality) - MEASUREMENT, not
+     * the OTHER catch-all it fell into before the group letter was added. */
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_MEASUREMENT,
+            IedModel_getCategoryForMemberReference(handle, "AbbIEDLD0/QVVR1$ST$Str$general"));
+
+    /* <RptEnabled max="5"> - the RCB's real runtime name carries a zero-padded
+     * instance suffix, never the bare SCL name. */
+    LinkedList reportTargets = IedModel_getReportSubscriptionTargets(handle);
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(reportTargets));
+    ReportControlBlockTarget* rcb =
+            (ReportControlBlockTarget*) LinkedList_getData(LinkedList_getNext(reportTargets));
+    TEST_ASSERT_EQUAL_STRING("AbbIEDLD0/LLN0.BR.rcb_A01", rcb->objectReference);
+
+    LinkedList_destroyDeep(reportTargets, IedModel_destroyReportControlBlockTarget);
     IedModel_release(handle);
 }
 
@@ -668,6 +824,12 @@ main(void) {
     RUN_TEST(test_categoryFilter_reportTargets_alwaysIncludedRegardlessOfParentLn);
     RUN_TEST(test_categoryFilter_gooseTargets_alwaysIncludedRegardlessOfParentLn);
     RUN_TEST(test_categoryFilter_wholeDeviceReportableAttributes_filteredByEachLeafsOwnLn);
+    RUN_TEST(test_categoryFilter_lln0IsAlwaysIncludedButStillCategorizedOther);
+
+    RUN_TEST(test_vendorAbb_dottedFcdaShorthand_expandedToDollarJoinedReference);
+    RUN_TEST(test_vendorAbb_datSetLessGseControl_skippedWithoutBreakingTheRest);
+    RUN_TEST(test_vendorAbb_gseAddressing_hexAppidAndVlanParsedFromCommunication);
+    RUN_TEST(test_vendorAbb_qGroupLn_classifiesAsMeasurement_andRptEnabledMaxSuffixApplied);
     RUN_TEST(test_categoryFilter_descCapturedFromRealScl_bothTemplateLevelLeaves);
 
     return UNITY_END();

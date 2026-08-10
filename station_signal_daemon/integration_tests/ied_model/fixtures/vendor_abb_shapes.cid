@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Vendor-neutrality fixture, modelled on the shapes a real ABB station file
+  (48 IEDs, REC650/REC670/REL650/REL670/RET650/RET670/RED670) uses that no
+  Siemens export in this repo does. Deliberately small and hand-written
+  rather than a checked-in 20 MB station SCD - each element below exists to
+  pin one behaviour:
+
+    - DOTTED FCDA SHORTHAND. IEC 61850-6 lets doName/daName carry a nested
+      path with dots ("SeqA.c3" = SDO chain, "mag.f" = BDA chain), whose wire
+      form is "$"-joined. ABB uses both (24 dotted doName + 12 dotted daName
+      in one file); Siemens never does.
+    - A GSEControl with NO datSet. Legal per IEC 61850-6 (tControlWithIEDName
+      makes datSet optional), just not subscribable here, since GOOSE carries
+      no reference on the wire and there is no member list to decode against.
+      The real file has six of these (TRIPW1/2/3_GCB, appID="UNKNOWN").
+    - A Q-group LN (QVVR, power quality, IEC 61850-7-4 Ed2), which classifies
+      MEASUREMENT rather than falling through to OTHER.
+    - <RptEnabled max="5">, which ABB puts on all 229 of its RCBs - the RCB's
+      real runtime name is then "rcb_A01", never bare "rcb_A".
+-->
+<SCL xmlns="http://www.iec.ch/61850/2003/SCL">
+  <Header id="vendor-abb-shapes-fixture" nameStructure="IEDName" />
+
+  <IED name="AbbIED">
+    <Services>
+      <ConfDataSet max="100" maxAttributes="300" />
+      <ConfReportControl max="100" />
+      <!-- datSet="Conf" - configurable offline only, NOT online-writable.
+           Parsed by nothing today; here so the fixture stays a faithful
+           record of the shape that motivated mms_report_client's step-1
+           "refused but already bound" escape hatch. -->
+      <ReportSettings datSet="Conf" rptID="Dyn" optFields="Dyn" bufTime="Dyn" trgOps="Dyn" intgPd="Dyn" />
+      <GSESettings datSet="Conf" appID="Conf" />
+    </Services>
+    <AccessPoint name="S1">
+      <Server>
+        <LDevice inst="LD0">
+          <LN0 lnClass="LLN0" lnType="LLN0Type" inst="">
+            <DataSet name="MeasFltA">
+              <FCDA ldInst="LD0" prefix="C" lnClass="MSQI" lnInst="1" doName="SeqA.c3" fc="MX" />
+              <FCDA ldInst="LD0" prefix="TR8" lnClass="ATCC" lnInst="1" doName="BusV" daName="mag.f" fc="MX" />
+              <FCDA ldInst="LD0" lnClass="QVVR" lnInst="1" doName="Str" daName="general" fc="ST" />
+            </DataSet>
+            <ReportControl name="rcb_A" rptID="AbbIEDLD0/LLN0.rcb_A" datSet="MeasFltA" confRev="600"
+                intgPd="10000" bufTime="100" buffered="true">
+              <TrgOps dchg="true" qchg="true" dupd="true" period="true" />
+              <OptFields seqNum="true" timeStamp="true" dataSet="true" reasonCode="true" entryID="true" />
+              <RptEnabled max="5" />
+            </ReportControl>
+            <!-- Legal, but unsubscribable: no datSet to resolve members from. -->
+            <GSEControl name="TRIPW1_GCB" confRev="200" appID="UNKNOWN" />
+            <GSEControl name="gcb_A" datSet="MeasFltA" confRev="100" appID="AbbIEDLD0/LLN0.gcb_A" />
+          </LN0>
+          <LN lnClass="MSQI" lnType="MSQIType" inst="1" prefix="C" />
+          <LN lnClass="ATCC" lnType="ATCCType" inst="1" prefix="TR8" />
+          <LN lnClass="QVVR" lnType="QVVRType" inst="1" prefix="" />
+        </LDevice>
+      </Server>
+    </AccessPoint>
+  </IED>
+
+  <Communication>
+    <SubNetwork name="SN1" type="8-MMS">
+      <ConnectedAP iedName="AbbIED" apName="S1">
+        <GSE ldInst="LD0" cbName="gcb_A">
+          <Address>
+            <P type="VLAN-ID">002</P>
+            <P type="VLAN-PRIORITY">4</P>
+            <P type="MAC-Address">01-0C-CD-01-00-13</P>
+            <P type="APPID">3018</P>
+          </Address>
+          <MinTime unit="s" multiplier="m">4</MinTime>
+          <MaxTime unit="s" multiplier="m">10000</MaxTime>
+        </GSE>
+      </ConnectedAP>
+    </SubNetwork>
+  </Communication>
+
+  <DataTypeTemplates>
+    <LNodeType id="LLN0Type" lnClass="LLN0">
+      <DO name="Mod" type="INC1" />
+      <DO name="Beh" type="ENS1" />
+    </LNodeType>
+
+    <!-- SeqA is an SDO chain: SeqA -> c3 -> (cVal/q/t), which is what makes
+         doName="SeqA.c3" meaningful. -->
+    <LNodeType id="MSQIType" lnClass="MSQI">
+      <DO name="SeqA" type="SEQ1" />
+    </LNodeType>
+
+    <LNodeType id="ATCCType" lnClass="ATCC">
+      <DO name="BusV" type="MV1" />
+    </LNodeType>
+
+    <LNodeType id="QVVRType" lnClass="QVVR">
+      <DO name="Str" type="ACT1" />
+    </LNodeType>
+
+    <DOType id="SEQ1" cdc="SEQ">
+      <SDO name="c3" type="CMV1" />
+    </DOType>
+
+    <DOType id="CMV1" cdc="CMV">
+      <DA name="cVal" bType="Struct" type="Vector1" fc="MX" />
+      <DA name="q" bType="Quality" fc="MX" />
+      <DA name="t" bType="Timestamp" fc="MX" />
+    </DOType>
+
+    <DOType id="MV1" cdc="MV">
+      <DA name="mag" bType="Struct" type="AnalogueValue1" fc="MX" />
+      <DA name="q" bType="Quality" fc="MX" />
+      <DA name="t" bType="Timestamp" fc="MX" />
+    </DOType>
+
+    <DOType id="ACT1" cdc="ACT">
+      <DA name="general" bType="BOOLEAN" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="INC1" cdc="INC">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DOType id="ENS1" cdc="ENS">
+      <DA name="stVal" bType="INT32" fc="ST" />
+      <DA name="q" bType="Quality" fc="ST" />
+      <DA name="t" bType="Timestamp" fc="ST" />
+    </DOType>
+
+    <DAType id="Vector1">
+      <BDA name="mag" bType="Struct" type="AnalogueValue1" />
+    </DAType>
+
+    <DAType id="AnalogueValue1">
+      <BDA name="f" bType="FLOAT32" />
+    </DAType>
+  </DataTypeTemplates>
+</SCL>

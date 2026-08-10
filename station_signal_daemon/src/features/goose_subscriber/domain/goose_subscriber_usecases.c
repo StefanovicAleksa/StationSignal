@@ -235,8 +235,19 @@ lookupCategoryForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
     return memberRefCache->leafCategories[slot];
 }
 
+/* Same shape as lookupCategoryForSlot, for memberRefCache->leafAlwaysInclude -
+ * false whenever the array is absent or the slot is out of range, so a
+ * missing lookup can never invent an exemption. */
+static bool
+lookupAlwaysIncludeForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafAlwaysInclude) return false;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return false;
+    return memberRefCache->leafAlwaysInclude[slot];
+}
+
 /* Mirrors mms_report_client_usecases.c's own passesCategoryFilter exactly -
- * see that function's doc comment for the full rationale (checked before
+ * see that function's doc comment for the full rationale (an LLN0 slot
+ * bypasses the mask via leafAlwaysInclude; otherwise checked before
  * appendCandidate at every call site below, safe against value/quality
  * splitting because category is a per-LN property; a zero mask degrades to
  * "unfiltered" rather than "matches nothing," both because production can
@@ -244,8 +255,9 @@ lookupCategoryForSlot(GooseSubscriberMemberRefCache* memberRefCache, int slot) {
  * zero-initialize GooseSubscriberMemberRefCache without knowing about this
  * field). */
 static bool
-passesCategoryFilter(GooseSubscriberMemberRefCache* memberRefCache, LnCategory category) {
+passesCategoryFilter(GooseSubscriberMemberRefCache* memberRefCache, int slot, LnCategory category) {
     if (!memberRefCache || memberRefCache->categoryFilter == 0) return true;
+    if (lookupAlwaysIncludeForSlot(memberRefCache, slot)) return true;
     return (memberRefCache->categoryFilter & category) != 0;
 }
 
@@ -458,7 +470,7 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
                     for (int k = 0; k < flattenedCount; k++) {
                         int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
                         LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
-                        if (!passesCategoryFilter(memberRefCache, category)) continue;
+                        if (!passesCategoryFilter(memberRefCache, slot, category)) continue;
                         appendCandidate(candidates, reordered[k], memberRefCache->memberLeafReferences[i][k], slot,
                                 lookupSemanticForSlot(memberRefCache, slot), category,
                                 lookupDescriptionForSlot(memberRefCache, slot));
@@ -479,7 +491,7 @@ collectCandidates(const MmsValue* dataSetValues, GooseSubscriberMemberRefCache* 
                 : NULL;
 
         LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
-        if (!passesCategoryFilter(memberRefCache, category)) continue;
+        if (!passesCategoryFilter(memberRefCache, slot, category)) continue;
 
         appendCandidate(candidates, rawValue, ref, slot, lookupSemanticForSlot(memberRefCache, slot), category,
                 lookupDescriptionForSlot(memberRefCache, slot));

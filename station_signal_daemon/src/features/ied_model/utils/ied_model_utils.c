@@ -113,12 +113,43 @@ IedModelUtils_buildOptFlds(mxml_node_t* optFieldsNode) {
     return optFlds;
 }
 
+/*
+ * Rewrites every '.' in [src, srcEnd) to '$' while copying into dst.
+ *
+ * IEC 61850-6 lets an FCDA's doName/daName carry a DOTTED PATH rather than a
+ * single name - doName="SeqA.c3" is the SDO chain SeqA -> c3, daName="mag.f"
+ * the BDA chain mag -> f - whose wire form is "$"-joined like every other
+ * segment of the reference. Real ABB station files use both forms (24 dotted
+ * doName + 12 dotted daName in one 48-IED file, in its MeasFltA and Goose
+ * datasets); Siemens' own exports never do, which is why this went unnoticed.
+ *
+ * Left un-expanded, the resulting entry read "...$MX$SeqA.c3" - the dataset
+ * entry was still created, so no wire position shifted and no OTHER member was
+ * mislabeled, but that one member carried a reference no consumer could match
+ * and silently lost Gap-4 decomposition, Dbpos semantics and desc lookup, all
+ * of which resolve by walking "$" segments.
+ *
+ * A '.' is never legal INSIDE a single SCL name (tRestrName is
+ * [A-Za-z][0-9A-Za-z_]*), so an unconditional rewrite can't corrupt a
+ * non-dotted name - there is nothing to distinguish, hence no flag or
+ * lookahead here.
+ */
+static char*
+appendWithDotsAsSeparators(char* dst, const char* src) {
+    for (; *src; src++) {
+        *dst++ = (*src == '.') ? '$' : *src;
+    }
+    return dst;
+}
+
 char*
 IedModelUtils_buildFcdaVariableName(const char* ldName, const char* lnClass, const char* lnInst,
         const char* prefix, const char* fc, const char* doName, const char* daName) {
     char* lnName = IedModelUtils_buildLnName(prefix ? prefix : "", lnClass, lnInst ? lnInst : "");
     if (!lnName) return NULL;
 
+    /* Unchanged: the dot rewrite above is length-preserving (one char in, one
+     * char out), so this sizing still holds exactly. */
     size_t len = strlen(ldName) + 1 + strlen(lnName) + 1 + strlen(fc) + 1 + strlen(doName) + 1
             + (daName ? strlen(daName) : 0) + 1;
     char* variable = malloc(len);
@@ -127,11 +158,23 @@ IedModelUtils_buildFcdaVariableName(const char* ldName, const char* lnClass, con
         return NULL;
     }
 
+    /* Built by hand rather than snprintf'd so doName/daName can be copied
+     * through the dot rewrite. Applied uniformly to every part for one code
+     * path rather than two: ldName/lnName/fc are all tRestrName-shaped and
+     * can never contain a '.', so it is a plain copy for them. */
+    char* cursor = variable;
+    cursor = appendWithDotsAsSeparators(cursor, ldName);
+    *cursor++ = '/';
+    cursor = appendWithDotsAsSeparators(cursor, lnName);
+    *cursor++ = '$';
+    cursor = appendWithDotsAsSeparators(cursor, fc);
+    *cursor++ = '$';
+    cursor = appendWithDotsAsSeparators(cursor, doName);
     if (daName) {
-        snprintf(variable, len, "%s/%s$%s$%s$%s", ldName, lnName, fc, doName, daName);
-    } else {
-        snprintf(variable, len, "%s/%s$%s$%s", ldName, lnName, fc, doName);
+        *cursor++ = '$';
+        cursor = appendWithDotsAsSeparators(cursor, daName);
     }
+    *cursor = '\0';
 
     free(lnName);
     return variable;

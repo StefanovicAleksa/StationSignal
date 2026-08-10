@@ -885,6 +885,48 @@ test_buildRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache(voi
     GooseSubscriberUseCases_freeRecord(record);
 }
 
+/* leafAlwaysInclude (LLN0) overrides the mask outright - byte-identical setup
+ * to the exclusion test above, plus the exemption flag and a pre-seeded cache
+ * slot (GOOSE suppresses every first-ever observation regardless of filter). */
+void
+test_buildRecord_alwaysIncludeSlot_bypassesAFilterThatWouldExcludeIt(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    int leafSlotOffsets[1] = { 0 };
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    char* memberReferences[1] = { (char*) "Breaker1CB1/LLN0$ST$Beh$stVal" };
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_OTHER };
+    bool leafAlwaysInclude[1] = { true };
+    GooseSubscriberMemberRefCache cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberReferences = memberReferences;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.leafAlwaysInclude = leafAlwaysInclude;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL; /* excludes OTHER */
+
+    uint8_t zeroMac[6] = { 0 };
+    GooseSubscriberRecord* record = GooseSubscriberUseCases_buildRecord(
+            "Breaker1CB1/LLN0$GO$gcbStatus", NULL, NULL,
+            1, 0, 1, false, false, 2000, 0,
+            false, 0, 0, -1,
+            zeroMac, zeroMac,
+            dataSetValues, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "an LLN0 slot must forward even under a filter that excludes its own category");
+    TEST_ASSERT_EQUAL_MESSAGE(IED_MODEL_LN_CATEGORY_OTHER, record->entries[0].category,
+            "the exemption must not change the category reported on the wire - LLN0 stays OTHER");
+
+    MmsValue_delete(dataSetValues);
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    GooseSubscriberUseCases_freeRecord(record);
+}
+
 void
 test_buildRecord_categoryFilter_matchingCategoryStillForwardsNormally(void) {
     MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
@@ -1307,6 +1349,7 @@ main(void) {
     RUN_TEST(test_buildRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
 
     RUN_TEST(test_buildRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache);
+    RUN_TEST(test_buildRecord_alwaysIncludeSlot_bypassesAFilterThatWouldExcludeIt);
     RUN_TEST(test_buildRecord_categoryFilter_matchingCategoryStillForwardsNormally);
     RUN_TEST(test_buildRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether);
 

@@ -1125,6 +1125,88 @@ test_getReportableAttributeReferencesForWholeDevice_unclassifiedLn_defaultsToOth
     IedModel_destroy(bareModel);
 }
 
+/* ---- LLN0's always-include exemption ---- */
+
+/* Same two-LN shape as buildTwoCategoryFixtureModel, plus an LLN0 carrying
+ * the LD-status leaf every filter must let through. */
+static IedModel*
+buildLln0FixtureModel(LogicalNode** outLln0, LogicalNode** outMmxuLn) {
+    IedModel* model = IedModel_create("Bare");
+    LogicalDevice* ld = LogicalDevice_create("LD1", model);
+
+    LogicalNode* lln0 = LogicalNode_create("LLN0", ld);
+    DataObject* beh = DataObject_create("Beh", (ModelNode*) lln0, 0);
+    DataAttribute_create("stVal", (ModelNode*) beh, IEC61850_ENUMERATED, IEC61850_FC_ST, 0, 0, 0);
+
+    LogicalNode* mmxuLn = LogicalNode_create("MMXU1", ld);
+    DataObject* totW = DataObject_create("TotW", (ModelNode*) mmxuLn, 0);
+    DataAttribute_create("mag", (ModelNode*) totW, IEC61850_FLOAT32, IEC61850_FC_MX, 0, 0, 0);
+
+    if (outLln0) *outLln0 = lln0;
+    if (outMmxuLn) *outMmxuLn = mmxuLn;
+    return model;
+}
+
+void
+test_getReportableAttributeReferencesForWholeDevice_lln0SurvivesAFilterExcludingItsCategory(void) {
+    LogicalNode* lln0;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildLln0FixtureModel(&lln0, &mmxuLn);
+    /* LLN0 still classifies OTHER (that's what goes on the wire) - only
+     * alwaysInclude exempts it from the mask. */
+    IedModelLnCategoryEntry categories[] = {
+        { .ln = lln0, .category = IED_MODEL_LN_CATEGORY_OTHER, .alwaysInclude = true },
+        { .ln = mmxuLn, .category = IED_MODEL_LN_CATEGORY_MEASUREMENT, .alwaysInclude = false },
+    };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL, .lnCategories = categories, .lnCategoryCount = 2,
+        .iedName = "Bare" };
+
+    LinkedList refs = IedModelUseCases_getReportableAttributeReferencesForWholeDevice(&bareHandle);
+
+    /* CONTROL matches neither LN's category, yet LLN0's leaf is still here. */
+    TEST_ASSERT_EQUAL_INT(1, LinkedList_size(refs));
+    TEST_ASSERT_EQUAL_STRING("BareLD1/LLN0$ST$Beh$stVal", firstElement(refs));
+
+    LinkedList_destroyDeep(refs, free);
+    IedModel_destroy(bareModel);
+}
+
+void
+test_isMemberReferenceAlwaysIncluded_trueOnlyForAnExemptLn(void) {
+    LogicalNode* lln0;
+    LogicalNode* mmxuLn;
+    IedModel* bareModel = buildLln0FixtureModel(&lln0, &mmxuLn);
+    IedModelLnCategoryEntry categories[] = {
+        { .ln = lln0, .category = IED_MODEL_LN_CATEGORY_OTHER, .alwaysInclude = true },
+        { .ln = mmxuLn, .category = IED_MODEL_LN_CATEGORY_MEASUREMENT, .alwaysInclude = false },
+    };
+    struct sIedModelHandle bareHandle = { .model = bareModel, .accessMode = IED_MODEL_ACCESS_REPORT_ONLY,
+        .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL, .lnCategories = categories, .lnCategoryCount = 2,
+        .iedName = "Bare" };
+
+    TEST_ASSERT_TRUE(IedModelUseCases_isMemberReferenceAlwaysIncluded(&bareHandle, "BareLD1/LLN0$ST$Beh$stVal"));
+    /* Resolves at the LD/LN prefix only, so a DO-level reference agrees. */
+    TEST_ASSERT_TRUE(IedModelUseCases_isMemberReferenceAlwaysIncluded(&bareHandle, "BareLD1/LLN0$ST$Beh"));
+    TEST_ASSERT_FALSE(IedModelUseCases_isMemberReferenceAlwaysIncluded(&bareHandle, "BareLD1/MMXU1$MX$TotW$mag"));
+
+    /* LLN0 keeps its OTHER category - the wire-facing value is untouched. */
+    TEST_ASSERT_EQUAL(IED_MODEL_LN_CATEGORY_OTHER,
+            IedModelUseCases_getCategoryForMemberReference(&bareHandle, "BareLD1/LLN0$ST$Beh$stVal"));
+
+    IedModel_destroy(bareModel);
+}
+
+/* An LN with no lnCategories entry must never earn an exemption out of thin
+ * air - the opposite default from categoryForLn's OTHER, deliberately. */
+void
+test_isMemberReferenceAlwaysIncluded_falseWhenUnresolvableOrNull(void) {
+    TEST_ASSERT_FALSE(IedModelUseCases_isMemberReferenceAlwaysIncluded(handle, "TestIEDLD1/NoSuchLn$ST$Mod$stVal"));
+    TEST_ASSERT_FALSE(IedModelUseCases_isMemberReferenceAlwaysIncluded(handle, "not-a-reference"));
+    TEST_ASSERT_FALSE(IedModelUseCases_isMemberReferenceAlwaysIncluded(handle, NULL));
+    TEST_ASSERT_FALSE(IedModelUseCases_isMemberReferenceAlwaysIncluded(NULL, "TestIEDLD1/LLN0$ST$Beh$stVal"));
+}
+
 void
 test_getCategoryFilter_returnsHandlesMask(void) {
     struct sIedModelHandle bareHandle = { .categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL | IED_MODEL_LN_CATEGORY_OTHER };
@@ -1207,6 +1289,10 @@ main(void) {
     RUN_TEST(test_getReportSubscriptionTargets_ignoresCategoryMask_alwaysIncludesEveryRcb);
     RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_filtersByCategoryMask_excludesNonMatchingLn);
     RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_unclassifiedLn_defaultsToOther_excludedUnlessOtherSelected);
+    RUN_TEST(test_getReportableAttributeReferencesForWholeDevice_lln0SurvivesAFilterExcludingItsCategory);
+    RUN_TEST(test_isMemberReferenceAlwaysIncluded_trueOnlyForAnExemptLn);
+    RUN_TEST(test_isMemberReferenceAlwaysIncluded_falseWhenUnresolvableOrNull);
+
     RUN_TEST(test_getCategoryFilter_returnsHandlesMask);
     RUN_TEST(test_getCategoryFilter_nullHandle_returnsAll);
 

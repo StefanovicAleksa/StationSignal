@@ -295,9 +295,21 @@ lookupCategoryForSlot(MmsReportClientMemberRefCacheEntry* memberRefCache, int sl
     return memberRefCache->leafCategories[slot];
 }
 
-/* Whether a candidate of `category` should even be constructed, per this
- * connection's own categoryFilter (cached once on memberRefCache - see its
- * own doc comment). A NULL memberRefCache, or an unset/zero mask, both
+/* Same shape as lookupCategoryForSlot, for memberRefCache->leafAlwaysInclude -
+ * false (no exemption) whenever the array is absent or the slot is out of
+ * range, so a missing lookup can never invent one. */
+static bool
+lookupAlwaysIncludeForSlot(MmsReportClientMemberRefCacheEntry* memberRefCache, int slot) {
+    if (!memberRefCache || !memberRefCache->leafAlwaysInclude) return false;
+    if (slot < 0 || slot >= memberRefCache->totalLeafSlots) return false;
+    return memberRefCache->leafAlwaysInclude[slot];
+}
+
+/* Whether a candidate at `slot` (of `category`) should even be constructed,
+ * per this connection's own categoryFilter (cached once on memberRefCache -
+ * see its own doc comment). An LLN0 slot bypasses the mask entirely via
+ * leafAlwaysInclude - an LD's own Mod/Beh/Health has to reach the frontend
+ * whatever categories were selected. A NULL memberRefCache, or an unset/zero mask, both
  * degrade to "no filter" - matches IedModelUseCases_getCategoryFilter's own
  * NULL-handle default of IED_MODEL_LN_CATEGORY_ALL, and a zero mask can never
  * legitimately mean "forward nothing" in production (the wire contract
@@ -311,8 +323,9 @@ lookupCategoryForSlot(MmsReportClientMemberRefCacheEntry* memberRefCache, int sl
  * per-LN property, so a value and its "q" sibling always share one category
  * and are therefore always filtered together, never split. */
 static bool
-passesCategoryFilter(MmsReportClientMemberRefCacheEntry* memberRefCache, LnCategory category) {
+passesCategoryFilter(MmsReportClientMemberRefCacheEntry* memberRefCache, int slot, LnCategory category) {
     if (!memberRefCache || memberRefCache->categoryFilter == 0) return true;
+    if (lookupAlwaysIncludeForSlot(memberRefCache, slot)) return true;
     return (memberRefCache->categoryFilter & category) != 0;
 }
 
@@ -574,7 +587,7 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
                     for (int k = 0; k < flattenedCount; k++) {
                         int slot = hasSlots ? memberRefCache->leafSlotOffsets[i] + k : -1;
                         LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
-                        if (!passesCategoryFilter(memberRefCache, category)) continue;
+                        if (!passesCategoryFilter(memberRefCache, slot, category)) continue;
                         appendCandidate(candidates, reordered[k], memberRefCache->memberLeafReferences[i][k],
                                 reason, slot, lookupSemanticForSlot(memberRefCache, slot), category,
                                 lookupDescriptionForSlot(memberRefCache, slot));
@@ -596,7 +609,7 @@ collectCandidates(const MmsValue* dataSetValues, const ReasonForInclusion* reaso
                 : (hasCacheEntry && memberRefCache->memberReferences) ? memberRefCache->memberReferences[i] : NULL;
 
         LnCategory category = lookupCategoryForSlot(memberRefCache, slot);
-        if (!passesCategoryFilter(memberRefCache, category)) continue;
+        if (!passesCategoryFilter(memberRefCache, slot, category)) continue;
 
         appendCandidate(candidates, rawValue, ref, reason, slot, lookupSemanticForSlot(memberRefCache, slot),
                 category, lookupDescriptionForSlot(memberRefCache, slot));
@@ -914,6 +927,7 @@ freeMemberRefCacheEntryFields(MmsReportClientMemberRefCacheEntry* e) {
     }
     free(e->leafSemantics);
     free(e->leafCategories);
+    free(e->leafAlwaysInclude);
     /* leafDescriptions' own strings are BORROWED (owned by the IedModelHandle,
      * not this cache entry) - free only the pointer table itself, never the
      * strings it points to (see MmsReportClientMemberRefCacheEntry.leafDescriptions'
@@ -951,6 +965,7 @@ MmsReportClientUseCases_swapMemberRefCacheEntryShape(MmsReportClientMemberRefCac
     entry->memberLeafWireTypes = fresh->memberLeafWireTypes;
     entry->leafSemantics = fresh->leafSemantics;
     entry->leafCategories = fresh->leafCategories;
+    entry->leafAlwaysInclude = fresh->leafAlwaysInclude;
     entry->categoryFilter = fresh->categoryFilter;
     entry->leafDescriptions = fresh->leafDescriptions;
     entry->everPopulated = false;
@@ -1140,6 +1155,8 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
      * leafCatArray/leafCatCounts pair - rawCategories[m] alone is replicated
      * across member m's whole leaf-slot range below. */
     LnCategory* rawCategories = calloc((size_t) count, sizeof(LnCategory));
+    /* Same per-member resolution/replication as rawCategories above. */
+    bool* rawAlwaysInclude = calloc((size_t) count, sizeof(bool));
     const char** rawDescriptions = calloc((size_t) count, sizeof(const char*));
     const char*** leafDescArray = calloc((size_t) count, sizeof(const char**));
     int* leafDescCounts = calloc((size_t) count, sizeof(int));
@@ -1158,7 +1175,7 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
      * (the old dataset-indexed IedModel_getDataSetMemberSemantics call needed
      * a real registered DataSet, which that case never had). */
     if (leafRefsArray && leafCounts && leafOffsets && rawSemantics && leafSemArray && leafSemCounts
-            && rawCategories && rawDescriptions && leafDescArray && leafDescCounts) {
+            && rawCategories && rawAlwaysInclude && rawDescriptions && leafDescArray && leafDescCounts) {
         for (int m = 0; m < count; m++) {
             int leafCount = 0;
             char** leafArray = linkedListToStringArray(
@@ -1186,6 +1203,7 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
             leafSemCounts[m] = leafSemCount;
 
             rawCategories[m] = IedModel_getCategoryForMemberReference(iedModel, array[m]);
+            rawAlwaysInclude[m] = IedModel_isMemberReferenceAlwaysIncluded(iedModel, array[m]);
             rawDescriptions[m] = IedModel_getDescriptionForMemberReference(iedModel, array[m]);
 
             int leafDescCount = 0;
@@ -1244,6 +1262,22 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
         }
     }
 
+    /* Same unconditional per-slot assignment as leafCategories above (this is
+     * the other half of the same decision), except the safe default here is
+     * false: calloc's zero already means "no exemption", which is exactly the
+     * pre-exemption behavior, so a missing rawAlwaysInclude degrades to the
+     * old semantics rather than to a silently-invisible slot. */
+    bool* leafAlwaysInclude = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(bool)) : NULL;
+    if (leafAlwaysInclude && rawAlwaysInclude) {
+        for (int m = 0; m < count; m++) {
+            int slotsForMember = (leafCounts[m] > 0) ? leafCounts[m] : 1;
+            for (int k = 0; k < slotsForMember; k++) {
+                leafAlwaysInclude[leafOffsets[m] + k] = rawAlwaysInclude[m];
+            }
+        }
+    }
+
     /* Same conditional-assignment shape as leafSemantics (NULL is a
      * legitimate, safe "no description" default here, unlike category's
      * OTHER fallback above) - elements are BORROWED (from leafDescArray/
@@ -1274,6 +1308,7 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
     }
     free(leafSemCounts);
     free(rawCategories);
+    free(rawAlwaysInclude);
     free(rawDescriptions); /* borrowed elements - only the pointer table is owned */
     if (leafDescArray) {
         for (int m = 0; m < count; m++) free(leafDescArray[m]); /* pointer table only, not its (borrowed) strings */
@@ -1294,6 +1329,7 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
         cacheEntry->memberLeafWireTypes = leafWireTypesArray;
         cacheEntry->leafSemantics = leafSemantics;
         cacheEntry->leafCategories = leafCategories;
+        cacheEntry->leafAlwaysInclude = leafAlwaysInclude;
         cacheEntry->categoryFilter = IedModel_getCategoryFilter(iedModel);
         cacheEntry->leafDescriptions = leafDescriptions;
         cacheEntry->everPopulated = false;
@@ -1323,6 +1359,7 @@ MmsReportClientUseCases_buildMemberRefCacheEntry(IedModelHandle iedModel, const 
     }
     free(leafSemantics);
     free(leafCategories);
+    free(leafAlwaysInclude);
     free(leafDescriptions); /* pointer table only - contents are borrowed */
     return NULL;
 }

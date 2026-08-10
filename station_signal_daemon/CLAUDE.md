@@ -192,9 +192,49 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   against real-world SCL variation: hex-parsed VLAN-ID/APPID, `<GSE>` MinTime/MaxTime,
   `<SDI>`-wrapped structured/array overrides recursed into, enumerated `<DAI>` `Val` labels
   resolved against the real `<EnumType>` ordinal (not `atoi`'d), `LDevice/@ldName` as a third
-  FCDA/LDevice resolution fallback. Deliberately **not** hardened (considered, deferred): duplicate
-  `LDevice/@inst`, `DAI/@ix` array indices, `<Val sGroup="N">` overrides, dotted FCDA shorthand,
-  non-dash MAC formats. `GSEControl`'s `datSet` is required (unlike `ReportControl`'s optional).
+  FCDA/LDevice resolution fallback, and **dotted FCDA shorthand** — IEC 61850-6 lets an FCDA's
+  `doName`/`daName` carry a nested path (`doName="SeqA.c3"` an SDO chain, `daName="mag.f"` a BDA
+  chain), which `IedModelUtils_buildFcdaVariableName` expands to this codebase's `"$"`-joined wire
+  form (a `.` is never legal inside a single SCL name, so the rewrite is unconditional and can't
+  corrupt a plain one). Real ABB exports use both forms; no Siemens export in this repo does.
+  Deliberately **not** hardened (considered, deferred): duplicate `LDevice/@inst`, `DAI/@ix` array
+  indices, `<Val sGroup="N">` overrides, non-dash MAC formats. `GSEControl`'s `datSet` is optional
+  per the schema (`tControlWithIEDName`, same as `ReportControl`'s) but **required by this daemon
+  for a GoCB to be subscribable** — GOOSE carries no reference on the wire, so with no dataset
+  there is no member list to decode frame positions against; such a GoCB is skipped with its own
+  named log line, deliberately not the "malformed" one (a real ABB file has six).
+  **Siemens `<Private type="Siemens-ControlBlockStorage">` RCBs are parsed too**: a Siemens System
+  Configurator export can move a device's entire `<ReportControl>` set out of the SCL schema tree
+  into per-LN private elements whose text is the same `<ReportControl>` XML, entity-escaped, behind
+  a vendor `"<name>|"` prefix. `buildReportControls` unescapes and feeds each one through the exact
+  same `processReportControlNode` path a literal element takes — no divergent behavior between the
+  two origins. Not hypothetical: one revision of a real 67-IED station SCD emitted **all 6478**
+  SIPROTEC 4 (DIGSI 4) RCBs this way while leaving every SIPROTEC 5 IED untouched, so the same
+  station file shows zero report control blocks for those devices in OMICRON IED Scout (which
+  doesn't read vendor private storage) and a full, byte-identical target set here.
+  **`LLN0` is exempt from the LN-category filter entirely** — `IedModelLnCategory_isAlwaysIncludedLnClass`
+  (LLN0 only, deliberately not `LPHD` or the rest of the `L` group), carried per-LN on
+  `IedModelLnCategoryEntry.alwaysInclude` and honored by
+  `IedModel_getReportableAttributeReferencesForWholeDevice` plus, per data point, by
+  `mms_report_client`/`goose_subscriber`'s own `leafAlwaysInclude` slot arrays. An LD's own
+  `Mod`/`Beh`/`Health` is what tells a consumer that whole Logical Device is alive, so a
+  Control-only connect must not silently drop it (which it did, until this exemption — LLN0's
+  group letter is `L`, so it classifies `OTHER`). The exemption is **orthogonal to the category**:
+  LLN0 still reports `OTHER` through `IedModel_getCategoryForMemberReference`, so
+  `ipc_dispatcher`'s outbound `category` field is unchanged. A `NULL`/unresolvable LN never earns
+  an exemption (the opposite default from `categoryForLn`'s `OTHER`).
+  **LN-category classification is vendor-neutral by construction, not by enumeration.**
+  `kGroupLetterTable` covers all sixteen IEC 61850-7-4 Ed2 group letters (`Q` → MEASUREMENT for
+  power quality, `F`/`K` → OTHER); the domain-extension groups (`D` DER/7-420, `H` hydro/7-410,
+  `W` wind/61400-25) are deliberately not enumerated and land in OTHER along with any letter that
+  isn't a group at all (e.g. Siemens' own `USER` LNs). The SCL path reads `lnClass` directly, so
+  it's exact. The no-SCL online-discovery path (`IedModelLnCategory_forWireInstanceName`, which
+  only gets `prefix+lnClass+inst` concatenated) tries the standard-class dictionary first, then
+  falls back to reading the **last four characters** as the class — IEC 61850-6 fixes an LN class
+  at exactly four characters, so that classifies classes the dictionary omits and vendor
+  extensions alike. Across three real station files the dictionary alone missed 23 classes
+  covering 4177 LN instances (`LPDI`, `LPDO`, `USER`, `QVVR`, `PTUF`, `CBAY`, …); the fallback
+  covers them without an entry each.
 - `mms_report_client/` — connects to one IED over MMS, discovers its Report Control Blocks via
   `ied_model` (never re-parses SCL, never discovers RCBs over the wire), enables reporting on
   each, and delivers normalized `MmsReportRecord`s via a caller-registered callback (JSON
@@ -212,7 +252,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   no report handler installed. Then, per target: **0.** `RptEna=false`, only if the device reports
   it already enabled (so the config writes below are legal — the common buffered-reconnect case);
   **1.** `DatSet`, always explicitly re-asserted, never a server-side default — *fatal* if
-  rejected; **2.** `OptFlds` with `RPT_OPT_ENTRY_ID` OR'd in, buffered RCBs only, only if the bit
+  rejected **unless that step's own read-back already shows exactly the dataset that was
+  resolved**, in which case the binding is correct regardless and the enable continues (SCL's
+  `<Services><ReportSettings datSet="Conf">` declares DatSet configurable offline only, not
+  online-writable, and a device enforcing it refuses every such write — declared that way on
+  every ABB IED in a real 48-IED station file, against Siemens' `datSet="Dyn"` in both of its
+  own; what gets written is that RCB's own SCL-declared `datSet`, i.e. the binding the device
+  already has, so refusing it says nothing about whether the RCB can report, and aborting would
+  take down all 231 of that file's RCBs). The read-back costs nothing extra — `runRcbStep`
+  already performs it unconditionally. A read-back that itself fails leaves this false, so a
+  refused write with no confirmation is still fatal; **2.** `OptFlds` with `RPT_OPT_ENTRY_ID` OR'd in, buffered RCBs only, only if the bit
   isn't already set; **3.** `TrgOps` (next paragraph); **4.** `EntryID`, buffered RCBs with a
   cached resume point; **5.** `RptEna=true`, the step that actually activates the RCB — *fatal*
   if rejected; **6.** `GI` (with one exception, two paragraphs down) purely to force a

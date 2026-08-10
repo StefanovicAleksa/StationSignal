@@ -286,6 +286,38 @@ test_buildFcdaVariableName_handlesNullPrefixAndLnInst(void) {
     free(variable);
 }
 
+/* IEC 61850-6 lets an FCDA name a nested path with dots - doName="SeqA.c3" is
+ * the SDO chain SeqA -> c3, daName="mag.f" the BDA chain mag -> f - whose wire
+ * form is "$"-joined like every other segment. Real ABB station files use both
+ * forms; Siemens' own exports never do. */
+
+void
+test_buildFcdaVariableName_expandsDottedDoName(void) {
+    char* variable = IedModelUtils_buildFcdaVariableName("VR4LD0", "MSQI", "1", "C", "MX", "SeqA.c3", NULL);
+
+    TEST_ASSERT_EQUAL_STRING("VR4LD0/CMSQI1$MX$SeqA$c3", variable);
+
+    free(variable);
+}
+
+void
+test_buildFcdaVariableName_expandsDottedDaName(void) {
+    char* variable = IedModelUtils_buildFcdaVariableName("VR4LD0", "ATCC", "1", "TR8", "MX", "BusV", "mag.f");
+
+    TEST_ASSERT_EQUAL_STRING("VR4LD0/TR8ATCC1$MX$BusV$mag$f", variable);
+
+    free(variable);
+}
+
+void
+test_buildFcdaVariableName_expandsBothDottedNames_includingDeeperChains(void) {
+    char* variable = IedModelUtils_buildFcdaVariableName("VR4LD0", "MMXU", "1", "", "MX", "A.phsA", "cVal.mag.f");
+
+    TEST_ASSERT_EQUAL_STRING("VR4LD0/MMXU1$MX$A$phsA$cVal$mag$f", variable);
+
+    free(variable);
+}
+
 int
 main(void) {
     UNITY_BEGIN();
@@ -324,6 +356,9 @@ main(void) {
     RUN_TEST(test_buildFcdaVariableName_includesDaName_whenGiven);
     RUN_TEST(test_buildFcdaVariableName_omitsDaSegment_whenDaNameIsNull);
     RUN_TEST(test_buildFcdaVariableName_handlesNullPrefixAndLnInst);
+    RUN_TEST(test_buildFcdaVariableName_expandsDottedDoName);
+    RUN_TEST(test_buildFcdaVariableName_expandsDottedDaName);
+    RUN_TEST(test_buildFcdaVariableName_expandsBothDottedNames_includingDeeperChains);
 
     return UNITY_END();
 }

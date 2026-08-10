@@ -1438,6 +1438,49 @@ test_buildReportRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCac
     MmsReportClientUseCases_freeReportRecord(record);
 }
 
+/* leafAlwaysInclude (LLN0) overrides the mask outright - byte-identical setup
+ * to the exclusion test above, plus the exemption flag. */
+void
+test_buildReportRecord_alwaysIncludeSlot_bypassesAFilterThatWouldExcludeIt(void) {
+    MmsValue* dataSetValues = MmsValue_createEmptyArray(1);
+    MmsValue_setElement(dataSetValues, 0, MmsValue_newBoolean(true));
+
+    ReasonForInclusion reasons[1] = { IEC61850_REASON_DATA_CHANGE };
+
+    int leafSlotOffsets[1] = { 0 };
+    /* Pre-seeded, so this is a real diff rather than a bootstrap suppression -
+     * otherwise the entry would be dropped for a reason unrelated to filtering. */
+    MmsValue* lastForwardedValues[1] = { MmsValue_newBoolean(false) };
+    char* memberReferences[1] = { (char*) "Breaker1CB1/LLN0$ST$Beh$stVal" };
+    LnCategory leafCategories[1] = { IED_MODEL_LN_CATEGORY_OTHER };
+    bool leafAlwaysInclude[1] = { true };
+    MmsReportClientMemberRefCacheEntry cache = { 0 };
+    cache.memberCount = 1;
+    cache.memberReferences = memberReferences;
+    cache.leafSlotOffsets = leafSlotOffsets;
+    cache.totalLeafSlots = 1;
+    cache.lastForwardedValues = lastForwardedValues;
+    cache.leafCategories = leafCategories;
+    cache.leafAlwaysInclude = leafAlwaysInclude;
+    cache.categoryFilter = IED_MODEL_LN_CATEGORY_CONTROL; /* excludes OTHER */
+
+    MmsReportRecord* record = MmsReportClientUseCases_buildReportRecord(
+            "Breaker1CB1/LLN0.BR.brcbMain", true, "brcbMain",
+            false, NULL, false, 0, false, 0,
+            dataSetValues, reasons, NULL, &cache, 1);
+
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, record->entryCount,
+            "an LLN0 slot must forward even under a filter that excludes its own category - "
+            "an LD's Mod/Beh/Health is what tells a consumer the whole LD is alive");
+    TEST_ASSERT_EQUAL_MESSAGE(IED_MODEL_LN_CATEGORY_OTHER, record->entries[0].category,
+            "the exemption must not change the category reported on the wire - LLN0 stays OTHER");
+
+    MmsValue_delete(dataSetValues);
+    MmsValue_delete(cache.lastForwardedValues[0]);
+    MmsReportClientUseCases_freeReportRecord(record);
+}
+
 void
 test_buildReportRecord_categoryFilter_matchingCategoryStillForwardsNormally(void) {
     /* Mirrors test_buildReportRecord_realChangeReason_previousValueEqualsPriorCache's
@@ -1896,6 +1939,7 @@ main(void) {
     RUN_TEST(test_buildReportRecord_doesNotOverreach_pastAGenuinelyUnrelatedAncestor);
 
     RUN_TEST(test_buildReportRecord_categoryFilter_excludesNonMatchingCandidate_beforeDiffCache);
+    RUN_TEST(test_buildReportRecord_alwaysIncludeSlot_bypassesAFilterThatWouldExcludeIt);
     RUN_TEST(test_buildReportRecord_categoryFilter_matchingCategoryStillForwardsNormally);
     RUN_TEST(test_buildReportRecord_categoryFilter_excludedValueAndQualitySibling_bothDroppedTogether);
 

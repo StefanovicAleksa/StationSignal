@@ -116,6 +116,13 @@ typedef struct {
 typedef struct {
     LogicalNode* ln;
     LnCategory category;
+    /* This LN is exempt from category filtering entirely (LLN0 - see
+     * IedModelLnCategory_isAlwaysIncludedLnClass's own doc comment for why,
+     * and why it is a separate flag rather than a fifth LnCategory). Set by
+     * both loaders from the same predicate; `category` stays whatever the
+     * class letter says (OTHER for LLN0), so nothing downstream that only
+     * DISPLAYS a category changes behavior. */
+    bool alwaysInclude;
 } IedModelLnCategoryEntry;
 
 /*

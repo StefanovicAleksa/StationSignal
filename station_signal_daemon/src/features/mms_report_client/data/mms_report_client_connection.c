@@ -771,6 +771,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * runRcbStep's outLive doc comment for why entryState is NOT usable there. */
     RcbLiveState postDatSetState;
     memset(&postDatSetState, 0, sizeof(postDatSetState));
+    bool datSetAlreadyBound = false;
     ClientReportControlBlock_setDataSetReference(rcb, resolution.datasetReference);
     {
         char intended[512];
@@ -783,11 +784,41 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
             .verify = RCB_STEP_VERIFY_DATSET,
             .expectedString = resolution.datasetReference,
         };
-        err = runRcbStep(handle, rcb, target->objectReference, &datSetStep, NULL, &postDatSetState);
+        err = runRcbStep(handle, rcb, target->objectReference, &datSetStep, &datSetAlreadyBound, &postDatSetState);
+    }
+    /*
+     * A REFUSED write is only fatal if the binding we wanted isn't already in
+     * place. `datSetAlreadyBound` is runRcbStep's own RCB_STEP_VERIFY_DATSET
+     * read-back result, computed from the device's live state regardless of
+     * whether the write itself succeeded - so this costs no extra round trip.
+     *
+     * The case this exists for: SCL's <Services><ReportSettings datSet="Conf">
+     * declares DatSet configurable OFFLINE ONLY, not online-writable, and a
+     * device that enforces it refuses every DatSet write. Confirmed declared
+     * that way on every ABB IED in a real 48-IED station file, against
+     * Siemens' datSet="Dyn" in both of its own, which is why this never
+     * surfaced before. What we write is that RCB's own SCL-declared datSet -
+     * i.e. the binding the device already has - so a refusal there says
+     * nothing about whether the RCB can report, and aborting would take down
+     * every RCB on the device (231 of them on that file).
+     *
+     * Still fatal when the read-back does NOT confirm the dataset (including
+     * a read-back that itself failed, which leaves this false): the RCB would
+     * then be reporting on something other than what was resolved, or on
+     * nothing at all, and every later step's judgment about it would be
+     * meaningless.
+     */
+    if (err != IED_ERROR_OK && datSetAlreadyBound) {
+        fprintf(stderr, "[mms_report_client] '%s' step '1/6 DatSet': write was refused, but the device already "
+                "reports exactly the dataset we resolved ('%s') - the binding is correct, continuing the enable "
+                "(a device declaring ReportSettings datSet=\"Conf\"/\"Fix\" refuses the write by design)\n",
+                target->objectReference, resolution.datasetReference);
+        err = IED_ERROR_OK;
     }
     if (err != IED_ERROR_OK) {
         fprintf(stderr, "[mms_report_client] '%s' ABORTING enable at step 1 - the dataset binding itself was "
-                "rejected, so there is nothing left to enable\n", target->objectReference);
+                "rejected and the device does not already report the dataset we resolved, so there is nothing "
+                "left to enable\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);

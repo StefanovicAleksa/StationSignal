@@ -1726,3 +1726,209 @@ Nine Makefiles are hand-maintained and needed the new sources: `tests/Makefile` 
 plus one new `test_mms_dataset_manager_usecases` rule) and six `integration_tests/*/Makefile`
 (`mms_report_client`, `ipc_dispatcher`, `device_manager`, `control_dispatcher`, `orchestration`,
 `orchestration_local_file`). Nothing auto-discovers; a future feature split needs the same sweep.
+
+## The LN-category filter was silently dropping every LD's LLN0
+
+The LN-category filter shipped classifying LNs by their IEC 61850-7-4 group letter. `LLN0`'s
+letter is `L`, which the group table buckets as `OTHER` — correct as a *classification*, and
+wrong as a *visibility* decision. Pair that with the frontend's own connect-time default
+(`['CONTROL','OTHER']`, and a picker that lets a technician choose Control alone) and any
+connect that didn't include `OTHER` lost every Logical Device's own status node: `Mod`, `Beh`,
+`Health`, `NamPlt`, `LEDRs`, gone — both from `IedModel_getReportableAttributeReferencesForWholeDevice`
+(so `mms_dataset_manager`'s self-created dynamic datasets never captured them) and, per data
+point, from `mms_report_client`/`goose_subscriber`'s own candidate collection.
+
+That is exactly the data that answers "is this LD even alive?", so losing it to a Control-only
+filter is a much worse failure than losing an ordinary `OTHER` LN. Reproduced against a real
+67-IED station SCD by loading `ied_model` directly — one exclusion line per LD, on every device
+in the file:
+
+```
+[ied_model] LN 'C01_A201PowS/LLN0' (category OTHER) excluded by active filter (CONTROL) - 9 leaf attribute(s) skipped
+[ied_model] LN 'C01_A201Rec/LLN0'  (category OTHER) excluded by active filter (CONTROL) - 9 leaf attribute(s) skipped
+```
+
+**The fix is an exemption flag, deliberately not a fifth `LnCategory`.** `IedModelLnCategoryEntry`
+gained `alwaysInclude`, set by both loaders from `IedModelLnCategory_isAlwaysIncludedLnClass`
+(SCL path, from `lnClass`) / `_isAlwaysIncludedWireInstanceName` (online-discovery path, from the
+raw wire name). Every filter site consults it *in addition to* the mask:
+`getReportableAttributeReferencesForWholeDevice` in `ied_model`, and `passesCategoryFilter` in
+both `mms_report_client` and `goose_subscriber` — the latter two via a per-slot `bool*
+leafAlwaysInclude` array built exactly like `leafCategories` (one resolution per member,
+replicated across that member's leaf-slot range).
+
+A new category value was considered and rejected: `ipc_dispatcher` puts
+`IedModelLnCategory_toString(category)` on the wire for every forwarded data point, so a
+`SYSTEM` bucket would have been a breaking envelope change plus a frontend type-union and
+connect-picker change, all to express something that isn't a category at all. LLN0 therefore
+still reports `OTHER` to everything that merely *displays* a category; only visibility changes.
+
+Two deliberate asymmetries in the defaults, both the opposite of `categoryForLn`'s:
+`alwaysIncludeForLn` returns **false** for an LN with no `lnCategories` entry, and
+`lookupAlwaysIncludeForSlot` returns **false** for a missing array or an out-of-range slot. A
+missing lookup must never *fabricate* an exemption — the failure mode degrades to the
+pre-exemption behavior, never past it. (`categoryForLn` defaults to `OTHER` for the mirror-image
+reason: a bare `0` would match no mask bit at all and make the slot permanently invisible.)
+
+Scope is `LLN0` alone. `LPHD` was considered and left out — it is the physical-device node, real
+reportable data with no whole-LD-status role, and it filters as `OTHER` like any other LN.
+
+`IedModelLnCategory_isAlwaysIncludedWireInstanceName` deliberately does **not** route through
+`_forWireInstanceName`'s dictionary match. That function strips a trailing digit run as the SCL
+`inst`, which eats LLN0's own `0` (part of the class name, not an inst) and leaves `"LLN"`,
+matching nothing in `kStandardLnClassNames`. LLN0 also never carries a prefix or an inst per
+IEC 61850-6, so an exact string comparison is both correct and complete there.
+
+Verified against the same real station file: under a `CONTROL`-only mask the whole-device leaf
+count went 445 -> 481 for `C5_6MD` and 590 -> 923 for `C01_A201` (one LLN0 group restored per
+LD), with zero `LLN0 ... excluded by active filter` lines left and every other exclusion
+unchanged. The existing `integration_tests/ied_model` case that asserted "a CONTROL-only filter
+must exclude every non-XCBR1 leaf" was updated rather than deleted — it now asserts the exempt
+LLN0 leaves survive alongside XCBR1's while every other LN is still excluded.
+
+## Siemens `ControlBlockStorage` private RCBs — why a station SCD can look like it has no reporting
+
+Context for the `ied_model` bullet's `Siemens-ControlBlockStorage` parse, recorded here after it
+came up again in the field. Two revisions of the same 67-IED station SCD, both exported by
+`IEC 61850 System Configurator 7.70.17`, differ by more than a revision counter: in the later
+one every SIPROTEC 4 (DIGSI 4) IED lost **100% of its `<ReportControl>` elements** — 6478 of
+them across 44 IEDs — each replaced 1:1 by
+
+```xml
+<Private type="Siemens-ControlBlockStorage">brcbA|&lt;ReportControl rptID="C5_6MDMEAS/LLN0$BR$brcbA01" ... &gt;
+  &lt;Private type="Siemens-PredefinedControlBlock" /&gt; ... &lt;/ReportControl&gt;</Private>
+```
+
+Every SIPROTEC 5 IED block in the same file is byte-identical between the two revisions; their
+predefined RCBs stay real elements, marked `<Private type="Siemens-Siprotec5-IsPredefined"/>`.
+So the two device generations take different export paths, and only the SIPROTEC 4 one spools
+its predefined control blocks into private storage.
+
+The practical consequence: OMICRON IED Scout shows **zero** report control blocks for every
+DIGSI 4 device when loading that revision, because it doesn't read vendor private storage — and
+that is correct behavior for that file, not a tool bug. This daemon reads it, so the resolved
+report-target sets are identical from both revisions (`C5_6MD` 178/178, `E13_6MD` 174/174,
+`C1_7UT` 160/160, `E15_7SA` 206/206). Worth knowing before chasing a daemon-side cause: "the
+station file shows no RCBs" and "the daemon found no RCBs" are separate claims here.
+
+## Vendor neutrality: what a real ABB station file found
+
+Everything up to this point was validated against Siemens exports (SIPROTEC 4 / DIGSI 4 and
+SIPROTEC 5 / DIGSI 5). `scd vr 4.scd` — 48 IEDs, 41 ABB (REC650/REC670/REL650/REL670/RET650/
+RET670/RED670), written by `Tiger inhouse tool 11384;MBS Alfa19` — was the first real ABB input,
+and the question was which of this daemon's assumptions were quietly Siemens-shaped.
+
+**Most weren't.** Loading it through `ied_model` worked immediately: `VR4C1C01A1` 8 RCBs / 2
+GoCBs / 1586 reportable leaves, `VR4C1CO2A1` 3 / 4 / 907, and so on. The file's profile is the
+near-inverse of the Siemens ones — **229 of its 231 RCBs carry a static SCL `datSet`**, so
+`mms_dataset_manager` resolves nearly everything at tier 1 and barely touches the whole-device
+clustering the Siemens files lean on entirely. All 229 carry `<RptEnabled max="5">`, whose
+`01`-suffixed runtime name was already handled (and already proven against a real ABB REC650).
+No `DAI/@ix`, no `<Val sGroup>`, no duplicate `LDevice/@inst`, exactly one LN0 per LD across all
+136 LDs. `isControlBlockStoragePrivate` was already vendor-generic — it matches
+`strstr(type, "ControlBlockStorage")`, not the exact Siemens string.
+
+Five things did need fixing.
+
+### 1. A refused `DatSet` write took down every RCB on the device
+
+Every ABB IED declares `<Services><ReportSettings datSet="Conf">` — DatSet is configurable
+**offline only, not online-writable**. Both Siemens files declare `datSet="Dyn"`, which is why
+this never surfaced. The enable sequence writes DatSet unconditionally as step 1 and treated any
+rejection as fatal: uninstall the handler, fire `rcbStatusCallback(false)`, return
+`RCB_ENABLE_OUTCOME_FAILED`. On a device that enforces `Conf`, that is all 231 RCBs failing and
+the device reporting nothing.
+
+What made this worth fixing rather than accepting: the value written is that RCB's *own*
+SCL-declared `datSet` — the binding the device already has — so a refusal there carries no
+information about whether the RCB can report. And `runRcbStep` already knew it: its read-back
+runs unconditionally, and `RCB_STEP_VERIFY_DATSET` already compares the live DatSet against
+`expectedString` regardless of whether the write succeeded. Step 1 now takes that `outApplied`
+result and aborts only when the write failed **and** the read-back does not confirm the dataset.
+Zero extra round trips. A read-back that itself fails leaves the flag false, so a refused write
+with no confirmation is still fatal — the RCB would otherwise be reporting on something other
+than what was resolved, and every later step's judgment about it would be meaningless.
+
+Deliberately **not** done: proactively skipping the write by parsing
+`<Services><ReportSettings datSet>`. SCL can be wrong about a live device; the read-back is the
+authority. Worth revisiting only if the per-RCB round trip ever shows up as a real cost.
+
+### 2. Dotted FCDA shorthand was passed through verbatim
+
+IEC 61850-6 lets an FCDA name a nested path with dots — `doName="SeqA.c3"` is the SDO chain
+SeqA → c3, `daName="mag.f"` the BDA chain mag → f. This was on CLAUDE.md's "deliberately not
+hardened (considered, deferred)" list, on the reasoning that no sample file used it. ABB does:
+24 dotted `doName` + 12 dotted `daName`, in its `MeasFltA` and `Goose` datasets across ~14 IEDs.
+
+`IedModelUtils_buildFcdaVariableName` `snprintf`'d the parts together with `$` and never touched
+the dots, producing `VR4C1CO2A1LD0/CMSQI1$MX$SeqA.c3` where the wire form is `...$MX$SeqA$c3`.
+Blast radius was bounded and worth recording precisely, because it is *not* the usual
+misalignment story: `buildDataSets` creates the entry either way, so no wire position shifted and
+no other member was mislabeled — those specific members just carried a reference nothing could
+match, and silently lost Gap-4 decomposition, Dbpos semantics and desc lookup, all of which
+resolve by walking `$` segments.
+
+Fixed in that one function by rewriting `.` to `$` while copying. Unconditional, because a `.` is
+never legal inside a single SCL name (`tRestrName` is `[A-Za-z][0-9A-Za-z_]*`) — there is nothing
+to disambiguate, so no flag and no lookahead. The rewrite is length-preserving, so the existing
+size computation still holds exactly. Verified against the real file: across four ABB IEDs, 512
+resolved dataset member references, zero containing a raw `.`.
+
+### 3. Three IEC 61850-7-4 Ed2 group letters were missing
+
+`kGroupLetterTable` covered A,C,G,I,L,M,P,R,S,T,X,Y,Z and was missing **Q** (power quality),
+**F** (functional blocks) and **K** (mechanical/non-electrical primary equipment). Its own header
+comment claimed the standard uses "twelve letters (A, C, G, I, L, M, P, R, S, T, X, Y, Z)" —
+thirteen letters listed, and wrong about which.
+
+The ABB file actually contains Q: `PH1QVVR1`, `PH2QVVR1`, `PH3QVVR1`, `VSQVUB1` and friends on
+`VR4C1C01A2`. Nothing was mis-bucketed (unknown letters already fell through to OTHER), but a
+power-quality LN showing as "Other" is a real usability miss. Q → MEASUREMENT (they are
+measurements of supply quality, so they belong with M/T); F and K → OTHER, same posture as
+G/L/S/Z. The domain-extension groups (`D` DER per 7-420, `H` hydro per 7-410, `W` wind per
+IEC 61400-25) are deliberately still not enumerated and documented as intentionally landing in
+OTHER, alongside letters that aren't groups at all — Siemens' `USER` LNs being the live example.
+
+### 4. The online-discovery LN reverse match was enumeration-bound
+
+`IedModelLnCategory_forWireInstanceName` (the no-SCL path, which only ever sees
+`prefix+lnClass+inst` concatenated with no delimiter) matched against a hardcoded dictionary of
+standard class names. Measured across all three station files, that dictionary misses **23
+distinct classes covering 4177 LN instances**: `LPDI` (2492), `LPDO` (880), `TGSN` (136), `USER`
+(92), `SSVS`, `SBWI`, `SSYM`, `SPSQ`, `SSUM`, `SFFM`, `LTRK`, `SADC`, `ROPA`, `RSSR`, `CBAY`,
+`RFUF`, `PSOF`, `PTUF`, `SCBR`, `PADM`, `QVVR`, `RDIF`, `QVUB` — a mix of Ed2 additions, vendor
+extensions, and at least one plain omission (`PTUF`, whose over-frequency sibling `PTOF` was
+already there). All degraded to OTHER.
+
+Adding 23 entries would just lose to the next vendor file. Instead the dictionary now has a
+structural fallback behind it: IEC 61850-6 fixes an LN class name at **exactly four characters**,
+and `IedModelUtils_buildLnName`'s order is prefix + lnClass + inst, so once the trailing inst
+digits are stripped the last four characters *are* the class, whatever it is. Dictionary first
+(it is exact, and it is the only thing that can classify a name whose real class isn't four
+characters), then the four-character read, then OTHER. `QVVR1`, `PTUF1`, `LPDI37`, `CBAY1`,
+`MyBkrQVVR2` and anything a future vendor invents all classify without an entry.
+
+`IedModelLnCategory_isAlwaysIncludedWireInstanceName` (the LLN0 exemption) deliberately does not
+route through any of this and keeps its exact `"LLN0"` comparison — the digit-strip would eat
+LLN0's own `0`, which is part of the class name rather than an inst.
+
+### 5. A `datSet`-less `GSEControl` was called "malformed"
+
+Six ABB GoCBs (`TRIPW1/2/3_GCB`, `appID="UNKNOWN"`) declare no `datSet`, producing
+`WARN: skipping malformed GSEControl under LN 'LLN0'`. Per IEC 61850-6, `datSet` on
+`tControlWithIEDName` is **optional** — the file is conformant. Skipping is still right (GOOSE
+carries no reference on the wire, so with no dataset there is no member list to decode frame
+positions against), but calling a valid file malformed sends whoever reads the log after the
+wrong problem. Now reported on its own line, naming the GoCB and saying it isn't subscribable;
+the malformed branch is reserved for a genuinely missing `name`. CLAUDE.md's "`GSEControl`'s
+`datSet` is required" was correspondingly corrected to "required *by this daemon* to be
+subscribable, not by the schema".
+
+### Fixture, not a checked-in station file
+
+`integration_tests/ied_model/fixtures/vendor_abb_shapes.cid` reproduces all of the above in a
+hand-written file: dotted `doName` and `daName`, a `datSet`-less GSEControl beside a working one,
+a Q-group LN, `<RptEnabled max="5">`, `<Services><ReportSettings datSet="Conf">`, and a
+`<GSE><Address>` block with a hex APPID/VLAN-ID (the Siemens files carry no `<GSE><Address>` at
+all, so this is the first fixture that actually exercises that parse). Far cheaper to keep than
+a 20 MB station SCD, and it states its own intent.

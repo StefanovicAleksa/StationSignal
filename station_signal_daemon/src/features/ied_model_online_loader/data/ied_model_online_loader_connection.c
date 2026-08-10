@@ -548,6 +548,7 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
                     if (entry) {
                         entry->ln = ln;
                         entry->category = IedModel_categorizeWireInstanceName(lnName);
+                        entry->alwaysInclude = IedModel_isAlwaysIncludedWireInstanceName(lnName);
                         LinkedList_add(lnCategories, entry);
                     }
                 }

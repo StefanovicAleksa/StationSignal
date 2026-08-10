@@ -239,6 +239,13 @@ typedef struct {
      * otherwise). */
     LnCategory* leafCategories;
 
+    /* Parallel to leafCategories, same size and same per-member resolution -
+     * mirrors MmsReportClientMemberRefCacheEntry.leafAlwaysInclude exactly
+     * (see that field's own doc comment): slot i's LN bypasses categoryFilter
+     * entirely, true only for LLN0 today. May be NULL, which degrades to "no
+     * exemptions" - the pre-exemption behavior, never worse. */
+    bool* leafAlwaysInclude;
+
     /* This target's connection's active category filter (IedModel_getCategoryFilter),
      * captured once at GooseSubscription_start time - mirrors
      * MmsReportClientMemberRefCacheEntry.categoryFilter exactly (see that

@@ -43,6 +43,7 @@ freeTargetEntries(GooseSubscriberHandle handle) {
         }
         free(cache->leafSemantics);
         free(cache->leafCategories);
+        free(cache->leafAlwaysInclude);
         /* leafDescriptions' own strings are BORROWED (owned by the
          * IedModelHandle, not this cache) - free only the pointer table
          * itself. */
@@ -209,6 +210,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->lastForwardedValues = NULL;
     cache->leafSemantics = NULL;
     cache->leafCategories = NULL;
+    cache->leafAlwaysInclude = NULL;
     cache->leafDescriptions = NULL;
     /* Set unconditionally, before any early return below - a zero/calloc
      * default is NOT a safe "unfiltered" value here (see this field's own
@@ -230,6 +232,8 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
      * MmsReportClientMemberRefCacheEntry.leafCategories' own doc comment for
      * why this is per-member, not per-leaf like semantics/descriptions. */
     LnCategory* rawCategories = calloc((size_t) count, sizeof(LnCategory));
+    /* Same per-member resolution/replication as rawCategories above. */
+    bool* rawAlwaysInclude = calloc((size_t) count, sizeof(bool));
     const char** rawDescriptions = calloc((size_t) count, sizeof(const char*));
     const char*** leafDescArray = calloc((size_t) count, sizeof(const char**));
     int* leafDescCounts = calloc((size_t) count, sizeof(int));
@@ -276,6 +280,9 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
             }
 
             if (rawCategories) rawCategories[m] = IedModel_getCategoryForMemberReference(iedModel, array[m]);
+            if (rawAlwaysInclude) {
+                rawAlwaysInclude[m] = IedModel_isMemberReferenceAlwaysIncluded(iedModel, array[m]);
+            }
             if (rawDescriptions) rawDescriptions[m] = IedModel_getDescriptionForMemberReference(iedModel, array[m]);
             if (leafDescArray && leafDescCounts) {
                 int leafDescCount = 0;
@@ -307,6 +314,8 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
         leafSemCounts = NULL;
         free(rawCategories);
         rawCategories = NULL;
+        free(rawAlwaysInclude);
+        rawAlwaysInclude = NULL;
         free(rawDescriptions);
         rawDescriptions = NULL;
         if (leafDescArray) {
@@ -358,6 +367,20 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
         }
     }
 
+    /* Same unconditional per-slot assignment as leafCategories above, except
+     * calloc's zero default (false = no exemption) is already the safe one -
+     * it is exactly the pre-exemption behavior. */
+    bool* leafAlwaysInclude = (leafRefsArray && leafCounts && leafOffsets)
+            ? calloc((size_t) totalLeafSlots, sizeof(bool)) : NULL;
+    if (leafAlwaysInclude && rawAlwaysInclude) {
+        for (int m = 0; m < count; m++) {
+            int slotsForMember = (leafCounts[m] > 0) ? leafCounts[m] : 1;
+            for (int k = 0; k < slotsForMember; k++) {
+                leafAlwaysInclude[leafOffsets[m] + k] = rawAlwaysInclude[m];
+            }
+        }
+    }
+
     /* Same conditional-assignment shape as leafSemantics - elements are
      * BORROWED, never freed via this array. */
     const char** leafDescriptions = (leafRefsArray && leafCounts && leafOffsets)
@@ -384,6 +407,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     }
     free(leafSemCounts);
     free(rawCategories);
+    free(rawAlwaysInclude);
     free(rawDescriptions); /* borrowed elements - only the pointer table is owned */
     if (leafDescArray) {
         for (int m = 0; m < count; m++) free(leafDescArray[m]); /* pointer table only, not its (borrowed) strings */
@@ -401,6 +425,7 @@ resolveMemberReferences(GooseSubscriberTargetEntry* entry, IedModelHandle iedMod
     cache->lastForwardedValues = lastForwardedValues;
     cache->leafSemantics = leafSemantics;
     cache->leafCategories = leafCategories;
+    cache->leafAlwaysInclude = leafAlwaysInclude;
     cache->leafDescriptions = leafDescriptions;
 }
 

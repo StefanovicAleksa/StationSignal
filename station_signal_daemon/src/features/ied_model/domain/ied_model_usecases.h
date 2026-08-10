@@ -158,6 +158,19 @@ IedModelDaSemantic IedModelUseCases_getSemanticForMemberReference(IedModelHandle
 LnCategory IedModelUseCases_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference);
 
 /*
+ * Whether this member reference's own LN is exempt from category filtering
+ * entirely (LLN0 - see IedModelLnCategory_isAlwaysIncludedLnClass's doc
+ * comment). Same "LD/LN"-prefix-only resolution as
+ * getCategoryForMemberReference above, since the exemption is a per-LN
+ * property too. Returns false if memberReference is NULL, malformed, or its
+ * LN doesn't resolve - a reference this model can't place never earns an
+ * exemption. Deliberately a SEPARATE call rather than a fifth LnCategory
+ * value: an LLN0 leaf still reports category OTHER to every consumer that
+ * merely displays it, so the ipc_dispatcher wire contract is unchanged.
+ */
+bool IedModelUseCases_isMemberReferenceAlwaysIncluded(IedModelHandle handle, const char* memberReference);
+
+/*
  * Description-lookup counterparts of getSemanticForMemberReference/
  * getLeafSemanticsForMemberReference - same resolution shape, but return the
  * SCL desc="..." string captured for that leaf (IedModelDaDescEntry, DA-level

@@ -330,6 +330,11 @@ IedModel_getCategoryForMemberReference(IedModelHandle handle, const char* member
     return IedModelUseCases_getCategoryForMemberReference(handle, memberReference);
 }
 
+bool
+IedModel_isMemberReferenceAlwaysIncluded(IedModelHandle handle, const char* memberReference) {
+    return IedModelUseCases_isMemberReferenceAlwaysIncluded(handle, memberReference);
+}
+
 const char*
 IedModel_getDescriptionForMemberReference(IedModelHandle handle, const char* memberReference) {
     return IedModelUseCases_getDescriptionForMemberReference(handle, memberReference);
@@ -372,6 +377,11 @@ IedModel_getControlTargets(IedModelHandle handle) {
 LnCategory
 IedModel_categorizeWireInstanceName(const char* wireName) {
     return IedModelLnCategory_forWireInstanceName(wireName);
+}
+
+bool
+IedModel_isAlwaysIncludedWireInstanceName(const char* wireName) {
+    return IedModelLnCategory_isAlwaysIncludedWireInstanceName(wireName);
 }
 
 const char*

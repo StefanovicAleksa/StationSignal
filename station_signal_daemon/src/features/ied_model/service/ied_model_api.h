@@ -286,6 +286,13 @@ IedModelDaSemantic IedModel_getSemanticForMemberReference(IedModelHandle handle,
  * (ied_model_usecases.h) - LN-level, not per-leaf. */
 LnCategory IedModel_getCategoryForMemberReference(IedModelHandle handle, const char* memberReference);
 
+/* See IedModelUseCases_isMemberReferenceAlwaysIncluded's own doc comment
+ * (ied_model_usecases.h). mms_report_client/goose_subscriber resolve this
+ * once per dataset member at member-ref-cache build time, alongside
+ * IedModel_getCategoryForMemberReference, and let it override the filter
+ * per data point. */
+bool IedModel_isMemberReferenceAlwaysIncluded(IedModelHandle handle, const char* memberReference);
+
 /* See IedModelUseCases_getDescriptionForMemberReference/
  * _getLeafDescriptionsForMemberReference's own doc comments
  * (ied_model_usecases.h) - both return BORROWED strings, owned by the
@@ -315,6 +322,16 @@ LinkedList IedModel_getControlTargets(IedModelHandle handle);
  * comment (ied_model_ln_category.h) for the matching algorithm.
  */
 LnCategory IedModel_categorizeWireInstanceName(const char* wireName);
+
+/*
+ * Same-shaped thin re-export of
+ * IedModelLnCategory_isAlwaysIncludedWireInstanceName, for the same reason -
+ * ied_model_online_loader must set IedModelLnCategoryEntry.alwaysInclude on
+ * each LN it discovers, and only has the raw wire instance name to decide
+ * from. See that function's own doc comment for why it is an exact "LLN0"
+ * comparison rather than a dictionary match.
+ */
+bool IedModel_isAlwaysIncludedWireInstanceName(const char* wireName);
 
 /*
  * Thin re-export of IedModelLnCategory_toString (utils/) - exists so

@@ -249,6 +249,23 @@ categoryForLn(IedModelHandle handle, LogicalNode* ln) {
     return IED_MODEL_LN_CATEGORY_OTHER;
 }
 
+/*
+ * Same lookup as categoryForLn, for IedModelLnCategoryEntry.alwaysInclude
+ * (see its own doc comment, and IedModelLnCategory_isAlwaysIncludedLnClass's).
+ * Degrades to false on a missing entry - the OPPOSITE default from
+ * categoryForLn's OTHER, and deliberately so: "not found" must never
+ * fabricate an exemption that lets an unclassified LN bypass every filter.
+ * An LLN0 with no entry therefore just filters as OTHER, which is exactly the
+ * pre-exemption behavior, never worse.
+ */
+static bool
+alwaysIncludeForLn(IedModelHandle handle, LogicalNode* ln) {
+    for (int i = 0; i < handle->lnCategoryCount; i++) {
+        if (handle->lnCategories[i].ln == ln) return handle->lnCategories[i].alwaysInclude;
+    }
+    return false;
+}
+
 /* "|"-joins every set category bit's own name into buf, e.g.
  * "CONTROL|MEASUREMENT" - diagnostic-only (the whole-device filter exclusion
  * log below), never a wire format, so a fixed-size stack buffer is fine (at
@@ -642,6 +659,34 @@ IedModelUseCases_getCategoryForMemberReference(IedModelHandle handle, const char
 
     free(copy);
     return category;
+}
+
+/*
+ * alwaysInclude counterpart of getCategoryForMemberReference above - same
+ * "LD/LN" prefix parse (the exemption is a per-LN property, exactly like
+ * category), deferring to alwaysIncludeForLn. Returns false on any
+ * resolution failure - never fabricates an exemption out of a reference it
+ * couldn't resolve.
+ */
+bool
+IedModelUseCases_isMemberReferenceAlwaysIncluded(IedModelHandle handle, const char* memberReference) {
+    if (!handle || !memberReference) return false;
+
+    char* copy = strdup(memberReference);
+    if (!copy) return false;
+
+    bool alwaysInclude = false;
+    char* slash = strchr(copy, '/');
+    if (slash) {
+        *slash = '\0';
+        char* lnToken = strtok(slash + 1, "$");
+        LogicalDevice* ld = IedModel_getDevice(handle->model, copy);
+        LogicalNode* ln = (ld && lnToken) ? LogicalDevice_getLogicalNode(ld, lnToken) : NULL;
+        if (ln) alwaysInclude = alwaysIncludeForLn(handle, ln);
+    }
+
+    free(copy);
+    return alwaysInclude;
 }
 
 /* ---- desc lookup (see IedModelDaDescEntry's own doc comment) ---- */
@@ -1077,7 +1122,12 @@ IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle h
              * reused here rather than re-deriving the IED-name-prefixing rule
              * by hand. */
             LnCategory lnCategory = categoryForLn(handle, (LogicalNode*) lnNode);
-            if (handle->categoryFilter & lnCategory) {
+            /* alwaysInclude (LLN0) wins over the mask outright - an LD's own
+             * status node has to be in every dynamic dataset this plan
+             * produces regardless of what the technician selected, or a
+             * Control-only connect silently loses Mod/Beh/Health for every
+             * LD on the device. */
+            if (alwaysIncludeForLn(handle, (LogicalNode*) lnNode) || (handle->categoryFilter & lnCategory)) {
                 char* lnRef = ModelNode_getObjectReference(lnNode, NULL);
                 if (lnRef) {
                     char* slash = strchr(lnRef, '/');
