@@ -53,12 +53,13 @@ func (a *API) handleStartReporting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"deviceId":       device.ID,
-		"wsPort":         device.WSPort,
-		"mmsAvailable":   device.MMSAvailable,
-		"gooseAvailable": device.GooseAvailable,
-	})
+	// Serialize the domain entity itself rather than hand-picking fields into a map, same as
+	// handleListDevices — domain.Device's JSON tags *are* this response shape. A hand-built map
+	// silently dropped lnCategories, and since an absent lnCategories means "unfiltered" by
+	// contract, every client that asked for a category filter was told the running device had
+	// none and concluded it had been attached to someone else's device. The struct's `omitempty`
+	// also omits the key for a genuinely unfiltered device, where a map would emit a null.
+	writeJSON(w, http.StatusCreated, device)
 }
 
 func (a *API) handleStopReporting(w http.ResponseWriter, r *http.Request) {

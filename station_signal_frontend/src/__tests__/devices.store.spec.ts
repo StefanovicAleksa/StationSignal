@@ -143,6 +143,24 @@ describe('useDevicesStore', () => {
       expect(store.devices[key]?.sharedWithDifferentFilter).toBe(true)
       expect(store.devices[key]?.effectiveCategories).toBeUndefined()
     })
+
+    // The API's contract is that nil *or* empty means unfiltered, so an empty array must read as
+    // the same "no filter" the omitted field does rather than as a filter of nothing.
+    it('reads an empty effective-category array as unfiltered, not as a different filter', async () => {
+      vi.mocked(startReporting).mockResolvedValue({
+        deviceId: 1,
+        wsPort: 9000,
+        mmsAvailable: true,
+        gooseAvailable: true,
+        lnCategories: [],
+      })
+      const store = useDevicesStore()
+
+      const key = await store.startDevice({ host: '10.0.0.5', interfaceId: 'eth0' })
+
+      expect(store.devices[key]?.sharedWithDifferentFilter).toBe(false)
+      expect(store.devices[key]?.effectiveCategories).toBeUndefined()
+    })
   })
 
   it('appends an incoming data point as its own report and marks the device connected', async () => {

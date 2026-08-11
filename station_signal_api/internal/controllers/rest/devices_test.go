@@ -30,6 +30,43 @@ func TestHandleStartReporting_Success(t *testing.T) {
 	assert.Equal(t, float64(9000), body["wsPort"])
 }
 
+// The response must report the filter the *running* device carries, since a client detects that it
+// was attached to another session's device by comparing what it sent against what comes back. This
+// was omitted from the response for a while, which made every filtered start look like an attach.
+func TestHandleStartReporting_ReportsEffectiveLnCategories(t *testing.T) {
+	reporting := &mockReportingService{
+		startDevice: reportingdomain.Device{ID: 1, WSPort: 9000, LnCategories: []string{"CONTROL", "OTHER"}},
+	}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices",
+		strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0","lnCategories":["CONTROL","OTHER"]}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []any{"CONTROL", "OTHER"}, body["lnCategories"])
+}
+
+// Absent, not null: "unfiltered" is signalled by the key being missing entirely, and a client that
+// types the field as an optional array would choke on an explicit null.
+func TestHandleStartReporting_OmitsLnCategoriesWhenUnfiltered(t *testing.T) {
+	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
+	mux := Router(newTestAPI(reporting, nil, nil, nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	_, present := body["lnCategories"]
+	assert.False(t, present, "lnCategories must be omitted, not null, for an unfiltered device")
+}
+
 func TestHandleStartReporting_MalformedJSON(t *testing.T) {
 	mux := Router(newTestAPI(nil, nil, nil, nil))
 

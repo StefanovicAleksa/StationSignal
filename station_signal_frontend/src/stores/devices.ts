@@ -182,9 +182,17 @@ export const useDevicesStore = defineStore('devices', () => {
   // was asked for, this session was attached to a device another session created and its own
   // category choice was silently dropped — flagged so the UI can say so instead of quietly
   // showing a different slice of the device than the one that was picked.
-  function applyEffectiveCategories(device: WatchedDevice, effective: LnCategory[] | undefined) {
-    device.effectiveCategories = effective
-    device.sharedWithDifferentFilter = !sameCategories(device.requestedCategories, effective)
+  // Normalized first: the API's contract is that nil *or* empty means unfiltered, and JSON null is
+  // reachable for any field a hand-built response map fills from a nil slice. Untreated, `[]` would
+  // compare unequal to `undefined` and raise the shared-stream banner on a device this session
+  // started alone, and `null` would throw on `.length` inside sameCategories.
+  function applyEffectiveCategories(
+    device: WatchedDevice,
+    effective: LnCategory[] | null | undefined,
+  ) {
+    const normalized = effective && effective.length > 0 ? effective : undefined
+    device.effectiveCategories = normalized
+    device.sharedWithDifferentFilter = !sameCategories(device.requestedCategories, normalized)
   }
 
   async function startDevice(params: StartDeviceRequest): Promise<string> {

@@ -74,7 +74,8 @@ after the API itself has just started.
 **Success (`201 Created`):**
 
 ```json
-{ "deviceId": 1, "wsPort": 9000, "mmsAvailable": true, "gooseAvailable": true, "lnCategories": ["CONTROL", "OTHER"] }
+{ "deviceId": 1, "host": "10.0.0.5", "mmsPort": 102, "interfaceId": "eth0", "wsPort": 9000,
+  "mmsAvailable": true, "gooseAvailable": true, "lnCategories": ["CONTROL", "OTHER"] }
 ```
 
 `deviceId` identifies this session for `DELETE`/streaming. `wsPort` is an internal daemon
@@ -145,11 +146,12 @@ cancellation exists; retry shortly.
 ```json
 [
   { "deviceId": 1, "host": "10.0.0.5", "mmsPort": 102, "interfaceId": "eth0", "wsPort": 9000,
-    "mmsAvailable": true, "gooseAvailable": true }
+    "mmsAvailable": true, "gooseAvailable": true, "lnCategories": ["CONTROL", "OTHER"] }
 ]
 ```
-Empty array (`[]`), not `null`, when nothing is active. `mmsAvailable`/`gooseAvailable` have the
-same meaning as on `POST /api/devices` above.
+Empty array (`[]`), not `null`, when nothing is active. Each entry is the same object
+`POST /api/devices` returns — `mmsAvailable`/`gooseAvailable`/`lnCategories` all carry the meaning
+they have above, including `lnCategories` being omitted entirely for an unfiltered device.
 
 ### Errors (all endpoints above)
 
