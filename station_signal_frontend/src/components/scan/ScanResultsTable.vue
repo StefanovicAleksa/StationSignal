@@ -108,6 +108,9 @@ function formatTime(ms: number): string {
       </tbody>
     </Table>
 
-    <ShortcutHint v-if="rows.length > 0" :items="shortcutItems" />
+    <!-- Always shown, matching the Devices page's manual-connect form: gating it on results meant
+         the shortcuts were invisible for the whole stretch before a scan finds anything, which is
+         exactly when a technician is reading the page. -->
+    <ShortcutHint :items="shortcutItems" />
   </div>
 </template>

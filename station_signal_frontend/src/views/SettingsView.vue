@@ -163,32 +163,38 @@ function prefillCurrent() {
       </template>
 
       <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-        <div class="flex flex-wrap items-end gap-4">
-          <div class="flex min-w-48 flex-1 flex-col gap-1">
-            <label for="cidr" class="text-sm font-medium text-slate-700 dark:text-slate-300">
-              {{ t('settings.form.addressLabel') }}
-            </label>
-            <input
-              id="cidr"
-              v-model="cidrInput"
-              type="text"
-              :placeholder="t('settings.form.addressPlaceholder')"
-              :disabled="isBusy"
-              class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
-            />
-            <p v-if="cidrError" class="text-xs text-red-600 dark:text-red-400">{{ cidrError }}</p>
-            <p v-else-if="cidrPreview" class="text-xs text-slate-500 dark:text-slate-400">
-              {{ t('settings.form.addressPreview', { cidr: cidrPreview }) }}
-            </p>
-            <p v-else class="text-xs text-slate-400 dark:text-slate-500">
-              {{ t('settings.form.addressHint', { prefix: `/${fallbackPrefix}` }) }}
-            </p>
+        <!-- Inputs and buttons share one row; every hint/error line lives in the row *below* it.
+             Keeping them inside the input's own column made `items-end` align the buttons to the
+             bottom of the hint text instead of the input, leaving them visibly low. -->
+        <div class="flex flex-col gap-1">
+          <div class="flex flex-wrap items-end gap-4">
+            <div class="flex min-w-48 flex-1 flex-col gap-1">
+              <label for="cidr" class="text-sm font-medium text-slate-700 dark:text-slate-300">
+                {{ t('settings.form.addressLabel') }}
+              </label>
+              <input
+                id="cidr"
+                v-model="cidrInput"
+                type="text"
+                :placeholder="t('settings.form.addressPlaceholder')"
+                :disabled="isBusy"
+                class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
+              />
+            </div>
+
+            <Button type="submit" variant="primary" :icon="Save" :disabled="isBusy">{{ t('common.apply') }}</Button>
+            <Button type="button" variant="secondary" :disabled="isBusy || !store.status" @click="prefillCurrent">
+              {{ t('settings.form.prefillCurrent') }}
+            </Button>
           </div>
 
-          <Button type="submit" variant="primary" :icon="Save" :disabled="isBusy">{{ t('common.apply') }}</Button>
-          <Button type="button" variant="secondary" :disabled="isBusy || !store.status" @click="prefillCurrent">
-            {{ t('settings.form.prefillCurrent') }}
-          </Button>
+          <p v-if="cidrError" class="text-xs text-red-600 dark:text-red-400">{{ cidrError }}</p>
+          <p v-else-if="cidrPreview" class="text-xs text-slate-500 dark:text-slate-400">
+            {{ t('settings.form.addressPreview', { cidr: cidrPreview }) }}
+          </p>
+          <p v-else class="text-xs text-slate-400 dark:text-slate-500">
+            {{ t('settings.form.addressHint', { prefix: `/${fallbackPrefix}` }) }}
+          </p>
         </div>
 
         <!-- Gateway is prefilled from the box's current configuration on mount and almost never

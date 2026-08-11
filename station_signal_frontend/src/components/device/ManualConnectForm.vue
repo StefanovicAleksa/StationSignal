@@ -121,65 +121,69 @@ function handleStructureFilePath(path: string | undefined) {
   sclFilePath.value = path ?? ''
 }
 
-// Everything except Host is either prefilled (interface), a fixed default (port 102), or purely
-// optional (IED name, structure file), so the form opens as a one-field form. Force-opened as
-// soon as anything inside it is invalid.
-const advancedSummary = computed(() => `${interfaceId.value || '—'} · :${mmsPortInput.value}`)
+// Host and MMS port are the two fields a technician actually picks per device, so both stay in
+// the main row. What's left behind Advanced is either prefilled (interface) or purely optional
+// (IED name, structure file). Force-opened as soon as anything inside it is invalid.
+const advancedSummary = computed(() => interfaceId.value || '—')
 const advancedForceOpen = computed(
   () =>
-    Boolean(interfaceError.value || portError.value || iedNameError.value) ||
-    interfaceId.value.trim().length === 0,
+    Boolean(interfaceError.value || iedNameError.value) || interfaceId.value.trim().length === 0,
 )
 </script>
 
 <template>
   <form class="flex flex-col gap-3" @submit.prevent="handleSubmit">
-    <div class="flex flex-wrap items-end gap-4">
-      <div class="flex min-w-40 flex-1 flex-col gap-1">
-        <label for="manualHost" class="text-sm font-medium text-slate-700 dark:text-slate-300">
-          {{ t('fields.host') }}
-        </label>
-        <input
-          id="manualHost"
-          v-model="host"
-          type="text"
-          :placeholder="t('fields.hostPlaceholder')"
+    <!-- Errors render below the field row, not inside a field's own column: an error inside the
+         column grows it and drops the Connect button out of line with the inputs. -->
+    <div class="flex flex-col gap-1">
+      <div class="flex flex-wrap items-end gap-4">
+        <div class="flex min-w-40 flex-1 flex-col gap-1">
+          <label for="manualHost" class="text-sm font-medium text-slate-700 dark:text-slate-300">
+            {{ t('fields.host') }}
+          </label>
+          <input
+            id="manualHost"
+            v-model="host"
+            type="text"
+            :placeholder="t('fields.hostPlaceholder')"
+            :disabled="props.disabled"
+            class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
+          />
+        </div>
+
+        <div class="flex w-28 flex-col gap-1">
+          <label for="manualMmsPort" class="text-sm font-medium text-slate-700 dark:text-slate-300">
+            {{ t('fields.mmsPort') }}
+          </label>
+          <input
+            id="manualMmsPort"
+            v-model="mmsPortInput"
+            type="number"
+            min="1"
+            max="65535"
+            step="1"
+            :disabled="props.disabled"
+            class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
+          />
+        </div>
+
+        <Button
+          type="submit"
+          variant="primary"
+          :icon="Plug"
           :disabled="props.disabled"
-          class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
-        />
-        <p v-if="hostError" class="text-xs text-red-600 dark:text-red-400">{{ hostError }}</p>
+          :title="t('shortcuts.connectTooltip')"
+          @click="captureModifiers"
+        >
+          {{ t('common.connect') }}
+        </Button>
       </div>
 
-      <Button
-        type="submit"
-        variant="primary"
-        :icon="Plug"
-        :disabled="props.disabled"
-        :title="t('shortcuts.connectTooltip')"
-        @click="captureModifiers"
-      >
-        {{ t('common.connect') }}
-      </Button>
+      <p v-if="hostError" class="text-xs text-red-600 dark:text-red-400">{{ hostError }}</p>
+      <p v-if="portError" class="text-xs text-red-600 dark:text-red-400">{{ portError }}</p>
     </div>
 
     <Disclosure :summary="advancedSummary" :force-open="advancedForceOpen">
-      <div class="flex min-w-32 flex-1 flex-col gap-1">
-        <label for="manualMmsPort" class="text-sm font-medium text-slate-700 dark:text-slate-300">
-          {{ t('fields.mmsPort') }}
-        </label>
-        <input
-          id="manualMmsPort"
-          v-model="mmsPortInput"
-          type="number"
-          min="1"
-          max="65535"
-          step="1"
-          :disabled="props.disabled"
-          class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
-        />
-        <p v-if="portError" class="text-xs text-red-600 dark:text-red-400">{{ portError }}</p>
-      </div>
-
       <div class="flex min-w-40 flex-1 flex-col gap-1">
         <label for="manualInterfaceId" class="text-sm font-medium text-slate-700 dark:text-slate-300">
           {{ t('fields.interface') }}
