@@ -3,7 +3,9 @@ import { ref } from 'vue'
 import { Plug } from '@lucide/vue'
 
 import { useDevicesStore } from '@/stores/devices'
-import { ApiError, DEFAULT_LN_CATEGORIES, formatApiErrorDetail, isAuthRequiredError, type LnCategory } from '@/types/api'
+import { ApiError, formatApiErrorDetail, isAuthRequiredError, type LnCategory } from '@/types/api'
+import { categoriesForPreset, type ConnectPreset } from '@/utils/connectPreset'
+import { useI18n } from '@/i18n'
 import Button from '@/components/ui/Button.vue'
 import ConnectCategoryModal from '@/components/device/ConnectCategoryModal.vue'
 
@@ -13,6 +15,7 @@ const emit = defineEmits<{
 }>()
 
 const devicesStore = useDevicesStore()
+const { t } = useI18n()
 
 interface PendingPasswordPrompt {
   host: string
@@ -31,7 +34,7 @@ const passwordTouched = ref(false)
 // Actually calls the API. Separated from connect() below so a password retry
 // (submitPassword) can re-invoke this directly without re-showing the category picker -
 // the categories for this connect attempt were already decided once, either by the modal
-// or by a Shift-bypass.
+// or by a modifier-key preset.
 async function doStart(
   host: string,
   mmsPort: number,
@@ -60,7 +63,7 @@ async function doStart(
       return
     }
     pendingPasswordPrompt.value = null
-    emit('error', err instanceof ApiError ? formatApiErrorDetail(err) : 'Failed to connect to device.')
+    emit('error', err instanceof ApiError ? formatApiErrorDetail(err) : t('connectPrompt.failed'))
   }
 }
 
@@ -80,10 +83,9 @@ const categoryModalOpen = ref(false)
 // get host/mmsPort/interfaceId (a scan result, a manual form, ...) without this component
 // needing to know where that came from.
 //
-// bypassCategoryModal is true when the user held Shift while clicking Connect - skips the
-// category picker entirely and connects straight away with the same default categories the
-// picker itself would have pre-checked (DEFAULT_LN_CATEGORIES), a shortcut for the common case,
-// not an "unfiltered" escape hatch.
+// `preset` is how the click decided its categories — see utils/connectPreset.ts. Anything other
+// than 'ask' skips the picker and connects straight away, which is a shortcut for a common case,
+// not a way to get past the choice.
 async function connect(
   host: string,
   mmsPort: number,
@@ -91,10 +93,10 @@ async function connect(
   acseAuthPassword?: string,
   iedName?: string,
   sclFilePath?: string,
-  bypassCategoryModal = false,
+  preset: ConnectPreset = 'ask',
 ) {
-  if (bypassCategoryModal) {
-    await doStart(host, mmsPort, interfaceId, acseAuthPassword, iedName, sclFilePath, DEFAULT_LN_CATEGORIES)
+  if (preset !== 'ask') {
+    await doStart(host, mmsPort, interfaceId, acseAuthPassword, iedName, sclFilePath, categoriesForPreset(preset))
     return
   }
   pendingCategoryPrompt.value = { host, mmsPort, interfaceId, acseAuthPassword, iedName, sclFilePath }
@@ -163,7 +165,7 @@ defineExpose({ connect })
   >
     <div class="flex flex-col gap-1">
       <label for="acseAuthPassword" class="text-sm font-medium text-slate-700 dark:text-slate-300">
-        {{ pendingPasswordPrompt.host }} requires a password
+        {{ t('connectPrompt.passwordLabel', { host: pendingPasswordPrompt.host }) }}
       </label>
       <input
         id="acseAuthPassword"
@@ -174,11 +176,15 @@ defineExpose({ connect })
         class="w-56 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800 dark:disabled:text-slate-500"
       />
       <p v-if="passwordTouched && passwordInput.trim().length === 0" class="text-xs text-red-600 dark:text-red-400">
-        Password is required.
+        {{ t('connectPrompt.passwordRequired') }}
       </p>
     </div>
 
-    <Button type="submit" variant="primary" :icon="Plug" :disabled="passwordSubmitting">Connect</Button>
-    <Button type="button" variant="secondary" :disabled="passwordSubmitting" @click="cancel">Cancel</Button>
+    <Button type="submit" variant="primary" :icon="Plug" :disabled="passwordSubmitting">
+      {{ t('common.connect') }}
+    </Button>
+    <Button type="button" variant="secondary" :disabled="passwordSubmitting" @click="cancel">
+      {{ t('common.cancel') }}
+    </Button>
   </form>
 </template>

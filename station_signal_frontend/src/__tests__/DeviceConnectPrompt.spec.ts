@@ -19,6 +19,7 @@ vi.mock('@/services/deviceSocket', () => ({
 
 import { startReporting } from '@/services/deviceApi'
 import { ApiError } from '@/types/api'
+import { t } from '@/i18n'
 
 function mountPrompt() {
   return mount(DeviceConnectPrompt, {
@@ -27,7 +28,7 @@ function mountPrompt() {
 }
 
 function connectButtonInModal(wrapper: ReturnType<typeof mountPrompt>) {
-  const button = wrapper.findAll('button').find((b) => b.text() === 'Connect')
+  const button = wrapper.findAll('button').find((b) => b.text() === t('common.connect'))
   if (!button) throw new Error('no Connect button found in modal')
   return button
 }
@@ -44,7 +45,7 @@ describe('DeviceConnectPrompt', () => {
     })
   })
 
-  it('opens the category modal instead of starting the device when bypassCategoryModal is false', async () => {
+  it("opens the category modal instead of starting the device on the 'ask' preset", async () => {
     const wrapper = mountPrompt()
 
     ;(wrapper.vm as unknown as { connect: (...args: unknown[]) => Promise<void> }).connect(
@@ -54,7 +55,7 @@ describe('DeviceConnectPrompt', () => {
       undefined,
       undefined,
       undefined,
-      false,
+      'ask',
     )
     await flushPromises()
 
@@ -62,7 +63,7 @@ describe('DeviceConnectPrompt', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
   })
 
-  it('starts the device immediately with the default categories when bypassCategoryModal is true', async () => {
+  it("starts the device immediately with the default categories on the 'default' preset", async () => {
     const wrapper = mountPrompt()
 
     await (wrapper.vm as unknown as { connect: (...args: unknown[]) => Promise<void> }).connect(
@@ -72,7 +73,7 @@ describe('DeviceConnectPrompt', () => {
       undefined,
       undefined,
       undefined,
-      true,
+      'default',
     )
 
     expect(startReporting).toHaveBeenCalledTimes(1)
@@ -80,6 +81,26 @@ describe('DeviceConnectPrompt', () => {
       host: '10.0.0.5',
       lnCategories: ['CONTROL', 'OTHER'],
     })
+    expect(wrapper.emitted('connected')).toBeTruthy()
+  })
+
+  // 'all' sends no lnCategories at all, which is what the API and the daemon read as unfiltered —
+  // the same value the modal's own "Connect to all categories" checkbox emits.
+  it("starts the device unfiltered on the 'all' preset", async () => {
+    const wrapper = mountPrompt()
+
+    await (wrapper.vm as unknown as { connect: (...args: unknown[]) => Promise<void> }).connect(
+      '10.0.0.5',
+      102,
+      'eth0',
+      undefined,
+      undefined,
+      undefined,
+      'all',
+    )
+
+    expect(startReporting).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(startReporting).mock.calls[0]?.[0].lnCategories).toBeUndefined()
     expect(wrapper.emitted('connected')).toBeTruthy()
   })
 
@@ -93,7 +114,7 @@ describe('DeviceConnectPrompt', () => {
       undefined,
       undefined,
       undefined,
-      false,
+      'ask',
     )
     await flushPromises()
 
@@ -114,7 +135,7 @@ describe('DeviceConnectPrompt', () => {
       .mockResolvedValueOnce({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
     const wrapper = mountPrompt()
 
-    // Bypass to keep this test focused on the password-retry path, not the category modal.
+    // Skip the picker to keep this test focused on the password-retry path, not the modal.
     await (wrapper.vm as unknown as { connect: (...args: unknown[]) => Promise<void> }).connect(
       '10.0.0.5',
       102,
@@ -122,7 +143,7 @@ describe('DeviceConnectPrompt', () => {
       undefined,
       undefined,
       undefined,
-      true,
+      'default',
     )
 
     // First call failed with AUTH_REQUIRED - the inline password form should now be showing.

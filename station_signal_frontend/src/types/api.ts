@@ -112,6 +112,10 @@ export interface UploadStructureFileResponse {
   path: string
 }
 
+// `lnCategories` on a *response* is the filter the running device is actually subscribed with,
+// which is not necessarily the one this session asked for: the API shares one physical device
+// across every session at the same host:mmsPort and keeps the creator's own params (see
+// FRONTEND_API_GUIDE.md's device-sharing note). Absent means unfiltered.
 export interface DeviceSummary {
   deviceId: number
   host: string
@@ -120,6 +124,7 @@ export interface DeviceSummary {
   wsPort: number
   mmsAvailable: boolean
   gooseAvailable: boolean
+  lnCategories?: LnCategory[]
 }
 
 export interface StartDeviceResponse {
@@ -127,6 +132,7 @@ export interface StartDeviceResponse {
   wsPort: number
   mmsAvailable: boolean
   gooseAvailable: boolean
+  lnCategories?: LnCategory[]
 }
 
 export interface Quality {
@@ -142,6 +148,13 @@ export interface DataPoint {
   previousQuality: Quality | null
   label: string | null
   previousLabel: string | null
+  // The IEC 61850 Logical Node category this point's own LN classifies as — emitted per data
+  // point by the daemon and relayed verbatim by the API. Note this is the point's *actual*
+  // category, independent of the device's subscription filter: LLN0 is exempt from that filter
+  // but still reports OTHER, so a Control-only connect legitimately delivers OTHER points.
+  // Null when the daemon couldn't resolve the owning LN.
+  category: LnCategory | null
+  description: string | null
 }
 
 export interface ReportSource {

@@ -17,6 +17,7 @@ vi.mock('@/services/settingsApi', () => ({
 
 import { uploadStructureFile } from '@/services/structureFileApi'
 import { getNetworkStatus } from '@/services/settingsApi'
+import { t } from '@/i18n'
 
 function fill(wrapper: ReturnType<typeof mount>, id: string, value: string) {
   return wrapper.find(`#${id}`).setValue(value)
@@ -57,17 +58,17 @@ describe('ManualConnectForm', () => {
     await fill(wrapper, 'manualHost', '10.0.0.5')
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, false]])
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, 'ask']])
   })
 
-  it('emits bypassCategoryModal=true when the Connect button is clicked while holding Shift', async () => {
+  it("emits the 'default' preset when the Connect button is clicked while holding Shift", async () => {
     const wrapper = await mountForm()
     await fill(wrapper, 'manualHost', '10.0.0.5')
 
     await wrapper.find('button[type="submit"]').trigger('click', { shiftKey: true })
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, true]])
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', undefined, undefined, 'default']])
   })
 
   it('emits connect with iedName and the uploaded structure file path when both are provided', async () => {
@@ -81,7 +82,7 @@ describe('ManualConnectForm', () => {
 
     expect(uploadStructureFile).toHaveBeenCalledWith(expect.objectContaining({ name: 'device.icd' }))
     expect(wrapper.emitted('connect')).toEqual([
-      ['10.0.0.5', 102, 'eth0', 'IED1', '/data/structure_files/abc-device.icd', false],
+      ['10.0.0.5', 102, 'eth0', 'IED1', '/data/structure_files/abc-device.icd', 'ask'],
     ])
   })
 
@@ -94,7 +95,7 @@ describe('ManualConnectForm', () => {
     await wrapper.find('form').trigger('submit.prevent')
 
     expect(wrapper.emitted('connect')).toBeUndefined()
-    expect(wrapper.text()).toContain('IED name is required when a structure file path is given.')
+    expect(wrapper.text()).toContain(t('structureFile.iedNameRequired'))
   })
 
   it('clears sclFilePath when the upload fails', async () => {
@@ -106,6 +107,6 @@ describe('ManualConnectForm', () => {
     await selectStructureFile(wrapper, new File(['<SCL/>'], 'device.icd', { type: 'text/xml' }))
     await wrapper.find('form').trigger('submit.prevent')
 
-    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', 'IED1', undefined, false]])
+    expect(wrapper.emitted('connect')).toEqual([['10.0.0.5', 102, 'eth0', 'IED1', undefined, 'ask']])
   })
 })

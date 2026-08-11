@@ -3,8 +3,17 @@ import { defineStore } from 'pinia'
 
 import { startReporting, stopReporting, stopReportingByAddress, listDevices } from '@/services/deviceApi'
 import { createDeviceSocket, type DeviceSocket } from '@/services/deviceSocket'
-import type { DataPoint, DeviceStreamMessage, GooseSource, Quality, ReportSource, StartDeviceRequest } from '@/types/api'
+import type {
+  DataPoint,
+  DeviceStreamMessage,
+  GooseSource,
+  LnCategory,
+  Quality,
+  ReportSource,
+  StartDeviceRequest,
+} from '@/types/api'
 import { ApiError } from '@/types/api'
+import { t } from '@/i18n'
 
 export type DevicePhase = 'connecting' | 'connected' | 'interrupted' | 'stopping' | 'error'
 
@@ -29,6 +38,10 @@ export interface DeviceReport {
   qualityChanged: boolean
   label: string | null
   previousLabel: string | null
+  // The point's own LN category, used by DeviceReportPanel's per-browser category filter. Null
+  // when the daemon couldn't resolve the owning LN — such points are always shown, since hiding
+  // something whose category is simply unknown would silently drop real data.
+  category: LnCategory | null
 }
 
 export interface WatchedDevice {
@@ -47,9 +60,25 @@ export interface WatchedDevice {
   // warning before the real value is known.
   mmsAvailable: boolean
   gooseAvailable: boolean
+  // What this session asked to subscribe to, and what the running device is actually subscribed
+  // with. They differ when the API attached this session to a device another session had already
+  // started: one physical connection is shared and the creator's own filter is kept, so the
+  // categories picked here were never applied. Both undefined means unfiltered.
+  requestedCategories: LnCategory[] | undefined
+  effectiveCategories: LnCategory[] | undefined
+  sharedWithDifferentFilter: boolean
 }
 
 const MAX_REPORTS = 500
+
+// Order-insensitive: the API echoes back whatever the creating session sent, which need not be in
+// the same order as this session's own picker output.
+function sameCategories(a: LnCategory[] | undefined, b: LnCategory[] | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  if (a.length !== b.length) return false
+  const sortedB = [...b].sort()
+  return [...a].sort().every((value, index) => value === sortedB[index])
+}
 
 function hasValueChanged(point: DataPoint): boolean {
   return point.previousValue !== null && point.previousValue !== point.value
@@ -103,7 +132,7 @@ export const useDevicesStore = defineStore('devices', () => {
           device.phase = 'error'
           device.error = {
             code: 'AUTH_REQUIRED',
-            message: 'Connection rejected — a password may be required',
+            message: t('errors.connectionRejected'),
             stage: null,
             detail: null,
           }
@@ -126,6 +155,7 @@ export const useDevicesStore = defineStore('devices', () => {
             qualityChanged: hasQualityChanged(point),
             label: point.label,
             previousLabel: point.previousLabel,
+            category: point.category ?? null,
           })
         }
         if (device.reports.length > MAX_REPORTS) {
@@ -148,6 +178,15 @@ export const useDevicesStore = defineStore('devices', () => {
     socket.connect()
   }
 
+  // A start response reports the filter the *running* device carries. When that differs from what
+  // was asked for, this session was attached to a device another session created and its own
+  // category choice was silently dropped — flagged so the UI can say so instead of quietly
+  // showing a different slice of the device than the one that was picked.
+  function applyEffectiveCategories(device: WatchedDevice, effective: LnCategory[] | undefined) {
+    device.effectiveCategories = effective
+    device.sharedWithDifferentFilter = !sameCategories(device.requestedCategories, effective)
+  }
+
   async function startDevice(params: StartDeviceRequest): Promise<string> {
     const existing = findByHost(params.host, params.mmsPort ?? 102)
     if (existing && existing.phase !== 'error') {
@@ -167,6 +206,9 @@ export const useDevicesStore = defineStore('devices', () => {
       lastMessageAtMs: existing?.lastMessageAtMs ?? null,
       mmsAvailable: existing?.mmsAvailable ?? true,
       gooseAvailable: existing?.gooseAvailable ?? true,
+      requestedCategories: params.lnCategories,
+      effectiveCategories: params.lnCategories,
+      sharedWithDifferentFilter: false,
     }
 
     try {
@@ -181,6 +223,7 @@ export const useDevicesStore = defineStore('devices', () => {
       current.deviceId = response.deviceId
       current.mmsAvailable = response.mmsAvailable
       current.gooseAvailable = response.gooseAvailable
+      applyEffectiveCategories(current, response.lnCategories)
       connectDeviceSocket(key, response.deviceId)
       return key
     } catch (err) {
@@ -192,6 +235,7 @@ export const useDevicesStore = defineStore('devices', () => {
           current.deviceId = match.deviceId
           current.mmsAvailable = match.mmsAvailable
           current.gooseAvailable = match.gooseAvailable
+          applyEffectiveCategories(current, match.lnCategories)
           connectDeviceSocket(key, match.deviceId)
           return key
         }
@@ -285,6 +329,11 @@ export const useDevicesStore = defineStore('devices', () => {
           lastMessageAtMs: null,
           mmsAvailable: summary.mmsAvailable,
           gooseAvailable: summary.gooseAvailable,
+          // Adopted from the API's own list rather than requested here, so there's nothing to
+          // disagree with — this device was started by some earlier page load or session.
+          requestedCategories: summary.lnCategories,
+          effectiveCategories: summary.lnCategories,
+          sharedWithDifferentFilter: false,
         }
         connectDeviceSocket(key, summary.deviceId)
       }
@@ -295,6 +344,9 @@ export const useDevicesStore = defineStore('devices', () => {
 
   return {
     devices,
+    // Exposed so the scan results table can derive each row's state (Connect vs. View) from
+    // whether that host is currently being watched, rather than tracking it separately.
+    findByHost,
     startDevice,
     stopDevice,
     clearReports,
@@ -308,7 +360,7 @@ function toDeviceError(err: unknown): DeviceError {
   }
   return {
     code: 'UNKNOWN',
-    message: err instanceof Error ? err.message : 'Unexpected error',
+    message: err instanceof Error ? err.message : t('common.unexpectedError'),
     stage: null,
     detail: null,
   }

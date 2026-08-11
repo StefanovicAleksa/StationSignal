@@ -11,6 +11,7 @@ import {
 import { ApiError } from '@/types/api'
 import type { NetworkConfig, NetworkStatus } from '@/types/api'
 import type { ProbeOutcome } from '@/services/settingsApi'
+import { t } from '@/i18n'
 
 // One reconnect attempt, kept so the page can show *why* it is still waiting. Without this the
 // only visible signal was a countdown, which made "polling and being refused" indistinguishable
@@ -257,5 +258,5 @@ function toSettingsError(err: unknown): SettingsError {
   if (err instanceof ApiError) {
     return { code: err.code, message: err.message }
   }
-  return { code: 'UNKNOWN', message: err instanceof Error ? err.message : 'Unexpected error' }
+  return { code: 'UNKNOWN', message: err instanceof Error ? err.message : t('common.unexpectedError') }
 }

@@ -74,11 +74,15 @@ after the API itself has just started.
 **Success (`201 Created`):**
 
 ```json
-{ "deviceId": 1, "wsPort": 9000, "mmsAvailable": true, "gooseAvailable": true }
+{ "deviceId": 1, "wsPort": 9000, "mmsAvailable": true, "gooseAvailable": true, "lnCategories": ["CONTROL", "OTHER"] }
 ```
 
 `deviceId` identifies this session for `DELETE`/streaming. `wsPort` is an internal daemon
 port — **ignore it**, you don't connect to it; use `/ws/devices/{deviceId}` instead (§4).
+
+`lnCategories` is the filter the **running** device is actually subscribed with, which is not
+necessarily the one you sent — see the device-sharing note below. Omitted entirely when the
+device is unfiltered. Also included per-device in `GET /api/devices`.
 
 `mmsAvailable`/`gooseAvailable` report which of MMS reporting / GOOSE subscription this
 device's SCL actually declares — **a device only needs one of the two**, not both. A device
@@ -96,6 +100,22 @@ has `host`/`mmsPort` active, this call attaches your session to that same device
 starting a second connection to the IED — you get back its existing `deviceId`/`wsPort` with
 `201`, not an error. `DELETE /api/devices/{id}` only actually stops the physical device once
 every attached session has called it; until then it just detaches your own session's view.
+
+⚠️ **When you are attached rather than starting, the rest of your request body is discarded.**
+The already-running device keeps the params its *creator* sent, so your own `lnCategories`,
+`accessMode`, `sclFilePath` and `acseAuthPassword` have no effect — there is one physical
+connection to that IED and one set of settings on it. The response is otherwise indistinguishable
+from a real start, so **compare the `lnCategories` you sent against the `lnCategories` you get
+back** to detect it, and tell the operator rather than silently showing them a different slice of
+the device than the one they picked. (The frontend does exactly this; see its
+`stores/devices.ts` `applyEffectiveCategories`.)
+
+There is deliberately **no** way to open a second daemon connection to the same IED with a
+different category filter. Two clients on one IED collide on the daemon's deterministic dataset
+names, and each one's orphan cleanup will delete the other's live dataset server-side — see the
+daemon's `CLAUDE.md` `device_manager` bullet for the full analysis. Narrowing what a given
+technician *sees* is a client-side concern: every data point carries its own `category` (§4), so
+filter the stream in the browser.
 
 ### `DELETE /api/devices/{id}` — stop reporting
 

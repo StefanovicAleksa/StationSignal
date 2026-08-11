@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import { DEFAULT_LN_CATEGORIES, type LnCategory } from '@/types/api'
+import { useI18n } from '@/i18n'
 import Button from '@/components/ui/Button.vue'
 
 const props = defineProps<{
@@ -13,18 +14,20 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
+const { t } = useI18n()
+
 interface CategoryOption {
   value: LnCategory
   label: string
   hint: string
 }
 
-const categoryOptions: CategoryOption[] = [
-  { value: 'CONTROL', label: 'Control', hint: 'Breakers, switches, supervisory control' },
-  { value: 'MEASUREMENT', label: 'Measurement', hint: 'Analog and metering values' },
-  { value: 'PROTECTION', label: 'Protection', hint: 'Protection relay functions' },
-  { value: 'OTHER', label: 'Other', hint: 'System logical nodes and anything uncategorized' },
-]
+const categoryOptions = computed<CategoryOption[]>(() => [
+  { value: 'CONTROL', label: t('categoryModal.control'), hint: t('categoryModal.controlHint') },
+  { value: 'MEASUREMENT', label: t('categoryModal.measurement'), hint: t('categoryModal.measurementHint') },
+  { value: 'PROTECTION', label: t('categoryModal.protection'), hint: t('categoryModal.protectionHint') },
+  { value: 'OTHER', label: t('categoryModal.other'), hint: t('categoryModal.otherHint') },
+])
 
 const allSelected = ref(false)
 const selected = ref<Set<LnCategory>>(new Set(DEFAULT_LN_CATEGORIES))
@@ -77,11 +80,9 @@ function handleCancel() {
       >
         <header class="mb-3">
           <h2 id="connectCategoryModalTitle" class="text-base font-semibold text-slate-900 dark:text-slate-50">
-            What do you want to connect to?
+            {{ t('categoryModal.title') }}
           </h2>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Choose which Logical Node categories to subscribe to on this device.
-          </p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ t('categoryModal.subtitle') }}</p>
         </header>
 
         <label
@@ -92,7 +93,7 @@ function handleCancel() {
             type="checkbox"
             class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600"
           />
-          <span class="font-medium text-slate-700 dark:text-slate-200">Connect to all categories</span>
+          <span class="font-medium text-slate-700 dark:text-slate-200">{{ t('categoryModal.all') }}</span>
         </label>
 
         <div class="flex flex-col gap-2">
@@ -117,12 +118,14 @@ function handleCancel() {
         </div>
 
         <p v-if="!canConnect" class="mt-3 text-xs text-red-600 dark:text-red-400">
-          Select at least one category, or choose "Connect to all categories".
+          {{ t('categoryModal.selectAtLeastOne') }}
         </p>
 
         <div class="mt-4 flex justify-end gap-2">
-          <Button type="button" variant="secondary" @click="handleCancel">Cancel</Button>
-          <Button type="button" variant="primary" :disabled="!canConnect" @click="handleConfirm">Connect</Button>
+          <Button type="button" variant="secondary" @click="handleCancel">{{ t('common.cancel') }}</Button>
+          <Button type="button" variant="primary" :disabled="!canConnect" @click="handleConfirm">
+            {{ t('common.connect') }}
+          </Button>
         </div>
       </div>
     </div>

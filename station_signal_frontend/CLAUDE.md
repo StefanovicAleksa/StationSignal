@@ -9,11 +9,71 @@ API exposes.
 This file governs `frontend/` only. `../station_signal_api/CLAUDE.md` remains the authority on
 the API's own internals — nothing here should re-derive or fork that.
 
+## Commands
+- `pnpm dev` / `pnpm build` / `pnpm preview`
+- `pnpm type-check` (`vue-tsc --build`) — **the main safety net.** Message catalogs and component
+  emit signatures are both type-enforced, so most breakage is a compile error rather than a
+  runtime surprise. Run it before assuming a refactor landed.
+- `pnpm test:unit` (Vitest, jsdom). Specs live flat in `src/__tests__/`, not colocated.
+
 ## Current State
-Scaffolded, no application code yet. Created via `create-vue` (Vue 3 + TypeScript + Vue Router
-+ Pinia + Vitest, `--bare` — no example/demo code), dependencies installed, `pnpm build`
-verified working. `src/App.vue`, `src/router/index.ts`, `src/stores/counter.ts` are all
-template boilerplate from the scaffold, not yet adapted to this app.
+Implemented: Vue 3 + TypeScript + Vue Router + Pinia + Vitest + Tailwind v4. Four views (Scan,
+Devices, Reports, Settings) over three Pinia stores (`devices`, `scan`, `settings`), a thin
+`services/` layer of `fetch`/WebSocket wrappers, and `components/ui/` primitives. Dependency
+surface is deliberately minimal — no axios (raw `fetch`), no date library, no UI kit, no i18n
+library. Keep it that way absent a real reason.
+
+## Internationalization
+Every user-facing string goes through `t()` from `src/i18n`. Two locales: English and Serbian
+(Latin script). There is no i18n library — `src/i18n/index.ts` is a small singleton composable
+deliberately mirroring `src/composables/useTheme.ts` (module-scoped `ref` + `localStorage`), and
+the language toggle sits next to the theme toggle in `AppShell`.
+
+- **`src/i18n/messages/en.ts` is the source of truth.** `sr.ts` is typed as `Messages` (derived
+  from `typeof en` in `src/i18n/types.ts`), so a key in one and not the other is a `vue-tsc`
+  error, not a blank string at runtime. `t()`'s key parameter is a generated union of dot-paths,
+  so a renamed key can't survive as a silently-wrong lookup either.
+- What types *can't* catch is a translation that drops an interpolation slot — `i18n.spec.ts`
+  asserts placeholder parity between locales for exactly that reason.
+- **`t()` reads `locale.value`, so it only re-evaluates where that's tracked**: fine directly in a
+  template, fine inside `computed`. A bare `const label = t(...)` in setup scope freezes at the
+  locale active when the component mounted, so script-side label maps must be `computed`.
+- Store-side calls (error fallbacks) are deliberately snapshot-at-construction — an error message
+  keeps the wording it had when the failure actually happened.
+- IEC 61850 vocabulary (GOOSE, MMS, RCB, LN, SCL, ICD/CID, CIDR, host, port) stays untranslated in
+  every locale; that's how substation engineers write it in both languages.
+- Device phase labels live in one place, `composables/useDevicePhaseLabel.ts` — four call sites
+  previously each carried their own literal map, and had already drifted.
+
+## Connect shortcuts
+Clicking Connect opens the LN-category picker. Two modifier shortcuts skip it, modelled as a
+`ConnectPreset` (`utils/connectPreset.ts`) rather than a boolean, and surfaced via
+`ui/ShortcutHint.vue` plus button tooltips — the earlier boolean was undiscoverable in the UI and
+read as "connect unfiltered" at every call site while meaning the opposite.
+
+| Click | Preset | `lnCategories` sent |
+|---|---|---|
+| plain | `ask` | whatever the picker returns |
+| Shift | `default` | `DEFAULT_LN_CATEGORIES` (`['CONTROL','OTHER']`) |
+| Ctrl/Cmd | `all` | omitted — unfiltered |
+
+`Control + Other`, not Control alone, because real devices parent their control blocks on `LLN0`,
+which classifies as Other; a Control-only default would connect and show nothing.
+
+## Two Things That Are Derived, Not Tracked
+Both replaced hand-maintained bookkeeping that went stale in ways nothing detected:
+- **Scan row state.** `ScanResultsTable` reads the devices store per row to decide Connect vs.
+  View vs. a phase badge. It previously *deleted* a row on a successful connect, but the daemon's
+  scan worker keeps a per-scan seen-set and never republishes a host it has already reported — so
+  the row was gone for the life of that scan and disconnecting left no way back to the device.
+  Deriving it means `stopDevice` restores the Connect button for free.
+- **Effective LN categories.** The API attaches a session to an already-running device at the same
+  `host:mmsPort` and keeps the *creator's* params, so a second operator's category choice is
+  silently discarded. `stores/devices.ts`'s `applyEffectiveCategories` compares requested against
+  the `lnCategories` the response reports and flags the mismatch, and `DeviceReportPanel` says so.
+  Per-viewer narrowing is a client-side filter over that one shared stream (each data point
+  carries its own `category`) — **never** a second daemon connection to the same IED; see the
+  daemon's `CLAUDE.md` `device_manager` bullet for why that corrupts both clients.
 
 ## The API This Frontend Talks To
 Read `../station_signal_api/docs/FRONTEND_API_GUIDE.md` **before writing any client code** — it

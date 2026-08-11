@@ -4,6 +4,7 @@ import { Upload } from '@lucide/vue'
 
 import { uploadStructureFile } from '@/services/structureFileApi'
 import { ApiError } from '@/types/api'
+import { useI18n } from '@/i18n'
 import Button from '@/components/ui/Button.vue'
 
 const props = defineProps<{
@@ -13,6 +14,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:path': [path: string | undefined]
 }>()
+
+const { t } = useI18n()
 
 const fileInput = ref<HTMLInputElement>()
 const selectedFileName = ref<string | null>(null)
@@ -58,7 +61,7 @@ async function handleFile(file: File) {
   } catch (err) {
     selectedFileName.value = null
     emit('update:path', undefined)
-    error.value = err instanceof ApiError ? err.message : 'Failed to upload structure file.'
+    error.value = err instanceof ApiError ? err.message : t('structureFile.uploadFailed')
   } finally {
     uploading.value = false
   }
@@ -73,7 +76,7 @@ function clear() {
 
 <template>
   <div class="flex flex-col gap-1">
-    <label class="text-sm font-medium text-slate-700 dark:text-slate-300">Structure File (SCL/ICD/CID)</label>
+    <label class="text-sm font-medium text-slate-700 dark:text-slate-300">{{ t('structureFile.label') }}</label>
     <div
       class="flex w-full flex-col items-center justify-center gap-1 rounded-md border-2 border-dashed px-3 py-3 text-center text-xs transition-colors sm:w-72"
       :class="[
@@ -96,16 +99,16 @@ function clear() {
         @change="onInputChange"
       />
       <template v-if="uploading">
-        <span>Uploading…</span>
+        <span>{{ t('structureFile.uploading') }}</span>
       </template>
       <template v-else-if="selectedFileName">
         <span class="break-all font-medium text-slate-700 dark:text-slate-300">{{ selectedFileName }}</span>
-        <Button variant="ghost" size="sm" @click.stop="clear">Remove</Button>
+        <Button variant="ghost" size="sm" @click.stop="clear">{{ t('common.remove') }}</Button>
       </template>
       <template v-else>
         <Upload :size="16" class="text-slate-400 dark:text-slate-500" />
-        <span>Drag &amp; drop a structure file here, or click to browse</span>
-        <span class="text-slate-400 dark:text-slate-500">.icd, .cid, .scd, .xml</span>
+        <span>{{ t('structureFile.dropHint') }}</span>
+        <span class="text-slate-400 dark:text-slate-500">{{ t('structureFile.extensions') }}</span>
       </template>
     </div>
     <p v-if="error" class="text-xs text-red-600 dark:text-red-400">{{ error }}</p>

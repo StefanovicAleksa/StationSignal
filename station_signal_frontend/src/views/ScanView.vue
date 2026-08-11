@@ -9,17 +9,16 @@ import ScanSessionCard from '@/components/scan/ScanSessionCard.vue'
 import ScanStatusBanner from '@/components/scan/ScanStatusBanner.vue'
 import DeviceConnectPrompt from '@/components/device/DeviceConnectPrompt.vue'
 import Panel from '@/components/ui/Panel.vue'
+import { useI18n } from '@/i18n'
+import type { ConnectPreset } from '@/utils/connectPreset'
 
 const store = useScanStore()
 const devicesStore = useDevicesStore()
 const router = useRouter()
+const { t } = useI18n()
 
 const connectError = ref<string | null>(null)
 const connectPrompt = ref<InstanceType<typeof DeviceConnectPrompt>>()
-
-// Tracks which scan result the in-flight connect attempt (and any password retry) came from,
-// so it can be removed from the scan list once the connect actually succeeds.
-let pendingSession: { sessionKey: string; host: string; mmsPort: number } | null = null
 
 const sessions = computed(() => Object.values(store.sessions))
 
@@ -35,29 +34,26 @@ function handleStart(interfaceId: string, mmsPort: number) {
   store.start(interfaceId, mmsPort)
 }
 
-function connectToDevice(
-  host: string,
-  mmsPort: number,
-  interfaceId: string,
-  sessionKey: string,
-  bypassCategoryModal: boolean,
-) {
+function connectToDevice(host: string, mmsPort: number, interfaceId: string, preset: ConnectPreset) {
   connectError.value = null
-  pendingSession = { sessionKey, host, mmsPort }
-  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, undefined, undefined, bypassCategoryModal)
+  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, undefined, undefined, preset)
+}
+
+// A scan row for a host that's already being watched offers View instead of Connect (see
+// ScanResultsTable). The row itself stays put either way — it goes back to offering Connect the
+// moment that device leaves the devices store.
+function viewDevice(host: string, mmsPort: number) {
+  const device = devicesStore.findByHost(host, mmsPort)
+  if (device?.deviceId == null) return
+  router.push({ name: 'reports', query: { device: device.deviceId } })
 }
 
 function handleConnected(key: string) {
-  if (pendingSession) {
-    store.removeResult(pendingSession.sessionKey, pendingSession.host, pendingSession.mmsPort)
-    pendingSession = null
-  }
   const device = devicesStore.devices[key]
   router.push({ name: 'reports', query: device?.deviceId != null ? { device: device.deviceId } : {} })
 }
 
 function handleConnectError(message: string) {
-  pendingSession = null
   connectError.value = message
 }
 </script>
@@ -65,10 +61,8 @@ function handleConnectError(message: string) {
 <template>
   <div class="flex flex-col gap-6">
     <header>
-      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">Network Scan</h1>
-      <p class="text-sm text-slate-500 dark:text-slate-400">
-        Sweep one or more network interfaces for IEDs speaking MMS. Multiple scans can run at once.
-      </p>
+      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">{{ t('scan.title') }}</h1>
+      <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('scan.subtitle') }}</p>
     </header>
 
     <Panel>
@@ -93,7 +87,7 @@ function handleConnectError(message: string) {
 
     <DeviceConnectPrompt ref="connectPrompt" @connected="handleConnected" @error="handleConnectError" />
 
-    <p v-if="sessions.length === 0" class="text-sm text-slate-400 dark:text-slate-500">No scans running.</p>
+    <p v-if="sessions.length === 0" class="text-sm text-slate-400 dark:text-slate-500">{{ t('scan.noScans') }}</p>
 
     <ScanSessionCard
       v-for="session in sessions"
@@ -102,6 +96,7 @@ function handleConnectError(message: string) {
       @stop="store.stop(session.key)"
       @retry-now="store.retryNow(session.key)"
       @connect="connectToDevice"
+      @view="viewDevice"
     />
   </div>
 </template>

@@ -3,28 +3,24 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useDevicesStore } from '@/stores/devices'
+import { useDevicePhaseLabel } from '@/composables/useDevicePhaseLabel'
+import { useI18n } from '@/i18n'
 import TabStrip, { type TabStripItem } from '@/components/common/TabStrip.vue'
 import DeviceReportPanel from '@/components/device/DeviceReportPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
 const store = useDevicesStore()
+const { t } = useI18n()
+const { label: phaseLabel } = useDevicePhaseLabel()
 
 const deviceList = computed(() => Object.values(store.devices))
-
-const phaseLabel: Record<string, string> = {
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  interrupted: 'Interrupted',
-  stopping: 'Stopping…',
-  error: 'Error',
-}
 
 const tabs = computed<TabStripItem[]>(() =>
   deviceList.value.map((device) => ({
     id: device.key,
     label: `${device.host}:${device.mmsPort}`,
-    meta: phaseLabel[device.phase],
+    meta: phaseLabel.value[device.phase],
   })),
 )
 
@@ -68,23 +64,21 @@ function clearReports(key: string) {
 <template>
   <div class="flex flex-col gap-4">
     <header>
-      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">Reports</h1>
-      <p class="text-sm text-slate-500 dark:text-slate-400">
-        Live GOOSE/MMS reports for every device currently being watched.
-      </p>
+      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">{{ t('reports.title') }}</h1>
+      <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('reports.subtitle') }}</p>
     </header>
 
     <div v-if="deviceList.length === 0" class="flex flex-col gap-3">
       <p class="text-sm text-slate-500 dark:text-slate-400">
-        No devices being watched. Connect to one from the
+        {{ t('reports.emptyBefore') }}
         <RouterLink :to="{ name: 'devices' }" class="text-blue-600 underline hover:no-underline dark:text-blue-400">
-          Devices
+          {{ t('reports.emptyDevicesLink') }}
         </RouterLink>
-        page, or start one from the
+        {{ t('reports.emptyMiddle') }}
         <RouterLink :to="{ name: 'scan' }" class="text-blue-600 underline hover:no-underline dark:text-blue-400">
-          Network Scan
+          {{ t('reports.emptyScanLink') }}
         </RouterLink>
-        page.
+        {{ t('reports.emptyAfter') }}
       </p>
     </div>
 

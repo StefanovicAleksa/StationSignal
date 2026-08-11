@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import type { ScanError, ScanPhase } from '@/stores/scan'
 import Button from '@/components/ui/Button.vue'
+import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   phase: ScanPhase
@@ -15,6 +16,8 @@ const emit = defineEmits<{
   retryNow: []
 }>()
 
+const { t } = useI18n()
+
 const retrySecondsLeft = computed(() => {
   if (!props.nextRetryAt) return 0
   return Math.max(0, Math.ceil((props.nextRetryAt - Date.now()) / 1000))
@@ -23,11 +26,11 @@ const retrySecondsLeft = computed(() => {
 const statusText = computed(() => {
   switch (props.phase) {
     case 'starting':
-      return 'Starting scan…'
+      return t('scan.status.starting')
     case 'active':
-      return 'Scan active — listening for discovered hosts.'
+      return t('scan.status.active')
     case 'stopping':
-      return 'Stopping scan…'
+      return t('scan.status.stopping')
     default:
       return null
   }
@@ -49,13 +52,13 @@ const statusText = computed(() => {
     >
       <p>{{ error.message }} ({{ error.code }})</p>
       <div v-if="error.retryable" class="mt-1 flex items-center gap-2">
-        <span v-if="nextRetryAt">Retrying in {{ retrySecondsLeft }}s…</span>
-        <Button variant="ghost" size="sm" :icon="RefreshCw" @click="emit('retryNow')">Retry now</Button>
+        <span v-if="nextRetryAt">{{ t('scan.status.retryingIn', { seconds: retrySecondsLeft }) }}</span>
+        <Button variant="ghost" size="sm" :icon="RefreshCw" @click="emit('retryNow')">{{ t('common.retryNow') }}</Button>
       </div>
     </div>
 
     <p v-if="connectionInterrupted" class="text-xs text-amber-700 dark:text-amber-400">
-      Connection was interrupted — some results may be missing.
+      {{ t('scan.status.interrupted') }}
     </p>
   </div>
 </template>

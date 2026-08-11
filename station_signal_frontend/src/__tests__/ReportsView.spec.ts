@@ -17,6 +17,9 @@ function device(overrides: Partial<WatchedDevice> & Pick<WatchedDevice, 'key' | 
     lastMessageAtMs: null,
     mmsAvailable: true,
     gooseAvailable: true,
+    requestedCategories: undefined,
+    effectiveCategories: undefined,
+    sharedWithDifferentFilter: false,
     ...overrides,
   }
 }

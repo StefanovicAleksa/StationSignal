@@ -54,9 +54,17 @@ type Device struct {
 	// device's SCL actually declared targets for — a device declaring only one of the two
 	// still starts successfully (see the daemon's own ORCHESTRATION_ERR_NO_CAPABILITIES),
 	// so the frontend needs this to know which stream(s) to expect data on.
-	MMSAvailable   bool        `json:"mmsAvailable"`
-	GooseAvailable bool        `json:"gooseAvailable"`
-	StartParams    StartParams `json:"-"`
+	MMSAvailable   bool `json:"mmsAvailable"`
+	GooseAvailable bool `json:"gooseAvailable"`
+	// LnCategories is the LN-category filter this device is actually running with — the creating
+	// session's, which is not necessarily the requesting one's. Start attaches a session to an
+	// already-running device at the same host:mmsPort rather than starting a second one, and that
+	// existing device keeps its creator's params, so a later session's own lnCategories are
+	// discarded. Reporting the effective value here is what lets a client tell it was attached to
+	// someone else's device instead of silently receiving a different slice than it asked for.
+	// Nil/absent means unfiltered.
+	LnCategories []string    `json:"lnCategories,omitempty"`
+	StartParams  StartParams `json:"-"`
 	// SessionID is the browser session that started reporting on this device (see
 	// internal/core/session) — not daemon-facing, only used to scope this API's own
 	// List/Stream/Stop to their owner.

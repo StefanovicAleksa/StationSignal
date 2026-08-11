@@ -687,7 +687,40 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   locked, same shape as `scan_orchestration`'s own. `acseAuthPassword` is `strdup`'d into the
   registry entry, since a control-plane message's source buffer is freed once the request
   finishes (unlike `main.c`'s own argv). A duplicate `StartReporting` for a running/mid-start
-  `(host, mmsPort)` is rejected.
+  `(host, mmsPort)` is rejected (`DeviceManagerRegistry_reserve` →
+  `DEVICE_MANAGER_ERR_HOST_ALREADY_RUNNING`); `lnCategories` is deliberately **not** part of that
+  key. **One daemon device per physical IED is a correctness requirement, not a simplification** —
+  the obvious-looking idea of running two devices against one IED with disjoint LN categories (so
+  two operators can each watch "their" part) is unsafe, for four independent reasons, and the
+  rejection above is what prevents all of them:
+  **(1) Categories don't partition the work.** `IedModelUseCases_getReportSubscriptionTargets`
+  deliberately does not gate RCB (or GoCB) visibility by category — real SCL parents nearly every
+  RCB on `LLN0`, so gating there would make the filter useless. Both clients therefore enumerate
+  every RCB and every GoCB on the device; the filter only trims data points at delivery and
+  cluster membership at dataset-planning time.
+  **(2) Dataset names collide.** `MmsDatasetManagerNaming_buildDatasetName` derives a buffered
+  name from the RCB's LN reference alone, with no client identity, while the *contents* come from
+  a category-filtered whole-device plan. Two clients derive identical names for different intended
+  member lists, and `MmsDatasetManagerProvisioning_getOrCreateDataset` treats
+  `IED_ERROR_OBJECT_EXISTS` as successful reuse — so the second client silently reports the
+  first's category set and reconciles its decode-shape cache against a plan it never made.
+  **(3) Orphan cleanup deletes the other client's live datasets.**
+  `MmsDatasetManagerProvisioning_cleanupOrphaned` decides "is this ours?" purely by reconstructing
+  the name for one of its own targets, against per-connection claim state. Anything the other
+  client created and is actively reporting through reconstructs as a valid unclaimed name, so it
+  gets `RptEna=false`, `DatSet=""`, and `deleteDataSet` — server-side, with no local error on the
+  victim, which only finds out on its next reconnect. `_cleanupOnStop` has the same shape.
+  **(4) Shared BRCBs thrash.** Step 1's `DatSet` write clears `TrgOps` *and* `OptFlds` on real
+  SIPROTEC hardware, so each client's enable wipes the other's `dchg|qchg|gi` and
+  `RPT_OPT_ENTRY_ID` — the exact silent-`TrgOps=0x0` failure documented under `mms_report_client`.
+  A BRCB is also single-owner per IEC 61850-7-2 (`Resv`/`ResvTms`/`ClientLN`), `<DynDataSet max>`
+  budget is shared (starvation, then a create/delete oscillation as each client's cleanup reclaims
+  the other's), and `EntryID` is one server-side attribute two clients would rewind against each
+  other. Only `goose_subscriber` and `ipc_dispatcher` port allocation are genuinely unaffected.
+  Real per-client isolation would need client identity in dataset names, RCB-slot reservation,
+  partitioned budgets, and cleanup scoped by client — none of which exists. Narrowing what a given
+  operator *sees* is a client-side concern instead: `ipc_dispatcher` stamps every data point with
+  its own `category`, so the API/frontend filter one shared stream per viewer.
   `DeviceManager_stopReportingByAddress(handle, host, mmsPort, outDeviceId, outDetail)` is a
   second stop entry point, address-keyed instead of deviceId-keyed — for a caller that never
   obtained or has lost track of a deviceId (its own `StartReporting` call raced/timed out, or its

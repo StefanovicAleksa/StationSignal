@@ -283,7 +283,12 @@ describe('useScanStore', () => {
     expect(Object.keys(store.sessions)).toHaveLength(0)
   })
 
-  it('removeResult drops only the matching host:mmsPort row from its session', async () => {
+  // A discovered host used to be deleted from its session's results as soon as a connect
+  // succeeded. The daemon's scan worker keeps a per-scan seen-set and never republishes a host it
+  // has already reported, so that row never came back — stopping reporting left no way to reach
+  // the device again short of restarting the whole scan. Results are now kept for the life of the
+  // session, and ScanResultsTable derives each row's Connect/View state from the devices store.
+  it('keeps a discovered host in its session results for the life of the scan', async () => {
     let capturedOnMessage: ((message: ScanResultMessage) => void) | undefined
     vi.mocked(createScanSocket).mockImplementation((handlers) => {
       capturedOnMessage = handlers.onMessage
@@ -297,16 +302,7 @@ describe('useScanStore', () => {
     capturedOnMessage?.({ schemaVersion: 1, type: 'SCAN_RESULT', scanId: 1, host: '10.0.0.1', mmsPort: 102, discoveredAtMs: 1 })
     capturedOnMessage?.({ schemaVersion: 1, type: 'SCAN_RESULT', scanId: 1, host: '10.0.0.2', mmsPort: 102, discoveredAtMs: 2 })
 
-    store.removeResult(key, '10.0.0.1', 102)
-
-    expect(store.sessions[key]?.results).toHaveLength(1)
-    expect(store.sessions[key]?.results[0]?.host).toBe('10.0.0.2')
-  })
-
-  it('removeResult on an unknown session key is a no-op', async () => {
-    const store = useScanStore()
-
-    expect(() => store.removeResult('does-not-exist', '10.0.0.1', 102)).not.toThrow()
+    expect(store.sessions[key]?.results.map((result) => result.host)).toEqual(['10.0.0.1', '10.0.0.2'])
   })
 
   it('dispose clears retry timers and disconnects the socket exactly once', async () => {

@@ -4,6 +4,9 @@ import { useRouter } from 'vue-router'
 import { Eye, Square } from '@lucide/vue'
 
 import { useDevicesStore } from '@/stores/devices'
+import { useDevicePhaseLabel } from '@/composables/useDevicePhaseLabel'
+import { useI18n } from '@/i18n'
+import type { ConnectPreset } from '@/utils/connectPreset'
 import DeviceConnectPrompt from '@/components/device/DeviceConnectPrompt.vue'
 import ManualConnectForm from '@/components/device/ManualConnectForm.vue'
 import Panel from '@/components/ui/Panel.vue'
@@ -15,6 +18,8 @@ import Td from '@/components/ui/Td.vue'
 
 const store = useDevicesStore()
 const router = useRouter()
+const { t } = useI18n()
+const { label: phaseLabel, tone: phaseTone } = useDevicePhaseLabel()
 
 const connectError = ref<string | null>(null)
 const connectPrompt = ref<InstanceType<typeof DeviceConnectPrompt>>()
@@ -25,10 +30,10 @@ function handleConnect(
   interfaceId: string,
   iedName?: string,
   sclFilePath?: string,
-  bypassCategoryModal = false,
+  preset: ConnectPreset = 'ask',
 ) {
   connectError.value = null
-  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, iedName, sclFilePath, bypassCategoryModal)
+  connectPrompt.value?.connect(host, mmsPort, interfaceId, undefined, iedName, sclFilePath, preset)
 }
 
 function handleConnected(key: string) {
@@ -42,32 +47,16 @@ function handleConnectError(message: string) {
 
 const devices = computed(() => Object.values(store.devices).sort((a, b) => a.host.localeCompare(b.host)))
 
-const phaseLabel: Record<string, string> = {
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  interrupted: 'Interrupted',
-  stopping: 'Stopping…',
-  error: 'Error',
-}
-
-const phaseTone: Record<string, 'success' | 'error' | 'warning' | 'neutral'> = {
-  connecting: 'neutral',
-  connected: 'success',
-  interrupted: 'warning',
-  stopping: 'neutral',
-  error: 'error',
-}
-
 function formatTime(ms: number | null): string {
-  return ms ? new Date(ms).toLocaleTimeString() : '—'
+  return ms ? new Date(ms).toLocaleTimeString() : t('common.empty')
 }
 </script>
 
 <template>
   <div class="flex flex-col gap-6">
     <header>
-      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">Watched Devices</h1>
-      <p class="text-sm text-slate-500 dark:text-slate-400">Devices currently being reported on, updated live.</p>
+      <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-50">{{ t('devices.title') }}</h1>
+      <p class="text-sm text-slate-500 dark:text-slate-400">{{ t('devices.subtitle') }}</p>
     </header>
 
     <Panel>
@@ -86,22 +75,22 @@ function formatTime(ms: number | null): string {
     <Table>
       <thead class="bg-slate-50 dark:bg-slate-800/60">
         <tr>
-          <Th>Host</Th>
-          <Th>MMS Port</Th>
-          <Th>Interface</Th>
-          <Th>Status</Th>
-          <Th>Last Message</Th>
+          <Th>{{ t('fields.host') }}</Th>
+          <Th>{{ t('fields.mmsPort') }}</Th>
+          <Th>{{ t('fields.interface') }}</Th>
+          <Th>{{ t('devices.status') }}</Th>
+          <Th>{{ t('devices.lastMessage') }}</Th>
           <Th></Th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-100 bg-white dark:divide-slate-800 dark:bg-slate-900">
         <tr v-if="devices.length === 0">
           <td colspan="6" class="px-4 py-6 text-center text-slate-400 dark:text-slate-500">
-            No devices being watched. Connect to one above, or start one from the
+            {{ t('devices.emptyBefore') }}
             <RouterLink :to="{ name: 'scan' }" class="text-blue-600 underline hover:no-underline dark:text-blue-400">
-              Network Scan
+              {{ t('devices.emptyLink') }}
             </RouterLink>
-            page.
+            {{ t('devices.emptyAfter') }}
           </td>
         </tr>
         <tr v-for="device in devices" :key="device.key">
@@ -115,9 +104,11 @@ function formatTime(ms: number | null): string {
           <Td align="right">
             <div class="flex items-center justify-end gap-2">
               <RouterLink v-if="device.deviceId !== null" :to="{ name: 'reports', query: { device: device.deviceId } }">
-                <Button variant="ghost" size="sm" :icon="Eye">View</Button>
+                <Button variant="ghost" size="sm" :icon="Eye">{{ t('common.view') }}</Button>
               </RouterLink>
-              <Button variant="danger" size="sm" :icon="Square" @click="store.stopDevice(device.key)">Stop</Button>
+              <Button variant="danger" size="sm" :icon="Square" @click="store.stopDevice(device.key)">
+                {{ t('common.stop') }}
+              </Button>
             </div>
           </Td>
         </tr>

@@ -88,6 +88,63 @@ describe('useDevicesStore', () => {
     expect(store.devices[key]?.host).toBe('10.0.0.5')
   })
 
+  // The API attaches a session to an already-running device at the same host:mmsPort rather than
+  // starting a second one, and that device keeps its creator's params — so this session's own
+  // lnCategories are silently discarded. It used to be indistinguishable from a real start;
+  // comparing requested against the effective filter the response reports is what makes it
+  // visible enough for the UI to say so.
+  describe('shared-device filter reconciliation', () => {
+    it('flags a start whose effective categories differ from the requested ones', async () => {
+      vi.mocked(startReporting).mockResolvedValue({
+        deviceId: 1,
+        wsPort: 9000,
+        mmsAvailable: true,
+        gooseAvailable: true,
+        lnCategories: ['CONTROL', 'OTHER'],
+      })
+      const store = useDevicesStore()
+
+      const key = await store.startDevice({ host: '10.0.0.5', interfaceId: 'eth0', lnCategories: ['MEASUREMENT'] })
+
+      expect(store.devices[key]?.sharedWithDifferentFilter).toBe(true)
+      expect(store.devices[key]?.effectiveCategories).toEqual(['CONTROL', 'OTHER'])
+    })
+
+    it('does not flag a start that got exactly what it asked for, whatever the order', async () => {
+      vi.mocked(startReporting).mockResolvedValue({
+        deviceId: 1,
+        wsPort: 9000,
+        mmsAvailable: true,
+        gooseAvailable: true,
+        lnCategories: ['OTHER', 'CONTROL'],
+      })
+      const store = useDevicesStore()
+
+      const key = await store.startDevice({ host: '10.0.0.5', interfaceId: 'eth0', lnCategories: ['CONTROL', 'OTHER'] })
+
+      expect(store.devices[key]?.sharedWithDifferentFilter).toBe(false)
+    })
+
+    it('does not flag an unfiltered request answered by an unfiltered device', async () => {
+      vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
+      const store = useDevicesStore()
+
+      const key = await store.startDevice({ host: '10.0.0.5', interfaceId: 'eth0' })
+
+      expect(store.devices[key]?.sharedWithDifferentFilter).toBe(false)
+    })
+
+    it('flags a filtered request answered by an unfiltered device', async () => {
+      vi.mocked(startReporting).mockResolvedValue({ deviceId: 1, wsPort: 9000, mmsAvailable: true, gooseAvailable: true })
+      const store = useDevicesStore()
+
+      const key = await store.startDevice({ host: '10.0.0.5', interfaceId: 'eth0', lnCategories: ['CONTROL'] })
+
+      expect(store.devices[key]?.sharedWithDifferentFilter).toBe(true)
+      expect(store.devices[key]?.effectiveCategories).toBeUndefined()
+    })
+  })
+
   it('appends an incoming data point as its own report and marks the device connected', async () => {
     let capturedOnMessage: ((message: DeviceStreamMessage) => void) | undefined
     vi.mocked(createDeviceSocket).mockImplementation((_id, handlers) => {
@@ -105,7 +162,7 @@ describe('useDevicesStore', () => {
       hasTimestamp: true,
       timestampMs: 123,
       dataPoints: [
-        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 0, previousQuality: null, label: null, previousLabel: null },
+        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 0, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
       ],
     })
 
@@ -134,8 +191,8 @@ describe('useDevicesStore', () => {
       hasTimestamp: true,
       timestampMs: 200,
       dataPoints: [
-        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 0, previousQuality: null, label: null, previousLabel: null },
-        { reference: 'LD0/CSWI1$ST$Health$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 1, previousQuality: null, label: null, previousLabel: null },
+        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 0, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
+        { reference: 'LD0/CSWI1$ST$Health$stVal', value: 1, quality: { validity: 'GOOD', detailFlags: 0 }, previousValue: 1, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
       ],
     })
 
@@ -169,6 +226,8 @@ describe('useDevicesStore', () => {
           previousQuality: { validity: 'GOOD', detailFlags: 0 },
           label: null,
           previousLabel: null,
+          category: null,
+          description: null,
         },
       ],
     })
@@ -197,7 +256,7 @@ describe('useDevicesStore', () => {
       hasTimestamp: true,
       timestampMs: 400,
       dataPoints: [
-        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 2, quality: null, previousValue: null, previousQuality: null, label: null, previousLabel: null },
+        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 2, quality: null, previousValue: null, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
       ],
     })
 
@@ -224,7 +283,7 @@ describe('useDevicesStore', () => {
         hasTimestamp: true,
         timestampMs: i,
         dataPoints: [
-          { reference: 'LD0/CSWI1$ST$Pos$stVal', value: i, quality: null, previousValue: i - 1, previousQuality: null, label: null, previousLabel: null },
+          { reference: 'LD0/CSWI1$ST$Pos$stVal', value: i, quality: null, previousValue: i - 1, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
         ],
       })
     }
@@ -376,7 +435,7 @@ describe('useDevicesStore', () => {
       hasTimestamp: true,
       timestampMs: 1,
       dataPoints: [
-        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: null, previousValue: null, previousQuality: null, label: null, previousLabel: null },
+        { reference: 'LD0/CSWI1$ST$Pos$stVal', value: 1, quality: null, previousValue: null, previousQuality: null, label: null, previousLabel: null, category: null, description: null },
       ],
     })
     expect(store.devices[key]?.reports).toHaveLength(1)

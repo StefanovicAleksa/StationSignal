@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import { startScan, stopScan, listScans } from '@/services/scanApi'
 import { createScanSocket, type ScanSocket } from '@/services/scanSocket'
 import { ApiError, type ScanResultMessage } from '@/types/api'
+import { t } from '@/i18n'
 
 export type ScanPhase = 'starting' | 'active' | 'stopping' | 'error'
 
@@ -259,12 +260,6 @@ export const useScanStore = defineStore('scan', () => {
     }
   }
 
-  function removeResult(key: string, host: string, mmsPort: number) {
-    const session = sessions.value[key]
-    if (!session) return
-    session.results = session.results.filter((r) => !(r.host === host && r.mmsPort === mmsPort))
-  }
-
   function dispose() {
     mountEpoch++
     for (const key of Array.from(retryTimers.keys())) clearRetryTimer(key)
@@ -283,7 +278,6 @@ export const useScanStore = defineStore('scan', () => {
     retryNow,
     reconcileOnMount,
     retryMountNow,
-    removeResult,
     dispose,
   }
 })
@@ -298,7 +292,7 @@ function toScanError(err: unknown): ScanError {
   }
   return {
     code: 'UNKNOWN',
-    message: err instanceof Error ? err.message : 'Unexpected error',
+    message: err instanceof Error ? err.message : t('common.unexpectedError'),
     retryable: false,
   }
 }
