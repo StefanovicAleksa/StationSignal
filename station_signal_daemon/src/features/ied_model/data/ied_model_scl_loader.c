@@ -7,6 +7,7 @@
 #include "iec61850_dynamic_model.h"
 #include "mms_value.h"
 #include "mxml.h"
+#include "log.h"
 
 typedef struct {
     IedModel* model;
@@ -75,7 +76,7 @@ findTemplateById(mxml_node_t* templates, const char* tag, const char* id) {
 static FunctionalConstraint
 resolveFc(const char* fcStr) {
     if (!fcStr) {
-        fprintf(stderr, "[ied_model] WARN: data attribute missing fc, defaulting to NONE\n");
+        SS_LOG_WARN("[ied_model] WARN: data attribute missing fc, defaulting to NONE\n");
         return IEC61850_FC_NONE;
     }
     return FunctionalConstraint_fromString(fcStr);
@@ -126,7 +127,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
     const char* name = IedModelUtils_attrRequired(node, "name");
     const char* bType = IedModelUtils_attrRequired(node, "bType");
     if (!name || !bType) {
-        fprintf(stderr, "[ied_model] WARN: skipping malformed DA/BDA (missing name or bType)\n");
+        SS_LOG_WARN("[ied_model] WARN: skipping malformed DA/BDA (missing name or bType)\n");
         return;
     }
 
@@ -136,7 +137,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
     DataAttributeType type = IedModelUtils_mapBType(bType);
 
     if (type == IEC61850_UNKNOWN_TYPE) {
-        fprintf(stderr, "[ied_model] WARN: unmapped bType '%s' for attribute '%s', skipping\n", bType, name);
+        SS_LOG_WARN("[ied_model] WARN: unmapped bType '%s' for attribute '%s', skipping\n", bType, name);
         return;
     }
 
@@ -181,7 +182,7 @@ buildDataAttribute(mxml_node_t* node, ModelNode* parent, const char* inheritedFc
         const char* typeId = IedModelUtils_attrRequired(node, "type");
         mxml_node_t* daType = findTemplateById(templates, "DAType", typeId);
         if (!daType) {
-            fprintf(stderr, "[ied_model] WARN: unresolved DAType '%s' for attribute '%s'\n",
+            SS_LOG_WARN("[ied_model] WARN: unresolved DAType '%s' for attribute '%s'\n",
                     typeId ? typeId : "(missing)", name);
             return;
         }
@@ -200,7 +201,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
 
     mxml_node_t* doType = findTemplateById(templates, "DOType", doTypeId);
     if (!doType) {
-        fprintf(stderr, "[ied_model] WARN: unresolved DOType '%s' for data object '%s'\n",
+        SS_LOG_WARN("[ied_model] WARN: unresolved DOType '%s' for data object '%s'\n",
                 doTypeId ? doTypeId : "(missing)", name);
         return;
     }
@@ -212,7 +213,7 @@ buildDataObject(const char* name, const char* doTypeId, ModelNode* parent, mxml_
             const char* sdoName = IedModelUtils_attrRequired(child, "name");
             const char* sdoTypeId = IedModelUtils_attrRequired(child, "type");
             if (!sdoName || !sdoTypeId) {
-                fprintf(stderr, "[ied_model] WARN: skipping malformed SDO under DOType '%s'\n", doTypeId);
+                SS_LOG_WARN("[ied_model] WARN: skipping malformed SDO under DOType '%s'\n", doTypeId);
                 continue;
             }
             buildDataObject(sdoName, sdoTypeId, (ModelNode*) dobj, templates, enumAttrs, daSemantics, daDescriptions);
@@ -301,7 +302,7 @@ applyValueOverride(DataAttribute* da, const char* valText, mxml_node_t* template
             if (lookupEnumOrdinal(templates, enumAttrs, da, valText, &ordinal)) {
                 value = MmsValue_newIntegerFromInt32(ordinal);
             } else {
-                fprintf(stderr,
+                SS_LOG_WARN(
                         "[ied_model] WARN: enum value '%s' not found in EnumType for attribute '%s' - "
                         "override skipped (left at default, not guessed)\n", valText, da->name);
             }
@@ -364,13 +365,13 @@ applyOverridesUnderDataObject(mxml_node_t* container, ModelNode* doNode, mxml_no
         if (isElement(child, "DAI")) {
             const char* daName = IedModelUtils_attrRequired(child, "name");
             if (!daName) {
-                fprintf(stderr, "[ied_model] WARN: skipping DAI with missing name under '%s'\n", doNode->name);
+                SS_LOG_WARN("[ied_model] WARN: skipping DAI with missing name under '%s'\n", doNode->name);
                 continue;
             }
 
             ModelNode* daNode = ModelNode_getChild(doNode, daName);
             if (!daNode || ModelNode_getType(daNode) != DataAttributeModelType) {
-                fprintf(stderr,
+                SS_LOG_WARN(
                         "[ied_model] WARN: DAI '%s' has no matching DataAttribute under '%s' - override dropped\n",
                         daName, doNode->name);
                 continue;
@@ -392,13 +393,13 @@ applyOverridesUnderDataObject(mxml_node_t* container, ModelNode* doNode, mxml_no
         } else if (isElement(child, "SDI")) {
             const char* sdiName = IedModelUtils_attrRequired(child, "name");
             if (!sdiName) {
-                fprintf(stderr, "[ied_model] WARN: skipping SDI with missing name under '%s'\n", doNode->name);
+                SS_LOG_WARN("[ied_model] WARN: skipping SDI with missing name under '%s'\n", doNode->name);
                 continue;
             }
 
             ModelNode* nested = ModelNode_getChild(doNode, sdiName);
             if (!nested) {
-                fprintf(stderr,
+                SS_LOG_WARN(
                         "[ied_model] WARN: SDI '%s' has no matching structured child under '%s' - override(s) dropped\n",
                         sdiName, doNode->name);
                 continue;
@@ -426,7 +427,7 @@ applyDoiDaiOverrides(mxml_node_t* lnNode, LogicalNode* ln, mxml_node_t* template
 
         ModelNode* doNode = ModelNode_getChild((ModelNode*) ln, doName);
         if (!doNode) {
-            fprintf(stderr, "[ied_model] WARN: DOI '%s' has no matching DataObject under LN '%s'\n", doName,
+            SS_LOG_WARN("[ied_model] WARN: DOI '%s' has no matching DataObject under LN '%s'\n", doName,
                     ln->name);
             continue;
         }
@@ -483,7 +484,7 @@ buildDataSets(mxml_node_t* lnNode, LogicalNode* ln, LoaderContext* ctx) {
         if (!isElement(dsNode, "DataSet")) continue;
         const char* dsName = IedModelUtils_attrRequired(dsNode, "name");
         if (!dsName) {
-            fprintf(stderr, "[ied_model] WARN: skipping DataSet with missing name under LN '%s'\n", ln->name);
+            SS_LOG_WARN("[ied_model] WARN: skipping DataSet with missing name under LN '%s'\n", ln->name);
             continue;
         }
 
@@ -501,13 +502,13 @@ buildDataSets(mxml_node_t* lnNode, LogicalNode* ln, LoaderContext* ctx) {
             const char* daName = IedModelUtils_attrOrDefault(fcda, "daName", NULL);
 
             if (!ldInstRef || !fc || !doName) {
-                fprintf(stderr, "[ied_model] WARN: skipping malformed FCDA in DataSet '%s'\n", dsName);
+                SS_LOG_WARN("[ied_model] WARN: skipping malformed FCDA in DataSet '%s'\n", dsName);
                 continue;
             }
 
             LogicalDevice* targetLd = resolveLogicalDeviceByFcdaRef(ctx->model, ctx->iedName, ldInstRef);
             if (!targetLd) {
-                fprintf(stderr, "[ied_model] WARN: FCDA references unresolved LDevice '%s' in DataSet '%s'\n",
+                SS_LOG_WARN("[ied_model] WARN: FCDA references unresolved LDevice '%s' in DataSet '%s'\n",
                         ldInstRef, dsName);
                 continue;
             }
@@ -604,7 +605,7 @@ static void
 processReportControlNode(mxml_node_t* rcNode, LogicalNode* ln) {
     const char* name = IedModelUtils_attrRequired(rcNode, "name");
     if (!name) {
-        fprintf(stderr, "[ied_model] WARN: skipping malformed ReportControl under LN '%s'\n", ln->name);
+        SS_LOG_WARN("[ied_model] WARN: skipping malformed ReportControl under LN '%s'\n", ln->name);
         return;
     }
 
@@ -666,30 +667,30 @@ static void
 processControlBlockStoragePrivate(mxml_node_t* privateNode, LogicalNode* ln) {
     const char* payload = mxmlGetOpaque(privateNode);
     if (!payload || !payload[0]) {
-        fprintf(stderr, "[ied_model] WARN: empty Private ControlBlockStorage payload under LN '%s'\n", ln->name);
+        SS_LOG_WARN("[ied_model] WARN: empty Private ControlBlockStorage payload under LN '%s'\n", ln->name);
         return;
     }
 
     const char* separator = strchr(payload, '|');
     if (!separator || !separator[1]) {
-        fprintf(stderr, "[ied_model] WARN: malformed Private ControlBlockStorage payload under LN '%s' "
+        SS_LOG_WARN("[ied_model] WARN: malformed Private ControlBlockStorage payload under LN '%s' "
                 "(no '<key>|<xml>' separator)\n", ln->name);
         return;
     }
 
     mxml_node_t* fragmentRoot = mxmlLoadString(NULL, separator + 1, MXML_OPAQUE_CALLBACK);
     if (!fragmentRoot) {
-        fprintf(stderr, "[ied_model] WARN: unparseable Private ControlBlockStorage XML under LN '%s'\n", ln->name);
+        SS_LOG_WARN("[ied_model] WARN: unparseable Private ControlBlockStorage XML under LN '%s'\n", ln->name);
         return;
     }
 
     if (isElement(fragmentRoot, "ReportControl")) {
         const char* rcName = IedModelUtils_attrOrDefault(fragmentRoot, "name", "?");
-        fprintf(stderr, "[ied_model] parsed ReportControl '%s' from Private ControlBlockStorage under LN '%s'\n",
+        SS_LOG_DEBUG("[ied_model] parsed ReportControl '%s' from Private ControlBlockStorage under LN '%s'\n",
                 rcName, ln->name);
         processReportControlNode(fragmentRoot, ln);
     } else {
-        fprintf(stderr, "[ied_model] WARN: Private ControlBlockStorage under LN '%s' wraps an unhandled "
+        SS_LOG_WARN("[ied_model] WARN: Private ControlBlockStorage under LN '%s' wraps an unhandled "
                 "element (only ReportControl is parsed today)\n", ln->name);
     }
 
@@ -811,13 +812,13 @@ buildGseControls(mxml_node_t* lnNode, LogicalNode* ln, LoaderContext* ctx, const
          */
         const char* datSet = IedModelUtils_attrOrDefault(gseNode, "datSet", NULL);
         if (name && !datSet) {
-            fprintf(stderr, "[ied_model] GSEControl '%s' under LN '%s' declares no datSet - skipping it, since "
+            SS_LOG_WARN("[ied_model] GSEControl '%s' under LN '%s' declares no datSet - skipping it, since "
                     "GOOSE frames carry no reference and there is no member list to decode them against "
                     "(legal per IEC 61850-6, just not subscribable)\n", name, ln->name);
             continue;
         }
         if (!name) {
-            fprintf(stderr, "[ied_model] WARN: skipping malformed GSEControl under LN '%s' (missing name)\n",
+            SS_LOG_WARN("[ied_model] WARN: skipping malformed GSEControl under LN '%s' (missing name)\n",
                     ln->name);
             continue;
         }
@@ -882,7 +883,7 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
     char* lnName = lnInstanceName(lnNode);
 
     if (!lnName || !lnType) {
-        fprintf(stderr, "[ied_model] WARN: skipping malformed LN/LN0 under LDevice '%s' (missing lnClass/lnType)\n",
+        SS_LOG_WARN("[ied_model] WARN: skipping malformed LN/LN0 under LDevice '%s' (missing lnClass/lnType)\n",
                 ldInst);
         free(lnName);
         return;
@@ -908,7 +909,7 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
 
     mxml_node_t* lNodeType = findTemplateById(ctx->templates, "LNodeType", lnType);
     if (!lNodeType) {
-        fprintf(stderr, "[ied_model] WARN: unresolved LNodeType '%s' for LN '%s'\n", lnType, lnName);
+        SS_LOG_WARN("[ied_model] WARN: unresolved LNodeType '%s' for LN '%s'\n", lnType, lnName);
     } else {
         for (mxml_node_t* doNode = firstElementChild(lNodeType); doNode; doNode = nextElementSibling(doNode)) {
             if (!isElement(doNode, "DO")) continue;
@@ -916,7 +917,7 @@ buildLogicalNodeStructure(mxml_node_t* lnNode, LogicalDevice* ld, LoaderContext*
             const char* doName = IedModelUtils_attrRequired(doNode, "name");
             const char* doTypeId = IedModelUtils_attrRequired(doNode, "type");
             if (!doName || !doTypeId) {
-                fprintf(stderr, "[ied_model] WARN: skipping malformed DO under LNodeType '%s'\n", lnType);
+                SS_LOG_WARN("[ied_model] WARN: skipping malformed DO under LNodeType '%s'\n", lnType);
                 continue;
             }
             buildDataObject(doName, doTypeId, (ModelNode*) ln, ctx->templates, enumAttrs, ctx->daSemantics,
@@ -954,7 +955,7 @@ static void
 buildLogicalDeviceStructure(mxml_node_t* ldNode, LoaderContext* ctx) {
     const char* ldInst = IedModelUtils_attrRequired(ldNode, "inst");
     if (!ldInst) {
-        fprintf(stderr, "[ied_model] WARN: skipping LDevice with missing inst attribute\n");
+        SS_LOG_WARN("[ied_model] WARN: skipping LDevice with missing inst attribute\n");
         return;
     }
 
@@ -1183,7 +1184,7 @@ IedModelSclLoader_load(const char* path, const char* iedName, IedModelLoadError*
     }
 
     if (!model->rcbs && !model->gseCBs && !model->dataSets && containsPrivateControlBlockStorage(iedNode)) {
-        fprintf(stderr,
+        SS_LOG_WARN(
                 "[ied_model] WARN: IED '%s' has zero ReportControl/GSEControl/DataSet elements but "
                 "contains vendor <Private type=\"...ControlBlockStorage...\"> element(s) - this loader "
                 "unescapes and parses a <ReportControl> found this way (see processControlBlockStoragePrivate), "

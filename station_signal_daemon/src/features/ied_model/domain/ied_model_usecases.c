@@ -6,6 +6,7 @@
 #include "iec61850_dynamic_model.h"
 #include "iec61850_common.h"
 #include "mms_common.h"
+#include "log.h"
 
 /* ---- recursive tree walkers over the built model ---- */
 
@@ -17,7 +18,7 @@ collectDataAttributesByFc(ModelNode* node, FunctionalConstraint fc, LinkedList r
             if (ref) {
                 LinkedList_add(result, ref);
             } else {
-                fprintf(stderr, "[ied_model] WARN: could not build object reference for DA '%s' - omitted from read targets\n",
+                SS_LOG_WARN("[ied_model] WARN: could not build object reference for DA '%s' - omitted from read targets\n",
                         node->name);
             }
         }
@@ -47,7 +48,7 @@ collectControllableDataObjects(ModelNode* node, LinkedList result) {
             if (ref) {
                 LinkedList_add(result, ref);
             } else {
-                fprintf(stderr,
+                SS_LOG_WARN(
                         "[ied_model] WARN: could not build object reference for controllable DO '%s' - omitted from control targets\n",
                         node->name);
             }
@@ -304,7 +305,7 @@ IedModelUseCases_getGooseSubscriptionTargets(IedModelHandle handle) {
     for (GSEControlBlock* gcb = handle->model->gseCBs; gcb; gcb = gcb->sibling) {
         char* lnRef = ModelNode_getObjectReference((ModelNode*) gcb->parent, NULL);
         if (!lnRef) {
-            fprintf(stderr, "[ied_model] WARN: could not build parent LN reference for GoCB '%s' - omitted from GOOSE targets\n",
+            SS_LOG_WARN("[ied_model] WARN: could not build parent LN reference for GoCB '%s' - omitted from GOOSE targets\n",
                     gcb->name);
             continue;
         }
@@ -380,7 +381,7 @@ IedModelUseCases_getReportSubscriptionTargets(IedModelHandle handle) {
     for (ReportControlBlock* rcb = handle->model->rcbs; rcb; rcb = rcb->sibling) {
         char* lnRef = ModelNode_getObjectReference((ModelNode*) rcb->parent, NULL);
         if (!lnRef) {
-            fprintf(stderr, "[ied_model] WARN: could not build parent LN reference for RCB '%s' - omitted from report targets\n",
+            SS_LOG_WARN("[ied_model] WARN: could not build parent LN reference for RCB '%s' - omitted from report targets\n",
                     rcb->name);
             continue;
         }
@@ -444,7 +445,7 @@ IedModelUseCases_getDataSetMemberReferences(IedModelHandle handle, const char* d
 
     DataSet* dataSet = IedModel_lookupDataSet(handle->model, datasetReference);
     if (!dataSet) {
-        fprintf(stderr, "[ied_model] WARN: dataset '%s' not found in model - returning empty member list "
+        SS_LOG_WARN("[ied_model] WARN: dataset '%s' not found in model - returning empty member list "
                 "(check for a typo'd/mismatched datSet reference on the referencing RCB/GoCB)\n", datasetReference);
         return result;
     }
@@ -1164,7 +1165,7 @@ IedModelUseCases_getReportableAttributeReferencesForWholeDevice(IedModelHandle h
                     }
                     char maskStr[64];
                     formatCategoryMask(handle->categoryFilter, maskStr, sizeof(maskStr));
-                    fprintf(stderr,
+                    SS_LOG_DEBUG(
                             "[ied_model] LN '%s' (category %s) excluded by active filter (%s) - "
                             "%d leaf attribute(s) skipped\n",
                             lnRef, IedModelLnCategory_toString(lnCategory), maskStr, LinkedList_size(skipped));

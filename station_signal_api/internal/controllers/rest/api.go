@@ -86,7 +86,15 @@ func New(reporting reportingService, scanning scanningService, supervisor daemon
 // routes onto the same mux.
 func Router(api *API) *chi.Mux {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	// chi's request logger writes through its own log.Logger, outside slog entirely, so no slog
+	// level can quiet it — and with the frontend polling /api/health it is the single highest-
+	// volume thing this process emits. Register it only when debug logging is on, which is what
+	// dev mode resolves to (see internal/core/config). Asking the logger rather than taking a
+	// mode parameter keeps the access log tied to verbosity itself, so -log-level debug on a prod
+	// box turns it on too, which is exactly what someone setting that flag is asking for.
+	if api.logger.Enabled(context.Background(), slog.LevelDebug) {
+		r.Use(middleware.Logger)
+	}
 	r.Use(middleware.Recoverer)
 	// No auth, no TLS, local-network trust model (see station_signal_api/CLAUDE.md) — and the
 	// Settings page's network-reconfiguration flow needs cross-origin GET /api/health and POST

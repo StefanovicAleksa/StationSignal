@@ -6,6 +6,7 @@
 #include "device_manager/service/device_manager_api.h"
 #include "features/control_dispatcher/service/control_dispatcher_api.h"
 #include "scan_orchestration/service/scan_orchestration_api.h"
+#include "log.h"
 
 /*
  * Wiring only, no business logic (see CLAUDE.md's "Architecture" rule).
@@ -45,7 +46,7 @@ onSignal(int sig) {
 static void
 onDeviceFound(void* userParam, uint64_t scanId, const char* host, int mmsPort, bool authRequired) {
     (void) userParam;
-    printf("[scan] found %s:%d (scan #%llu)%s\n", host, mmsPort, (unsigned long long) scanId,
+    SS_LOG_INFO("[scan] found %s:%d (scan #%llu)%s\n", host, mmsPort, (unsigned long long) scanId,
             authRequired ? " [auth required]" : "");
 }
 
@@ -57,7 +58,7 @@ main(void) {
     DeviceManagerError dmCreateErr;
     DeviceManagerHandle deviceManager = DeviceManager_create(NULL, &dmCreateErr);
     if (!deviceManager) {
-        fprintf(stderr, "[CORE] DeviceManager_create failed (error %d)\n", (int) dmCreateErr);
+        SS_LOG_ERROR("[CORE] DeviceManager_create failed (error %d)\n", (int) dmCreateErr);
         return EXIT_FAILURE;
     }
 
@@ -67,7 +68,7 @@ main(void) {
     ScanOrchestrationError scanCreateErr;
     ScanOrchestrationHandle scanOrchestration = ScanOrchestration_create(&scanConfig, &scanCreateErr);
     if (!scanOrchestration) {
-        fprintf(stderr, "[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
+        SS_LOG_ERROR("[CORE] ScanOrchestration_create failed (error %d)\n", (int) scanCreateErr);
         DeviceManager_destroy(deviceManager);
         return EXIT_FAILURE;
     }
@@ -77,7 +78,7 @@ main(void) {
     ControlDispatcherHandle controlDispatcher = ControlDispatcher_create(NULL, deviceManager, scanOrchestration,
             &cdCreateErr);
     if (!controlDispatcher) {
-        fprintf(stderr, "[CORE] ControlDispatcher_create failed (error %d)\n", (int) cdCreateErr);
+        SS_LOG_ERROR("[CORE] ControlDispatcher_create failed (error %d)\n", (int) cdCreateErr);
         ScanOrchestration_destroy(scanOrchestration);
         DeviceManager_destroy(deviceManager);
         return EXIT_FAILURE;
@@ -85,7 +86,7 @@ main(void) {
 
     ControlDispatcherError cdStartErr = ControlDispatcher_start(controlDispatcher);
     if (cdStartErr != CONTROL_DISPATCHER_OK) {
-        fprintf(stderr, "[CORE] ControlDispatcher_start failed (error %d)\n", (int) cdStartErr);
+        SS_LOG_ERROR("[CORE] ControlDispatcher_start failed (error %d)\n", (int) cdStartErr);
         ControlDispatcher_destroy(controlDispatcher);
         ScanOrchestration_destroy(scanOrchestration);
         DeviceManager_destroy(deviceManager);
@@ -94,14 +95,14 @@ main(void) {
 
     ControlDispatcherConfig cdConfig;
     ControlDispatcherConfig_defaults(&cdConfig);
-    printf("[CORE] control_dispatcher listening on 127.0.0.1:%u - send START_REPORTING/STOP_REPORTING/"
+    SS_LOG_INFO("[CORE] control_dispatcher listening on 127.0.0.1:%u - send START_REPORTING/STOP_REPORTING/"
             "START_SCAN/STOP_SCAN JSON commands here.\n", (unsigned) cdConfig.port);
 
     while (!g_stopRequested) {
         pause();
     }
 
-    printf("[CORE] Shutdown requested, stopping...\n");
+    SS_LOG_INFO("[CORE] Shutdown requested, stopping...\n");
     ControlDispatcher_destroy(controlDispatcher);   /* stop accepting new commands first */
     ScanOrchestration_destroy(scanOrchestration);   /* stops any still-active scans */
     DeviceManager_destroy(deviceManager);           /* drains + tears down every still-running device */

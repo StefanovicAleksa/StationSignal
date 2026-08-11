@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "orchestration/data/orchestration_staging.h"
+#include "log.h"
 
 char*
 OrchestrationStaging_writeTempFile(const uint8_t* fileData, uint32_t fileSize, int* outErrno) {
@@ -55,7 +56,7 @@ OrchestrationStaging_cleanup(const char* path) {
     if (!path) return;
 
     if (unlink(path) != 0) {
-        fprintf(stderr, "[orchestration] warning: failed to remove staged temp file '%s': %s\n",
+        SS_LOG_WARN("[orchestration] warning: failed to remove staged temp file '%s': %s\n",
                 path, strerror(errno));
     }
 }

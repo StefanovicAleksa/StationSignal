@@ -32,18 +32,24 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// The level is a LevelVar rather than a fixed option because the logger has to exist before
+	// config.Load can run (a config error is itself reported through it), and every downstream
+	// constructor closes over this one logger value. Setting the var afterwards re-levels all of
+	// them without rebuilding anything.
+	logLevel := new(slog.LevelVar)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	logLevel.Set(cfg.SlogLevel())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sup := supervisionsvc.New(cfg.DaemonBinPath, controlAddr, logger)
+	sup := supervisionsvc.New(cfg.DaemonBinPath, controlAddr, cfg.LogLevel, logger)
 	supervisorDone := make(chan struct{})
 	go func() {
 		defer close(supervisorDone)
@@ -67,7 +73,6 @@ func main() {
 		logger.Error("failed to initialize structure file storage", "error", err)
 		os.Exit(1)
 	}
-
 	networkSvc := networksvc.New(
 		func() int { return len(reportingSvc.Snapshot()) },
 		func() int { return len(scanningSvc.Snapshot()) },
@@ -144,7 +149,9 @@ func rearm(ctx context.Context, reportingSvc *reportingsvc.Service, scanningSvc 
 			logger.Error("re-arm: failed to restart device reporting", "host", d.StartParams.Host, "error", err)
 			continue
 		}
-		logger.Info("re-arm: device reporting restarted", "host", d.StartParams.Host, "deviceId", device.ID)
+		// Debug, not Info: one line per device on every daemon restart. The Warn above already
+		// says a re-arm happened at all, and a failure to re-arm is still an Error.
+		logger.Debug("re-arm: device reporting restarted", "host", d.StartParams.Host, "deviceId", device.ID)
 	}
 
 	scans := scanningSvc.Snapshot()
@@ -155,6 +162,6 @@ func rearm(ctx context.Context, reportingSvc *reportingsvc.Service, scanningSvc 
 			logger.Error("re-arm: failed to restart scan", "interfaceId", sc.StartParams.InterfaceID, "error", err)
 			continue
 		}
-		logger.Info("re-arm: scan restarted", "interfaceId", sc.StartParams.InterfaceID, "scanId", scan.ID)
+		logger.Debug("re-arm: scan restarted", "interfaceId", sc.StartParams.InterfaceID, "scanId", scan.ID)
 	}
 }

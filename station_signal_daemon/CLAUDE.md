@@ -38,6 +38,16 @@ file only describes current-state facts.
     Pi's ARM — this script builds natively, no cross-compilation, so run it on the target
     machine — or debugging by stepping into library source), and review the resulting
     `git diff third_party/` before committing it.
+  - **Logging: `src/log.h`, `SS_LOG_DEBUG/INFO/WARN/ERROR`, never a raw `fprintf(stderr, ...)`.**
+    Header-only (a `src/log.c` would have to be added to `rebuild_proj.sh`'s globs and all 16 test
+    Makefiles to link), macros prefixed `SS_` to stay clear of `third_party/include/logging.h`,
+    and no newline appended — each message keeps its own `\n`. The threshold is read once from
+    **`STATION_SIGNAL_LOG_LEVEL`** (`debug|info|warn|error`, default `info`), the daemon's only
+    configuration input of any kind; the parent repo's API exports it when spawning this process,
+    from the dev/prod mode `deploy/setup.sh` recorded. What goes where: DEBUG for per-member/
+    per-step trace (silent in a deployment), INFO for lifecycle and per-cycle outcomes, WARN for
+    degraded-but-continuing, ERROR for a failed operation. The enable-path volume documented in
+    `CHANGELOG.md` as "a temporary diagnostic posture" now lives entirely at DEBUG.
   - `main.c` takes **no arguments** and has no terminal/CLI surface — it's a pure background
     process-runner. It creates `device_manager` + `scan_orchestration` + `control_dispatcher`,
     starts the one always-on control websocket (default `127.0.0.1:8767`), and blocks until
@@ -102,7 +112,10 @@ file only describes current-state facts.
 Architecture below). There is no boot-time device, no argv, and no interactive discovery
 prompt — `control_dispatcher`'s four JSON commands (see Commands above) are the daemon's only
 way to start/stop anything. Full history of how `main.c` got here (multi-IED support, the
-discovery-prompt removal, the earlier argv layout) is in `CHANGELOG.md`.
+discovery-prompt removal, the earlier argv layout) is in `CHANGELOG.md`. Still no argv and no
+config file — the single exception to "reads nothing" is the `STATION_SIGNAL_LOG_LEVEL`
+environment variable behind `src/log.h` (see Commands above), read once, affecting output volume
+only and nothing about behavior.
 
 Every historical bugfix (rollback ordering, reconnect races, value-diff cache semantics,
 quality-pairing, GI removal/reinstatement, dynamic dataset creation, EntryID resumption, Gap-4

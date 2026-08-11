@@ -20,10 +20,10 @@ import (
 // aren't enough). data.Process's Terminate/Kill are already nil-safe on the zero value, so
 // this stand-in process handle is safe for Run() to call them on — real signal delivery is
 // covered by supervision/data's own tests against real fixture processes.
-func fakeSpawn(t *testing.T, spawnErrs []error, exitChs []chan error) (spawnFn func(string, *slog.Logger) (*data.Process, <-chan error, error), calls func() int) {
+func fakeSpawn(t *testing.T, spawnErrs []error, exitChs []chan error) (spawnFn func(string, string, *slog.Logger) (*data.Process, <-chan error, error), calls func() int) {
 	t.Helper()
 	var n int32
-	fn := func(string, *slog.Logger) (*data.Process, <-chan error, error) {
+	fn := func(string, string, *slog.Logger) (*data.Process, <-chan error, error) {
 		i := int(atomic.AddInt32(&n, 1)) - 1
 		if i < len(spawnErrs) && spawnErrs[i] != nil {
 			return nil, nil, spawnErrs[i]
@@ -41,7 +41,7 @@ func fakeSpawn(t *testing.T, spawnErrs []error, exitChs []chan error) (spawnFn f
 
 func alwaysReady(context.Context, string, time.Duration, time.Duration) bool { return true }
 
-func newTestSupervisor(spawnFn func(string, *slog.Logger) (*data.Process, <-chan error, error), pollReadyFn func(context.Context, string, time.Duration, time.Duration) bool) *Supervisor {
+func newTestSupervisor(spawnFn func(string, string, *slog.Logger) (*data.Process, <-chan error, error), pollReadyFn func(context.Context, string, time.Duration, time.Duration) bool) *Supervisor {
 	return &Supervisor{
 		binPath:     "unused",
 		controlAddr: "unused",
@@ -170,7 +170,7 @@ func TestSupervisor_Restarts_BufferedSignalDoesNotBlockSender(t *testing.T) {
 }
 
 func TestSupervisor_Running_FalseBeforeAnySpawn(t *testing.T) {
-	s := newTestSupervisor(func(string, *slog.Logger) (*data.Process, <-chan error, error) {
+	s := newTestSupervisor(func(string, string, *slog.Logger) (*data.Process, <-chan error, error) {
 		return nil, nil, errors.New("never called in this test")
 	}, alwaysReady)
 

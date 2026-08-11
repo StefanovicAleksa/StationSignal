@@ -3,6 +3,7 @@
 #include <string.h>
 #include "features/mms_report_client/data/mms_report_client_report_adapter.h"
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
+#include "log.h"
 
 /* ClientReport doesn't expose buffered-ness directly - look it up in our own
  * cached target list (keyed by rcbReference) instead of re-deriving it. */
@@ -51,7 +52,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
          * identical to "nothing happened" to anyone watching the daemon's
          * output, all the way up to a real device operator making a real
          * change and seeing no report anywhere. */
-        fprintf(stderr, "[mms_report_client] report arrived but cannot be delivered (handle=%p, "
+        SS_LOG_WARN("[mms_report_client] report arrived but cannot be delivered (handle=%p, "
                 "reportCallback=%p, report=%p)\n", (void*) handle,
                 handle ? (void*) handle->reportCallback : NULL, (void*) report);
         return;
@@ -75,7 +76,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * gets filtered out below (by design or by bug) is completely
      * indistinguishable, from the terminal, from the device never having
      * sent one in the first place. */
-    fprintf(stderr, "[mms_report_client] report received for '%s' rptId='%s' buffered=%d entries=%d "
+    SS_LOG_DEBUG("[mms_report_client] report received for '%s' rptId='%s' buffered=%d entries=%d "
             "hasDataReference=%d\n", rcbReference ? rcbReference : "?", rptId ? rptId : "?", buffered,
             entryCount, hasDataReference);
 
@@ -113,7 +114,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * this path (a stale entry is by definition <= the current cached
      * value, so leaving it alone is correct either way). */
     if (fallback && MmsReportClientUseCases_isEntryIdStale(entryId, fallback->lastEntryId)) {
-        fprintf(stderr, "[mms_report_client] dropping stale/duplicate report for '%s' "
+        SS_LOG_DEBUG("[mms_report_client] dropping stale/duplicate report for '%s' "
                 "(entryId not newer than last cached)\n", rcbReference ? rcbReference : "?");
         Semaphore_post(handle->memberRefCacheLock);
         free(reasons);
@@ -147,7 +148,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
     /* Allocation failure building the record: nothing safe to deliver - drop
      * this report rather than risk the caller dereferencing a partial one. */
     if (!record) {
-        fprintf(stderr, "[mms_report_client] failed to build report record for '%s' - dropped\n",
+        SS_LOG_DEBUG("[mms_report_client] failed to build report record for '%s' - dropped\n",
                 rcbReference ? rcbReference : "?");
         return;
     }
@@ -160,7 +161,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
      * downstream instead, at the one point both this feature's RCBs AND
      * goose_subscriber's GoCBs actually converge. */
     if (record->entryCount > 0) {
-        fprintf(stderr, "[mms_report_client] forwarding report for '%s' (%d entr%s) to ipc_dispatcher\n",
+        SS_LOG_DEBUG("[mms_report_client] forwarding report for '%s' (%d entr%s) to ipc_dispatcher\n",
                 rcbReference ? rcbReference : "?", record->entryCount, record->entryCount == 1 ? "y" : "ies");
         handle->reportCallback(handle->reportCallbackParam, record);
     } else {
@@ -169,7 +170,7 @@ MmsReportClientReportAdapter_onReport(void* parameter, ClientReport report) {
          * for THIS RCB) - nothing worth forwarding to ipc_dispatcher. The
          * callback (which would otherwise own destroying this record) never
          * runs, so free it here instead. */
-        fprintf(stderr, "[mms_report_client] report for '%s' had %d raw entr%s, 0 survived the "
+        SS_LOG_DEBUG("[mms_report_client] report for '%s' had %d raw entr%s, 0 survived the "
                 "per-RCB value-diff filter (bootstrap-seed or unchanged) - nothing forwarded\n",
                 rcbReference ? rcbReference : "?", entryCount, entryCount == 1 ? "y" : "ies");
         MmsReportClientUseCases_freeReportRecord(record);

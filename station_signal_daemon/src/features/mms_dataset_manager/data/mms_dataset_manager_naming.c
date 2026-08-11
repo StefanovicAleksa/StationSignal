@@ -3,6 +3,7 @@
 #include <string.h>
 #include "features/mms_dataset_manager/data/mms_dataset_manager_naming.h"
 #include "features/mms_dataset_manager/utils/mms_dataset_manager_utils.h"
+#include "log.h"
 
 char*
 MmsDatasetManagerNaming_buildDatasetName(const char* lnReference, bool buffered) {
@@ -26,7 +27,7 @@ MmsDatasetManagerNaming_buildDatasetName(const char* lnReference, bool buffered)
          * fallback passes true for it too. The old wording asserted the RCB was
          * buffered and was flatly wrong for every fallback - actively confusing
          * while reading these logs to diagnose exactly that path. */
-        fprintf(stderr, "[mms_dataset_manager] derived domain-scoped dataset name '%s' from '%s' (persists past "
+        SS_LOG_DEBUG("[mms_dataset_manager] derived domain-scoped dataset name '%s' from '%s' (persists past "
                 "this connection, '.' folded to '$' to match the server's own wire form)\n",
                 name, lnReference);
         return name;
@@ -39,7 +40,7 @@ MmsDatasetManagerNaming_buildDatasetName(const char* lnReference, bool buffered)
     for (char* p = name; *p; p++) {
         if (*p == '/') *p = '_';
     }
-    fprintf(stderr, "[mms_dataset_manager] derived association-scoped dataset name '%s' from '%s' (destroyed "
+    SS_LOG_DEBUG("[mms_dataset_manager] derived association-scoped dataset name '%s' from '%s' (destroyed "
             "automatically when this connection closes, no cleanup tracking needed)\n",
             name, lnReference);
     return name;
@@ -55,7 +56,7 @@ MmsDatasetManagerNaming_rememberDomainScopedName(MmsDatasetManagerHandle handle,
     LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
     while (element) {
         if (strcmp((char*) LinkedList_getData(element), datasetName) == 0) {
-            fprintf(stderr, "[mms_dataset_manager] domain-scoped dataset '%s' already tracked for cleanup - "
+            SS_LOG_DEBUG("[mms_dataset_manager] domain-scoped dataset '%s' already tracked for cleanup - "
                     "not re-added\n", datasetName);
             return;
         }
@@ -68,7 +69,7 @@ MmsDatasetManagerNaming_rememberDomainScopedName(MmsDatasetManagerHandle handle,
      * device's dataset quota if the daemon is later killed. Logging the
      * insert makes that bookkeeping auditable from a log capture rather than
      * only observable as quota that mysteriously never comes back. */
-    fprintf(stderr, "[mms_dataset_manager] tracking domain-scoped dataset '%s' for cleanup on stop (%d name(s) "
+    SS_LOG_DEBUG("[mms_dataset_manager] tracking domain-scoped dataset '%s' for cleanup on stop (%d name(s) "
             "tracked so far)\n", datasetName, LinkedList_size(handle->domainScopedDynamicDatasetNames));
 }
 

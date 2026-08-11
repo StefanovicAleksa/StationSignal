@@ -3,6 +3,7 @@
 #include <string.h>
 #include "features/mms_report_client/domain/mms_report_client_usecases.h"
 #include "features/mms_report_client/utils/mms_report_client_utils.h"
+#include "log.h"
 
 static void
 freeEntriesUpTo(MmsReportEntry* entries, int builtCount) {
@@ -189,7 +190,7 @@ shouldForwardAndUpdateCache(MmsReportClientMemberRefCacheEntry* memberRefCache, 
 
     if (!cached) {
         if (memberRefCache->everPopulated) {
-            fprintf(stderr,
+            SS_LOG_ERROR(
                     "[mms_report_client] ERROR: cache slot %d (reference '%s') for RCB '%s' is unexpectedly "
                     "NULL after this RCB was already populated once - this should never happen, investigate\n",
                     slot, reference ? reference : "(unknown)",

@@ -8,6 +8,7 @@
 #include "features/mms_dataset_manager/utils/mms_dataset_manager_utils.h"
 #include "mms_client_connection.h"
 #include "iec61850_common_internal.h"
+#include "log.h"
 
 void
 MmsDatasetManagerProvisioning_destroyCacheEntry(void* entry) {
@@ -73,7 +74,7 @@ MmsDatasetManagerProvisioning_runClaimPass(MmsDatasetManagerHandle handle, Linke
         ClientReportControlBlock rcb =
                 IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
         if (!rcb) {
-            fprintf(stderr, "[mms_dataset_manager] claim pass: getRCBValues failed for '%s': %s (%d) - "
+            SS_LOG_DEBUG("[mms_dataset_manager] claim pass: getRCBValues failed for '%s': %s (%d) - "
                     "leaving it as a tier-4 (self-create) candidate\n",
                     target->objectReference, IedClientError_toString(err), err);
             continue;
@@ -115,7 +116,7 @@ MmsDatasetManagerProvisioning_runClaimPass(MmsDatasetManagerHandle handle, Linke
                         LinkedList_add(claimedLeaves, MmsDatasetManagerUtils_safeStringDup(ref));
                     }
                 }
-                fprintf(stderr, "[mms_dataset_manager] claim pass: '%s' pre-resolved via %s: '%s' (%d member(s)) "
+                SS_LOG_DEBUG("[mms_dataset_manager] claim pass: '%s' pre-resolved via %s: '%s' (%d member(s)) "
                         "- excluded from this cycle's whole-device tier-4 pool\n", target->objectReference,
                         tier == MMS_DATASET_TIER_LIVE ? "live" : "adopted", datasetReference,
                         LinkedList_size(memberRefs));
@@ -127,7 +128,7 @@ MmsDatasetManagerProvisioning_runClaimPass(MmsDatasetManagerHandle handle, Linke
         ClientReportControlBlock_destroy(rcb);
     }
 
-    fprintf(stderr, "[mms_dataset_manager] claim pass complete: %d target(s) pre-resolved via tier 2/3, %d "
+    SS_LOG_DEBUG("[mms_dataset_manager] claim pass complete: %d target(s) pre-resolved via tier 2/3, %d "
             "distinct leaf(ves) already covered and excluded from this cycle's whole-device tier-4 clustering\n",
             preResolvedCount, LinkedList_size(claimedLeaves));
 }
@@ -232,16 +233,16 @@ logGranularCreateDataSetError(MmsDatasetManagerHandle handle, const char* datase
     }
 
     if (attempted) {
-        fprintf(stderr, "[mms_dataset_manager] createDataSet diagnostic for '%s': raw MMS error = %s (%d)\n",
+        SS_LOG_DEBUG("[mms_dataset_manager] createDataSet diagnostic for '%s': raw MMS error = %s (%d)\n",
                 datasetName, MmsError_toString(mmsError), (int) mmsError);
 
         if (mmsError == MMS_ERROR_NONE) {
-            fprintf(stderr, "[mms_dataset_manager] createDataSet diagnostic for '%s' UNEXPECTEDLY SUCCEEDED where "
+            SS_LOG_WARN("[mms_dataset_manager] createDataSet diagnostic for '%s' UNEXPECTEDLY SUCCEEDED where "
                     "the real attempt just failed - deleting it now rather than leaving an untracked orphan on "
                     "the device\n", datasetName);
             IedClientError deleteErr = IED_ERROR_OK;
             if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
-                fprintf(stderr, "[mms_dataset_manager] could not delete diagnostic dataset '%s': %s (%d) - left "
+                SS_LOG_WARN("[mms_dataset_manager] could not delete diagnostic dataset '%s': %s (%d) - left "
                         "behind on the device\n", datasetName, IedClientError_toString(deleteErr), deleteErr);
             }
         }
@@ -272,7 +273,7 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
      * anything can fail - so a rejection further down can be read against the
      * exact request that produced it rather than reconstructed from
      * surrounding lines. */
-    fprintf(stderr, "[mms_dataset_manager] === createDataSet attempt for '%s' (LN '%s') === scope=%s, "
+    SS_LOG_DEBUG("[mms_dataset_manager] === createDataSet attempt for '%s' (LN '%s') === scope=%s, "
             "requested members=%d, pool=%s, remaining budget=%d\n",
             logRcbReference, logLnReference, buffered ? "domain-scoped" : "association-specific",
             memberCount, buffered ? "ConfDataSet" : "DynDataSet", *budget);
@@ -281,7 +282,7 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
         if (!*budgetExhaustedLogged) {
             int sclMax = buffered ? IedModel_getConfDataSetMax(handle->iedModel)
                                    : IedModel_getDynDataSetMax(handle->iedModel);
-            fprintf(stderr, "[mms_dataset_manager] %s budget (SCL %s max=%d) exhausted this connect cycle - no "
+            SS_LOG_DEBUG("[mms_dataset_manager] %s budget (SCL %s max=%d) exhausted this connect cycle - no "
                     "further createDataSet attempts will be made; remaining RCB(s) needing a %s dataset will "
                     "not report\n", buffered ? "ConfDataSet" : "DynDataSet", buffered ? "ConfDataSet" : "DynDataSet",
                     sclMax, buffered ? "domain-scoped" : "association-specific");
@@ -296,13 +297,13 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
      * it won't name (IED_ERROR_UNKNOWN/99), the exact member list is the only
      * thing left to reason about. */
     for (int i = 0; i < memberCount; i++) {
-        fprintf(stderr, "[mms_dataset_manager]   requested member[%d/%d] for '%s': %s\n",
+        SS_LOG_DEBUG("[mms_dataset_manager]   requested member[%d/%d] for '%s': %s\n",
                 i + 1, memberCount, logRcbReference, memberReferences[i] ? memberReferences[i] : "(null)");
     }
 
     LinkedList wireRefs = MmsDatasetManagerUseCases_buildWireMemberReferences(memberReferences, memberCount);
     if (!wireRefs || LinkedList_size(wireRefs) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] no wire-convertible attribute references for LN '%s' (0 of %d "
+        SS_LOG_WARN("[mms_dataset_manager] no wire-convertible attribute references for LN '%s' (0 of %d "
                 "converted) - '%s' will not get a dynamic dataset\n", logLnReference, memberCount,
                 logRcbReference);
         if (wireRefs) LinkedList_destroyDeep(wireRefs, free);
@@ -317,7 +318,7 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
      * trace whatsoever. */
     int wireCount = LinkedList_size(wireRefs);
     if (wireCount != memberCount) {
-        fprintf(stderr, "[mms_dataset_manager] WARNING: converted only %d of %d member reference(s) to wire form "
+        SS_LOG_WARN("[mms_dataset_manager] WARNING: converted only %d of %d member reference(s) to wire form "
                 "for '%s' - %d dropped; the created dataset's real shape will differ from this target's own "
                 "cluster assignment\n", wireCount, memberCount, logRcbReference, memberCount - wireCount);
     }
@@ -334,13 +335,13 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
      * SIPROTEC 6MD663 declaring DynDataSet maxAttributes="60") - without it, a
      * failure below only shows a raw error code with nothing to compare it
      * against. */
-    fprintf(stderr, "[mms_dataset_manager] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s) "
+    SS_LOG_DEBUG("[mms_dataset_manager] creating dynamic dataset '%s' for LN '%s' with %d member attribute(s) "
             "(as actually sent on the wire)\n", datasetName, logLnReference, wireCount);
     int wireIndex = 0;
     for (LinkedList wireElement = LinkedList_getNext(wireRefs); wireElement;
             wireElement = LinkedList_getNext(wireElement)) {
         wireIndex++;
-        fprintf(stderr, "[mms_dataset_manager]   wire member[%d/%d] of '%s': %s\n",
+        SS_LOG_DEBUG("[mms_dataset_manager]   wire member[%d/%d] of '%s': %s\n",
                 wireIndex, wireCount, datasetName, (char*) LinkedList_getData(wireElement));
     }
 
@@ -357,12 +358,12 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
      * presumed to already have the right shape. */
     bool reusedExisting = false;
     if (err == IED_ERROR_OBJECT_EXISTS && buffered) {
-        fprintf(stderr, "[mms_dataset_manager] dynamic dataset '%s' for LN '%s' already exists on the server - "
+        SS_LOG_DEBUG("[mms_dataset_manager] dynamic dataset '%s' for LN '%s' already exists on the server - "
                 "reusing it (budget unchanged at %d, it was never new this cycle)\n",
                 datasetName, logLnReference, *budget);
         reusedExisting = true;
     } else if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_dataset_manager] dynamic dataset creation FAILED for LN '%s' (dataset '%s', %d "
+        SS_LOG_ERROR("[mms_dataset_manager] dynamic dataset creation FAILED for LN '%s' (dataset '%s', %d "
                 "member(s), %s): %s (%d) - '%s' will not report\n", logLnReference, datasetName, wireCount,
                 buffered ? "domain-scoped" : "association-specific", IedClientError_toString(err), err,
                 logRcbReference);
@@ -378,7 +379,7 @@ createAndCacheDatasetAttempt(MmsDatasetManagerHandle handle, MmsDatasetManagerSe
          * why cache hits stay free; this is the same reasoning applied to a
          * dataset the SERVER already knew about before this cycle started). */
         if (*budget > 0) (*budget)--;
-        fprintf(stderr, "[mms_dataset_manager] created dynamic dataset '%s' for LN '%s' with %d member(s) - "
+        SS_LOG_DEBUG("[mms_dataset_manager] created dynamic dataset '%s' for LN '%s' with %d member(s) - "
                 "%s budget now %d\n", datasetName, logLnReference, wireCount,
                 buffered ? "ConfDataSet" : "DynDataSet", *budget);
     }
@@ -443,7 +444,7 @@ createAndCacheDataset(MmsDatasetManagerHandle handle, MmsDatasetManagerSession* 
         const char* logLnReference, const char* logRcbReference, const char* const* memberReferences,
         int memberCount, bool buffered) {
     if (!buffered && session->associationSpecificCreateRejected) {
-        fprintf(stderr, "[mms_dataset_manager] skipping the association-specific createDataSet attempt for LN "
+        SS_LOG_DEBUG("[mms_dataset_manager] skipping the association-specific createDataSet attempt for LN "
                 "'%s' - this device already rejected that form earlier this cycle, so going straight to a "
                 "domain-scoped dataset instead of spending another doomed %d-member round-trip\n",
                 logLnReference, memberCount);
@@ -455,7 +456,7 @@ createAndCacheDataset(MmsDatasetManagerHandle handle, MmsDatasetManagerSession* 
             logRcbReference, memberReferences, memberCount, buffered);
     if (result || buffered) return result;
 
-    fprintf(stderr, "[mms_dataset_manager] association-specific dataset creation failed for LN '%s' - falling "
+    SS_LOG_DEBUG("[mms_dataset_manager] association-specific dataset creation failed for LN '%s' - falling "
             "back to a domain-scoped dataset instead (some real devices reject association-specific creation "
             "outright, independent of quota - see CHANGELOG.md) - this dataset will NOT be cleaned up "
             "automatically and permanently consumes device quota until a device-side reset\n", logLnReference);
@@ -468,7 +469,7 @@ createAndCacheDataset(MmsDatasetManagerHandle handle, MmsDatasetManagerSession* 
      * the next target retries normally. */
     if (fallback && !session->associationSpecificCreateRejected) {
         session->associationSpecificCreateRejected = true;
-        fprintf(stderr, "[mms_dataset_manager] this device rejects association-specific createDataSet but "
+        SS_LOG_DEBUG("[mms_dataset_manager] this device rejects association-specific createDataSet but "
                 "accepts domain-scoped - remaining unbuffered targets this cycle will skip the "
                 "association-specific attempt entirely\n");
     }
@@ -485,7 +486,7 @@ MmsDatasetManagerProvisioning_getOrCreateDataset(MmsDatasetManagerHandle handle,
         /* A target with no LN reference is a malformed model, not a spare
          * slot the device happens not to need - genuinely a failure. */
         *outWasNeeded = true;
-        fprintf(stderr, "[mms_dataset_manager] tier 4 (self-create) unavailable for '%s': %s\n",
+        SS_LOG_DEBUG("[mms_dataset_manager] tier 4 (self-create) unavailable for '%s': %s\n",
                 target->objectReference, session->active ? "target has no LN reference" : "no dataset session");
         return NULL;
     }
@@ -500,17 +501,17 @@ MmsDatasetManagerProvisioning_getOrCreateDataset(MmsDatasetManagerHandle handle,
          * so it reads as "nothing left to cover" instead of looking like a
          * lookup bug, and reported via *outWasNeeded=false so the caller
          * leaves this RCB alone entirely rather than calling it failed. */
-        fprintf(stderr, "[mms_dataset_manager] tier 4 (self-create) skipped for '%s': no whole-device cluster was "
+        SS_LOG_DEBUG("[mms_dataset_manager] tier 4 (self-create) skipped for '%s': no whole-device cluster was "
                 "assigned to this RCB slot this cycle (the device's reportable data is already fully covered "
                 "by other slots)\n", target->objectReference);
         return NULL;
     }
-    fprintf(stderr, "[mms_dataset_manager] tier 4 (self-create) for '%s': assigned cluster has %d member(s)\n",
+    SS_LOG_DEBUG("[mms_dataset_manager] tier 4 (self-create) for '%s': assigned cluster has %d member(s)\n",
             target->objectReference, chunk->memberCount);
 
     const char* existing = lookupDatasetName(session->cache, target->objectReference, target->buffered);
     if (existing) {
-        fprintf(stderr, "[mms_dataset_manager] tier 4 (self-create) for '%s': session cache hit - reusing '%s' "
+        SS_LOG_DEBUG("[mms_dataset_manager] tier 4 (self-create) for '%s': session cache hit - reusing '%s' "
                 "already created this cycle, no wire call\n", target->objectReference, existing);
         return existing;
     }
@@ -557,29 +558,29 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
         slotScan = LinkedList_getNext(slotScan);
     }
     if (LinkedList_size(slots) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: this device has NO Dyn RCB slots (every "
+        SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: this device has NO Dyn RCB slots (every "
                 "RCB already carries an SCL-declared datSet) - nothing to plan\n");
         LinkedList_destroyStatic(slots);
         return plan;
     }
-    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: %d Dyn RCB slot(s) available\n",
+    SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: %d Dyn RCB slot(s) available\n",
             LinkedList_size(slots));
     for (LinkedList slotLog = LinkedList_getNext(slots); slotLog; slotLog = LinkedList_getNext(slotLog)) {
         ReportControlBlockTarget* t = (ReportControlBlockTarget*) LinkedList_getData(slotLog);
-        fprintf(stderr, "[mms_dataset_manager]   Dyn slot: '%s' (LN '%s', buffered=%d)\n",
+        SS_LOG_DEBUG("[mms_dataset_manager]   Dyn slot: '%s' (LN '%s', buffered=%d)\n",
                 t->objectReference, t->lnReference ? t->lnReference : "(none)", t->buffered);
     }
 
     LinkedList wholeDeviceLeaves = IedModel_getReportableAttributeReferencesForWholeDevice(handle->iedModel);
     int rawLeafCount = wholeDeviceLeaves ? LinkedList_size(wholeDeviceLeaves) : 0;
     if (rawLeafCount == 0) {
-        fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: the model has NO reportable (FC=ST/MX) "
+        SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: the model has NO reportable (FC=ST/MX) "
                 "attributes anywhere - no Dyn RCB can be given a dataset this cycle\n");
         if (wholeDeviceLeaves) LinkedList_destroyDeep(wholeDeviceLeaves, free);
         LinkedList_destroyStatic(slots);
         return plan;
     }
-    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: %d reportable attribute(s) across the "
+    SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: %d reportable attribute(s) across the "
             "whole device (before excluding what the claim pass already covered)\n", rawLeafCount);
 
     char** rawLeafArray = calloc((size_t) rawLeafCount, sizeof(char*));
@@ -603,11 +604,11 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
     LinkedList_destroyDeep(wholeDeviceLeaves, free);
 
     int leafCount = LinkedList_size(unclaimedLeaves);
-    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: %d attribute(s) already covered by this "
+    SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: %d attribute(s) already covered by this "
             "cycle's tier 2/3 claim pass excluded - %d remain to distribute across %d Dyn slot(s)\n",
             rawLeafCount - leafCount, leafCount, LinkedList_size(slots));
     if (leafCount == 0) {
-        fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: nothing left to cluster - the "
+        SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: nothing left to cluster - the "
                 "device's reportable data is already fully covered by this cycle's tier 2/3 claims\n");
         LinkedList_destroyStatic(unclaimedLeaves);
         LinkedList_destroyStatic(slots);
@@ -631,7 +632,7 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
     int confMaxAttributes = IedModel_getConfDataSetMaxAttributes(handle->iedModel);
     int dynMaxAttributes = IedModel_getDynDataSetMaxAttributes(handle->iedModel);
     int maxAttributes = confMaxAttributes > 0 ? confMaxAttributes : dynMaxAttributes;
-    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: SCL declares ConfDataSet maxAttributes=%d, "
+    SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: SCL declares ConfDataSet maxAttributes=%d, "
             "DynDataSet maxAttributes=%d - using cap %d from %s, strategy=%s\n",
             confMaxAttributes, dynMaxAttributes, maxAttributes,
             confMaxAttributes > 0 ? "ConfDataSet" : (dynMaxAttributes > 0 ? "DynDataSet" : "neither (undeclared)"),
@@ -647,14 +648,14 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
     int totalClusters = LinkedList_size(clusterLists);
     int slotCount = LinkedList_size(slots);
     int assignedClusters = 0;
-    fprintf(stderr, "[mms_dataset_manager] whole-device cluster plan: chunking produced %d cluster(s) for %d "
+    SS_LOG_DEBUG("[mms_dataset_manager] whole-device cluster plan: chunking produced %d cluster(s) for %d "
             "slot(s)\n", totalClusters, slotCount);
 
     LinkedList clusterElement = LinkedList_getNext(clusterLists);
     LinkedList slotElement = LinkedList_getNext(slots);
     while (clusterElement) {
         if (!slotElement) {
-            fprintf(stderr, "[mms_dataset_manager] whole-device clustering produced %d dataset(s) but this "
+            SS_LOG_DEBUG("[mms_dataset_manager] whole-device clustering produced %d dataset(s) but this "
                     "device only has %d RCB instance(s) with no SCL-assigned dataset - %d cluster(s) "
                     "(part of the device's data) will not be reported this cycle\n",
                     totalClusters, slotCount, totalClusters - assignedClusters);
@@ -684,7 +685,7 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
                  * cluster whose size exceeds the device's real (as opposed to
                  * SCL-declared) cap is only diagnosable if the intended size
                  * is on record before the create is attempted. */
-                fprintf(stderr, "[mms_dataset_manager]   cluster %d/%d -> slot '%s' (%d member(s))\n",
+                SS_LOG_DEBUG("[mms_dataset_manager]   cluster %d/%d -> slot '%s' (%d member(s))\n",
                         assignedClusters + 1, totalClusters, assignedTarget->objectReference, memberCount);
             } else {
                 for (int f = 0; f < memberCount; f++) free(memberArray[f]);
@@ -698,7 +699,7 @@ MmsDatasetManagerProvisioning_buildWholeDeviceClusterPlan(MmsDatasetManagerHandl
     }
 
     if (!clusterElement && slotElement) {
-        fprintf(stderr, "[mms_dataset_manager] whole-device clustering produced %d dataset(s) for %d "
+        SS_LOG_DEBUG("[mms_dataset_manager] whole-device clustering produced %d dataset(s) for %d "
                 "available RCB instance(s) - %d instance(s) have nothing left to report (the device's "
                 "own reportable data is already fully covered)\n",
                 totalClusters, slotCount, slotCount - totalClusters);
@@ -737,7 +738,7 @@ MmsDatasetManagerProvisioning_cleanupOrphaned(MmsDatasetManagerHandle handle, in
     MmsDatasetManagerSession* session = &handle->session;
     if (!session->existingServerDatasets || !handle->targets) return;
 
-    fprintf(stderr, "[mms_dataset_manager] orphan cleanup: evaluating %d dataset(s) discovered on the server "
+    SS_LOG_DEBUG("[mms_dataset_manager] orphan cleanup: evaluating %d dataset(s) discovered on the server "
             "this cycle\n", LinkedList_size(session->existingServerDatasets));
 
     LinkedList element = LinkedList_getNext(session->existingServerDatasets);
@@ -791,15 +792,15 @@ MmsDatasetManagerProvisioning_cleanupOrphaned(MmsDatasetManagerHandle handle, in
                 IedConnection_setRCBValues(handle->connection, &disableErr, orphanRcb,
                         RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
                 if (disableErr != IED_ERROR_OK) {
-                    fprintf(stderr, "[mms_dataset_manager] could not disable/unbind '%s' (dataset '%s') "
+                    SS_LOG_WARN("[mms_dataset_manager] could not disable/unbind '%s' (dataset '%s') "
                             "before orphan cleanup: %s (%d)\n", matchedTarget->objectReference, candidate,
                             IedClientError_toString(disableErr), disableErr);
                 } else {
-                    fprintf(stderr, "[mms_dataset_manager] disabled/unbound '%s' from orphaned dataset '%s' "
+                    SS_LOG_DEBUG("[mms_dataset_manager] disabled/unbound '%s' from orphaned dataset '%s' "
                             "before cleanup\n", matchedTarget->objectReference, candidate);
                 }
             } else {
-                fprintf(stderr, "[mms_dataset_manager] orphan candidate '%s' matches '%s's own deterministic "
+                SS_LOG_DEBUG("[mms_dataset_manager] orphan candidate '%s' matches '%s's own deterministic "
                         "name but its live DatSet is '%s' - not currently bound to it, skipping disable/"
                         "unbind\n", candidate, matchedTarget->objectReference, liveDataSet ? liveDataSet : "(none)");
             }
@@ -808,10 +809,10 @@ MmsDatasetManagerProvisioning_cleanupOrphaned(MmsDatasetManagerHandle handle, in
 
         IedClientError deleteErr = IED_ERROR_OK;
         if (IedConnection_deleteDataSet(handle->connection, &deleteErr, candidate)) {
-            fprintf(stderr, "[mms_dataset_manager] cleaned up orphaned dataset '%s' - not needed by any "
+            SS_LOG_DEBUG("[mms_dataset_manager] cleaned up orphaned dataset '%s' - not needed by any "
                     "target this cycle, reclaiming budget\n", candidate);
         } else {
-            fprintf(stderr, "[mms_dataset_manager] could not clean up orphaned dataset '%s': %s (%d) - "
+            SS_LOG_WARN("[mms_dataset_manager] could not clean up orphaned dataset '%s': %s (%d) - "
                     "left behind\n", candidate, IedClientError_toString(deleteErr), deleteErr);
             if (outLeakedCount) (*outLeakedCount)++;
         }
@@ -844,7 +845,7 @@ MmsDatasetManagerProvisioning_cleanupOnStop(MmsDatasetManagerHandle handle) {
         int targetCount = LinkedList_size(handle->targets);
         int matchedCount = 0;
         int unbindFailCount = 0;
-        fprintf(stderr, "[mms_dataset_manager] stop: disabling+unbinding before delete - %d domain-scoped "
+        SS_LOG_DEBUG("[mms_dataset_manager] stop: disabling+unbinding before delete - %d domain-scoped "
                 "dataset(s) tracked, checking %d target(s) for a live match\n", trackedCount, targetCount);
         LinkedList element = LinkedList_getNext(handle->targets);
         while (element) {
@@ -871,11 +872,11 @@ MmsDatasetManagerProvisioning_cleanupOnStop(MmsDatasetManagerHandle handle) {
                             RCB_ELEMENT_RPT_ENA | RCB_ELEMENT_DATSET, true);
                     if (err != IED_ERROR_OK) {
                         unbindFailCount++;
-                        fprintf(stderr, "[mms_dataset_manager] could not disable/unbind '%s' (dataset '%s') "
+                        SS_LOG_WARN("[mms_dataset_manager] could not disable/unbind '%s' (dataset '%s') "
                                 "before dataset cleanup: %s (%d)\n", target->objectReference, liveDataSet,
                                 IedClientError_toString(err), err);
                     } else {
-                        fprintf(stderr, "[mms_dataset_manager] disabled/unbound '%s' from dataset '%s'\n",
+                        SS_LOG_DEBUG("[mms_dataset_manager] disabled/unbound '%s' from dataset '%s'\n",
                                 target->objectReference, liveDataSet);
                     }
                 }
@@ -884,7 +885,7 @@ MmsDatasetManagerProvisioning_cleanupOnStop(MmsDatasetManagerHandle handle) {
             }
             element = LinkedList_getNext(element);
         }
-        fprintf(stderr, "[mms_dataset_manager] stop: disable+unbind pass done - %d target(s) matched a "
+        SS_LOG_DEBUG("[mms_dataset_manager] stop: disable+unbind pass done - %d target(s) matched a "
                 "tracked dataset, %d succeeded, %d failed\n", matchedCount, matchedCount - unbindFailCount,
                 unbindFailCount);
     }
@@ -903,26 +904,26 @@ MmsDatasetManagerProvisioning_cleanupOnStop(MmsDatasetManagerHandle handle) {
         int toDelete = LinkedList_size(handle->domainScopedDynamicDatasetNames);
         int deletedOnStop = 0;
         int leakedOnStop = 0;
-        fprintf(stderr, "[mms_dataset_manager] stop: attempting to delete %d domain-scoped dataset(s)\n", toDelete);
+        SS_LOG_DEBUG("[mms_dataset_manager] stop: attempting to delete %d domain-scoped dataset(s)\n", toDelete);
         LinkedList element = LinkedList_getNext(handle->domainScopedDynamicDatasetNames);
         while (element) {
             char* datasetName = (char*) LinkedList_getData(element);
             IedClientError deleteErr = IED_ERROR_OK;
             if (!IedConnection_deleteDataSet(handle->connection, &deleteErr, datasetName)) {
-                fprintf(stderr, "[mms_dataset_manager] could not delete dynamic dataset '%s' on stop: "
+                SS_LOG_WARN("[mms_dataset_manager] could not delete dynamic dataset '%s' on stop: "
                         "%s (%d) - left behind on the device\n", datasetName,
                         IedClientError_toString(deleteErr), deleteErr);
                 leakedOnStop++;
             } else {
-                fprintf(stderr, "[mms_dataset_manager] deleted dynamic dataset '%s' on stop\n", datasetName);
+                SS_LOG_DEBUG("[mms_dataset_manager] deleted dynamic dataset '%s' on stop\n", datasetName);
                 deletedOnStop++;
             }
             element = LinkedList_getNext(element);
         }
-        fprintf(stderr, "[mms_dataset_manager] stop: dataset deletion done - %d of %d succeeded, %d left "
+        SS_LOG_DEBUG("[mms_dataset_manager] stop: dataset deletion done - %d of %d succeeded, %d left "
                 "behind\n", deletedOnStop, toDelete, leakedOnStop);
         if (leakedOnStop > 0) {
-            fprintf(stderr, "[mms_dataset_manager] %d domain-scoped dataset(s) could not be deleted on stop - "
+            SS_LOG_WARN("[mms_dataset_manager] %d domain-scoped dataset(s) could not be deleted on stop - "
                     "permanently spent against this device's dataset quota until a device-side reset\n",
                     leakedOnStop);
         }

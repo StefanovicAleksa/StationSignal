@@ -29,10 +29,30 @@ Once the box has the toolchains this needs (`gcc`, `go`, `npm`, and `nmcli`/Netw
 current LAN IP/interface/NetworkManager connection, and installs the avahi/nginx configs, the
 fixed recovery address + privileged network-config helper, and the systemd service in one run.
 ```
-./deploy/setup.sh
+./deploy/setup.sh prod      # or: dev
 ```
 Run it **without** `sudo` — it elevates only the specific steps that need root internally (same
 convention as `run_dev.sh`). It's safe to re-run after a `git pull` to redeploy.
+
+### dev vs. prod mode
+The one argument picks how much this box logs. **`prod`** (the default on a first install) means
+no debug logging anywhere: the API logs at info, so does the daemon it spawns, the frontend's
+debug console output is compiled out of the bundle, and the per-request HTTP access log is off.
+**`dev`** turns all of that on. Everything both processes print lands in one append-mode file with
+no logrotate in front of it (see step 4), which is the whole reason prod is quiet by default —
+warnings and errors still get through in both modes.
+
+The choice is recorded in `/etc/station-signal/station-signal.env`, so a later
+`./deploy/setup.sh` with **no argument** redeploys in whatever mode the box is already running:
+```
+STATION_SIGNAL_MODE=prod
+```
+To flip an installed box without rebuilding, edit that file and
+`sudo systemctl restart station-signal-api` — the unit reads it via `EnvironmentFile=`, and the
+API passes the matching `STATION_SIGNAL_LOG_LEVEL` to the daemon it spawns. The frontend half is
+baked in at build time, so only re-running this script changes that. To override the API's level
+alone without changing mode, add `STATION_SIGNAL_API_LOG_LEVEL=debug|info|warn|error` to the same
+file.
 
 ## 1. Install avahi (mDNS, for `stationsignal.local`)
 ```
@@ -90,10 +110,16 @@ station_signal_daemon/rebuild_proj.sh /opt/station_signal/bin/station_signal_dae
 # API
 (cd station_signal_api && go build -o /opt/station_signal/bin/station_signal_api ./cmd/station_signal_api)
 
+# Deployment mode, read by the systemd unit below (and by an argument-less setup.sh re-run)
+sudo mkdir -p /etc/station-signal
+echo 'STATION_SIGNAL_MODE=prod' | sudo tee /etc/station-signal/station-signal.env
+
 # Frontend — .env.production (already in the repo) intentionally sets no VITE_API_BASE_URL, so
 # the built app calls the API on its own page origin (works for stationsignal.local, a bare
-# box IP, or anything else nginx answers for — see apiClient.ts)
-(cd station_signal_frontend && npm install && npm run build)
+# box IP, or anything else nginx answers for — see apiClient.ts). VITE_STATION_SIGNAL_MODE
+# decides whether the app's own debug console output survives into the bundle; .env.production
+# already sets prod, so only a dev install needs it spelled out.
+(cd station_signal_frontend && npm install && VITE_STATION_SIGNAL_MODE=prod npm run build)
 sudo mkdir -p /opt/station_signal/frontend-dist
 sudo cp -r station_signal_frontend/dist/* /opt/station_signal/frontend-dist/
 ```

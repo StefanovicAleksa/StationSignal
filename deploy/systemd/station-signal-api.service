@@ -26,8 +26,13 @@ User=station-signal
 Group=station-signal
 Environment=STATION_SIGNAL_DAEMON_BIN=/opt/station_signal/bin/station_signal_daemon
 Environment=STATION_SIGNAL_API_HTTP_ADDR=:8080
-Environment=STATION_SIGNAL_API_LOG_LEVEL=info
 Environment=STATION_SIGNAL_API_STRUCTURE_FILE_DIR=/opt/station_signal/structure_files
+# STATION_SIGNAL_MODE=dev|prod, written by deploy/setup.sh from its one argument. It decides this
+# process's log level and the STATION_SIGNAL_LOG_LEVEL it exports to the daemon it spawns, so
+# editing that file and restarting this unit turns debug logging on or off across both processes
+# without a rebuild. Leading '-': a missing file is not an error, and the API defaults to prod.
+# Set STATION_SIGNAL_API_LOG_LEVEL here to override the level the mode implies for the API alone.
+EnvironmentFile=-/etc/station-signal/station-signal.env
 # Settings-page remote static-IP reconfiguration (internal/features/network) — the one place
 # this otherwise-unprivileged process reaches root, via sudo + the sudoers rule in
 # deploy/sudoers/station-signal-netconfig gating this exact script.

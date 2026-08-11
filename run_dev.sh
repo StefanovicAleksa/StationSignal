@@ -80,7 +80,10 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 echo "==> Starting API on ${API_HTTP_ADDR} (sudo required — the daemon it supervises needs CAP_NET_RAW for GOOSE)"
-sudo "$API_BIN" -daemon-bin "$DAEMON_BIN" -http-addr "$API_HTTP_ADDR" &
+# -mode dev as a flag, not an env var: sudo scrubs the environment, so STATION_SIGNAL_MODE set out
+# here would never reach the process. The API turns this into debug logging for itself, the HTTP
+# access log, and STATION_SIGNAL_LOG_LEVEL=debug for the daemon it spawns.
+sudo "$API_BIN" -daemon-bin "$DAEMON_BIN" -http-addr "$API_HTTP_ADDR" -mode dev &
 API_PID=$!
 
 echo "==> Waiting for the API to become ready"

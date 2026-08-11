@@ -9,6 +9,7 @@
 #include "features/mms_dataset_manager/service/mms_dataset_manager_api.h"
 #include "hal_time.h"
 #include "mms_value.h"
+#include "log.h"
 
 /* A connection must stay up at least this long before a subsequent loss
  * resets the exponential backoff back to the initial tier - see
@@ -162,7 +163,7 @@ refreshPulledMemberRefCache(MmsReportClientHandle handle, ReportControlBlockTarg
      * shape rebuild resets the value-diff cache back to bootstrap. Without
      * this line, that reset was completely silent, making it indistinguishable
      * in a log capture from every report simply always being "unchanged." */
-    fprintf(stderr, "[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
+    SS_LOG_DEBUG("[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
             "value-diff cache reset to bootstrap\n", target->objectReference,
             previousDatasetReference ? previousDatasetReference : "(none)", liveDataset);
     free(previousDatasetReference);
@@ -267,7 +268,7 @@ ensureLnFallbackMemberRefCache(MmsReportClientHandle handle, ReportControlBlockT
      * Without this line, that reset was completely silent, making it
      * indistinguishable in a log capture from every report simply always
      * being "unchanged." */
-    fprintf(stderr, "[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
+    SS_LOG_DEBUG("[mms_report_client] '%s' dataset identity changed (was '%s', now '%s') - "
             "value-diff cache reset to bootstrap\n", target->objectReference,
             previousDatasetReference ? previousDatasetReference : "(none)", effectiveDatasetReference);
     free(previousDatasetReference);
@@ -350,7 +351,7 @@ captureAndLogRcbState(const char* objectReference, const char* when, ClientRepor
     out->sqNum = ClientReportControlBlock_getSqNum(rcb);
     out->hasEntryId = ClientReportControlBlock_getEntryId(rcb) != NULL;
 
-    fprintf(stderr, "[mms_report_client] '%s' live RCB state (%s): RptEna=%d DatSet='%s' OptFlds=0x%x "
+    SS_LOG_DEBUG("[mms_report_client] '%s' live RCB state (%s): RptEna=%d DatSet='%s' OptFlds=0x%x "
             "TrgOps=0x%x BufTm=%u IntgPd=%u ConfRev=%u SqNum=%u EntryID=%s\n",
             objectReference, when, out->rptEna, out->datSet ? out->datSet : "(empty)", out->optFlds,
             out->trgOps, out->bufTm, out->intgPd, out->confRev, (unsigned) out->sqNum,
@@ -373,7 +374,7 @@ readAndLogLiveRcbState(MmsReportClientHandle handle, const char* objectReference
     IedClientError err = IED_ERROR_OK;
     ClientReportControlBlock live = IedConnection_getRCBValues(handle->connection, &err, objectReference, NULL);
     if (!live) {
-        fprintf(stderr, "[mms_report_client] '%s' live read-back (%s) FAILED: %s (%d) - device state unknown "
+        SS_LOG_WARN("[mms_report_client] '%s' live read-back (%s) FAILED: %s (%d) - device state unknown "
                 "at this point\n", objectReference, when, IedClientError_toString(err), err);
         return;
     }
@@ -440,7 +441,7 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
     if (outApplied) *outApplied = false;
     if (outLive) memset(outLive, 0, sizeof(*outLive));
 
-    fprintf(stderr, "[mms_report_client] '%s' step '%s': writing %s (element 0x%x)\n",
+    SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': writing %s (element 0x%x)\n",
             objectReference, step->name, step->intendedText, step->element);
 
     IedClientError err = IED_ERROR_OK;
@@ -451,7 +452,7 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
             && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
             && !handle->stopRequested) {
         tempUnavailableRetries++;
-        fprintf(stderr, "[mms_report_client] '%s' step '%s': temporarily unavailable (device likely still "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': temporarily unavailable (device likely still "
                 "initializing after a restart) - retry %d/%d\n", objectReference, step->name,
                 tempUnavailableRetries, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES);
         interruptibleSleep(handle, MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_RETRY_DELAY_MS);
@@ -459,10 +460,10 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
     }
 
     if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] '%s' step '%s': setRCBValues FAILED: %s (%d)\n",
+        SS_LOG_ERROR("[mms_report_client] '%s' step '%s': setRCBValues FAILED: %s (%d)\n",
                 objectReference, step->name, IedClientError_toString(err), err);
     } else {
-        fprintf(stderr, "[mms_report_client] '%s' step '%s': setRCBValues returned OK\n",
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': setRCBValues returned OK\n",
                 objectReference, step->name);
     }
 
@@ -472,11 +473,11 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
     readAndLogLiveRcbState(handle, objectReference, when, &live);
 
     if (step->verify == RCB_STEP_VERIFY_NONE) {
-        fprintf(stderr, "[mms_report_client] '%s' step '%s': unverifiable (write-only attribute, nothing to "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': unverifiable (write-only attribute, nothing to "
                 "read back)\n", objectReference, step->name);
         if (outApplied) *outApplied = true;
     } else if (!live.readOk) {
-        fprintf(stderr, "[mms_report_client] '%s' step '%s': unverifiable (read-back failed)\n",
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': unverifiable (read-back failed)\n",
                 objectReference, step->name);
     } else {
         bool applied = false;
@@ -512,15 +513,15 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
         }
 
         if (applied) {
-            fprintf(stderr, "[mms_report_client] '%s' step '%s': VERIFIED - device reports %s\n",
+            SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': VERIFIED - device reports %s\n",
                     objectReference, step->name, actual);
         } else if (err == IED_ERROR_OK) {
             /* The silent-ignore case this whole helper exists to expose. */
-            fprintf(stderr, "[mms_report_client] '%s' step '%s': NOT APPLIED - setRCBValues reported success "
+            SS_LOG_WARN("[mms_report_client] '%s' step '%s': NOT APPLIED - setRCBValues reported success "
                     "but the device's live state is %s, expected %s\n",
                     objectReference, step->name, actual, expected);
         } else {
-            fprintf(stderr, "[mms_report_client] '%s' step '%s': not applied (write already failed above) - "
+            SS_LOG_DEBUG("[mms_report_client] '%s' step '%s': not applied (write already failed above) - "
                     "device's live state is %s, expected %s\n",
                     objectReference, step->name, actual, expected);
         }
@@ -560,7 +561,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     ClientReportControlBlock rcb =
         IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
     if (!rcb) {
-        fprintf(stderr, "[mms_report_client] getRCBValues failed for '%s': %s (%d)\n",
+        SS_LOG_WARN("[mms_report_client] getRCBValues failed for '%s': %s (%d)\n",
                 target->objectReference, IedClientError_toString(err), err);
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
@@ -656,7 +657,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * than inside the dataset manager, so the reconciliation above still logs
      * its own "dataset identity changed" line BEFORE this one, exactly as it
      * did when both lived in this function. */
-    fprintf(stderr, "[mms_report_client] '%s' dataset resolved via %s: '%s'\n", target->objectReference,
+    SS_LOG_DEBUG("[mms_report_client] '%s' dataset resolved via %s: '%s'\n", target->objectReference,
             resolution.datasetReference ? resolution.tierName : "none",
             resolution.datasetReference ? resolution.datasetReference : "(none)");
     if (!resolution.datasetReference) {
@@ -685,7 +686,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
              * (mms_report_client_api.h) is "fires once per RCB after each
              * enable ATTEMPT", and no attempt was made here - the device was
              * never touched. Reporting a non-event as a failure was the bug. */
-            fprintf(stderr, "[mms_report_client] '%s' not needed this cycle - the device's reportable data is "
+            SS_LOG_DEBUG("[mms_report_client] '%s' not needed this cycle - the device's reportable data is "
                     "already fully covered by other RCB(s), so this spare slot is deliberately left untouched "
                     "(not a failure)\n", target->objectReference);
             MmsDatasetManager_destroyResolution(&resolution);
@@ -698,7 +699,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
          * so loudly, and points at the tier lines above rather than making
          * the reader correlate by hand. Still fires the callback with the
          * same synthesized error a real attempt would have returned. */
-        fprintf(stderr, "[mms_report_client] '%s' FAILED to obtain a dataset - it needed one but none could be "
+        SS_LOG_ERROR("[mms_report_client] '%s' FAILED to obtain a dataset - it needed one but none could be "
                 "created or adopted for it (see this RCB's own tier 2/3/4 lines above for which step gave up "
                 "and why); this RCB will not report\n", target->objectReference);
         if (handle->rcbStatusCallback) {
@@ -745,7 +746,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
 
     /* Step 0. */
     if (entryState.rptEna) {
-        fprintf(stderr, "[mms_report_client] '%s' is already enabled on the device - disabling first so its "
+        SS_LOG_DEBUG("[mms_report_client] '%s' is already enabled on the device - disabling first so its "
                 "configuration attributes become writable (IEC 61850-7-2: DatSet/OptFlds/TrgOps/BufTm/IntgPd "
                 "are only writable while RptEna is FALSE)\n", target->objectReference);
         ClientReportControlBlock_setRptEna(rcb, false);
@@ -761,7 +762,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
          * is strictly more diagnostic than bailing out here would be. */
         runRcbStep(handle, rcb, target->objectReference, &disableStep, NULL, NULL);
     } else {
-        fprintf(stderr, "[mms_report_client] '%s' step '0/6 RptEna=false (pre-disable)': skipped (device "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '0/6 RptEna=false (pre-disable)': skipped (device "
                 "already reports RptEna=0, configuration attributes are writable as-is)\n",
                 target->objectReference);
     }
@@ -809,14 +810,14 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * meaningless.
      */
     if (err != IED_ERROR_OK && datSetAlreadyBound) {
-        fprintf(stderr, "[mms_report_client] '%s' step '1/6 DatSet': write was refused, but the device already "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '1/6 DatSet': write was refused, but the device already "
                 "reports exactly the dataset we resolved ('%s') - the binding is correct, continuing the enable "
                 "(a device declaring ReportSettings datSet=\"Conf\"/\"Fix\" refuses the write by design)\n",
                 target->objectReference, resolution.datasetReference);
         err = IED_ERROR_OK;
     }
     if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] '%s' ABORTING enable at step 1 - the dataset binding itself was "
+        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 1 - the dataset binding itself was "
                 "rejected and the device does not already report the dataset we resolved, so there is nothing "
                 "left to enable\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
@@ -880,18 +881,18 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         };
         IedClientError optFldsErr = runRcbStep(handle, rcb, target->objectReference, &optFldsStep, NULL, NULL);
         if (optFldsErr != IED_ERROR_OK) {
-            fprintf(stderr, "[mms_report_client] '%s' step 2 failed but is NON-FATAL - continuing without "
+            SS_LOG_WARN("[mms_report_client] '%s' step 2 failed but is NON-FATAL - continuing without "
                     "OptFlds.EntryID; this RCB will report, but EntryID resumption across reconnects will "
                     "not work against this device\n", target->objectReference);
         }
     } else if (!target->buffered) {
-        fprintf(stderr, "[mms_report_client] '%s' step '2/6 OptFlds': skipped (unbuffered RCB - EntryID is a "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '2/6 OptFlds': skipped (unbuffered RCB - EntryID is a "
                 "buffered-only concept)\n", target->objectReference);
     } else {
         /* Prints the value actually judged (post-DatSet), never the entry
          * snapshot - a skip justified by a number the device no longer reports
          * is precisely what made the step-3 bug invisible in the last capture. */
-        fprintf(stderr, "[mms_report_client] '%s' step '2/6 OptFlds': skipped (device still has "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '2/6 OptFlds': skipped (device still has "
                 "OptFlds.EntryID set after the DatSet write, OptFlds=0x%x)\n",
                 target->objectReference, postDatSetState.optFlds);
     }
@@ -970,13 +971,13 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
             /* Not fatal here - the post-sequence check below is what decides
              * whether this RCB is genuinely dead, since a partial TrgOps
              * (dchg/qchg present, gi refused) still reports changes fine. */
-            fprintf(stderr, "[mms_report_client] '%s' step 3 did not take effect - this RCB will be enabled "
+            SS_LOG_WARN("[mms_report_client] '%s' step 3 did not take effect - this RCB will be enabled "
                     "with whatever TrgOps the device already has; the post-sequence check below decides "
                     "whether that leaves it able to report at all\n", target->objectReference);
         }
     } else {
         /* Prints the post-DatSet value actually judged. */
-        fprintf(stderr, "[mms_report_client] '%s' step '3/6 TrgOps': skipped (device still has dchg|qchg|gi "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '3/6 TrgOps': skipped (device still has dchg|qchg|gi "
                 "set after the DatSet write, TrgOps=0x%x)\n", target->objectReference, postDatSetState.trgOps);
     }
 
@@ -1089,7 +1090,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
              * EntryID - now that the server has rejected it and the cache is
              * about to be cleared, step 6 needs the same GI safety net a
              * genuine first-ever enable gets. */
-            fprintf(stderr, "[mms_report_client] '%s' step 4 failed but is NON-FATAL - the device rejected "
+            SS_LOG_WARN("[mms_report_client] '%s' step 4 failed but is NON-FATAL - the device rejected "
                     "the cached EntryID, falling back to a full resume (gi=true) for this enable\n",
                     target->objectReference);
             requestGi = true;
@@ -1104,12 +1105,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 }
                 MmsReportClientUseCases_resetValueDiffCacheToBootstrap(cacheEntry);
                 Semaphore_post(handle->memberRefCacheLock);
-                fprintf(stderr, "[mms_report_client] '%s' EntryID rejected as no-longer-existing - value-diff "
+                SS_LOG_DEBUG("[mms_report_client] '%s' EntryID rejected as no-longer-existing - value-diff "
                         "cache reset to bootstrap (device report state was reset)\n", target->objectReference);
             }
         }
     } else {
-        fprintf(stderr, "[mms_report_client] '%s' step '4/6 EntryID': skipped (%s)\n", target->objectReference,
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '4/6 EntryID': skipped (%s)\n", target->objectReference,
                 target->buffered ? "no cached EntryID to resume from yet - this enable is a full resume"
                                  : "unbuffered RCB - EntryID is a buffered-only concept");
     }
@@ -1137,7 +1138,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         err = runRcbStep(handle, rcb, target->objectReference, &rptEnaStep, &rptEnaApplied, &finalState);
     }
     if (err != IED_ERROR_OK) {
-        fprintf(stderr, "[mms_report_client] '%s' ABORTING enable at step 5 - the device refused to enable "
+        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 5 - the device refused to enable "
                 "reporting on this RCB\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
         if (handle->rcbStatusCallback) {
@@ -1168,12 +1169,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         };
         IedClientError giErr = runRcbStep(handle, rcb, target->objectReference, &giStep, NULL, &giState);
         if (giErr != IED_ERROR_OK) {
-            fprintf(stderr, "[mms_report_client] '%s' step 6 failed but is NON-FATAL - the RCB is bound and "
+            SS_LOG_WARN("[mms_report_client] '%s' step 6 failed but is NON-FATAL - the RCB is bound and "
                     "enabled, it just won't produce the initial snapshot this enable asked for\n",
                     target->objectReference);
         }
     } else {
-        fprintf(stderr, "[mms_report_client] '%s' step '6/6 GI': skipped (buffered RCB resuming from a valid "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '6/6 GI': skipped (buffered RCB resuming from a valid "
                 "EntryID - the backlog already covers everything missed, see this function's own GI doc "
                 "comment)\n", target->objectReference);
     }
@@ -1205,7 +1206,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     bool cannotReport = lastState->readOk && (lastState->trgOps & changeTriggers) == 0;
 
     if (cannotReport) {
-        fprintf(stderr, "[mms_report_client] '%s' FAILED - every write returned OK, but the device's own live "
+        SS_LOG_ERROR("[mms_report_client] '%s' FAILED - every write returned OK, but the device's own live "
                 "TrgOps is 0x%x: neither dchg nor qchg is set, so this RCB can never emit a change report "
                 "(and with TrgOps.gi absent it won't answer step 6's GI either). It is enabled on paper and "
                 "silent in practice - counted as a failure, not an enable\n",
@@ -1225,19 +1226,19 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     }
 
     if (lastState->readOk && !(lastState->trgOps & TRG_OPT_GI)) {
-        fprintf(stderr, "[mms_report_client] '%s' WARNING: enabled and able to report changes (TrgOps=0x%x), "
+        SS_LOG_WARN("[mms_report_client] '%s' WARNING: enabled and able to report changes (TrgOps=0x%x), "
                 "but TrgOps.gi is not set - this device will ignore step 6's GI, so there is no initial "
                 "snapshot and the value-diff cache seeds from the first real change instead\n",
                 target->objectReference, lastState->trgOps);
     }
     if (!rptEnaApplied) {
-        fprintf(stderr, "[mms_report_client] '%s' WARNING: the device accepted RptEna=true but its own "
+        SS_LOG_WARN("[mms_report_client] '%s' WARNING: the device accepted RptEna=true but its own "
                 "read-back did not show this RCB as enabled - reporting may never start on it. Treated as "
                 "success anyway (a device may simply not reflect the change immediately); this is the line "
                 "to look at first if no reports arrive from this RCB\n", target->objectReference);
     }
 
-    fprintf(stderr, "[mms_report_client] enabled reporting for '%s' (buffered=%d, dataset='%s', gi=%d)\n",
+    SS_LOG_DEBUG("[mms_report_client] enabled reporting for '%s' (buffered=%d, dataset='%s', gi=%d)\n",
             target->objectReference, target->buffered, resolution.datasetReference, requestGi);
 
     if (handle->rcbStatusCallback) {
@@ -1305,11 +1306,11 @@ enableAllTargets(MmsReportClientHandle handle) {
     if (!handle->stopRequested) {
         int total = enabledCount + notNeededCount + failedCount;
         if (failedCount > 0) {
-            fprintf(stderr, "[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
+            SS_LOG_ERROR("[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
                     "(device already fully covered), %d FAILED - see the per-RCB lines above\n",
                     total, enabledCount, notNeededCount, failedCount);
         } else {
-            fprintf(stderr, "[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
+            SS_LOG_INFO("[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
                     "(device already fully covered), no failures\n", total, enabledCount, notNeededCount);
         }
     }

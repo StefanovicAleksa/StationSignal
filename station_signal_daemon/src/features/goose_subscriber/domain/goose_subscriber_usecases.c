@@ -3,6 +3,7 @@
 #include <string.h>
 #include "features/goose_subscriber/domain/goose_subscriber_usecases.h"
 #include "features/goose_subscriber/utils/goose_subscriber_utils.h"
+#include "log.h"
 
 #define GOOSE_SUBSCRIBER_MIN_LIVENESS_POLL_MS 50
 #define GOOSE_SUBSCRIBER_DEFAULT_LIVENESS_POLL_MS 1000
@@ -141,7 +142,7 @@ shouldForwardAndUpdateCache(GooseSubscriberMemberRefCache* memberRefCache, int s
 
     if (!cached) {
         if (memberRefCache->everPopulated) {
-            fprintf(stderr,
+            SS_LOG_ERROR(
                     "[goose_subscriber] ERROR: cache slot %d (reference '%s') for target '%s' is unexpectedly "
                     "NULL after this target was already populated once - this should never happen, investigate\n",
                     slot, reference ? reference : "(unknown)", goCbRef ? goCbRef : "(unknown)");

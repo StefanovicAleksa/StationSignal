@@ -6,6 +6,7 @@
 #include "features/scl_bootstrap/domain/scl_bootstrap_usecases.h"
 #include "features/scl_bootstrap/utils/scl_bootstrap_utils.h"
 #include "hal_time.h"
+#include "log.h"
 
 void
 SclBootstrapConfig_defaults(SclBootstrapConfig* config) {
@@ -70,7 +71,7 @@ SclBootstrap_scanAndFetch(SclBootstrapHandle handle, LinkedList hostList, int mm
     for (int i = 0; i < LinkedList_size(hostList); i++) {
         if (reachable[i]) reachableCount++;
     }
-    fprintf(stderr, "[scl_bootstrap] tcp probe: %d/%d host(s) reachable (%llums)\n", reachableCount,
+    SS_LOG_DEBUG("[scl_bootstrap] tcp probe: %d/%d host(s) reachable (%llums)\n", reachableCount,
             LinkedList_size(hostList), (unsigned long long) (Hal_getTimeInMs() - probeStartMs));
 
     LinkedList results = LinkedList_create();
@@ -96,7 +97,7 @@ SclBootstrap_scanAndFetch(SclBootstrapHandle handle, LinkedList hostList, int mm
             } else {
                 uint64_t candidateStartMs = Hal_getTimeInMs();
                 SclBootstrapMmsSession_run(result, &handle->config, handle->ownedAuthPassword);
-                fprintf(stderr, "[scl_bootstrap] candidate %s:%d done, status=%d (%llums)\n", result->host,
+                SS_LOG_DEBUG("[scl_bootstrap] candidate %s:%d done, status=%d (%llums)\n", result->host,
                         result->port, (int) result->status,
                         (unsigned long long) (Hal_getTimeInMs() - candidateStartMs));
             }

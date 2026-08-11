@@ -10,6 +10,7 @@
 #include "mms_type_spec.h"
 #include "mms_value.h"
 #include "hal_time.h"
+#include "log.h"
 
 /* ---- small string helpers ---- */
 
@@ -89,7 +90,7 @@ resolveAndBuildDataset(IedConnection conn, LogicalNode* ln, const char* datasetR
     bool isDeletable = false;
     LinkedList members = IedConnection_getDataSetDirectory(conn, &err, datasetRef, &isDeletable);
     if (!members) {
-        fprintf(stderr, "[ied_model_online_loader] WARN: could not resolve dataset '%s' (error %d) - "
+        SS_LOG_WARN("[ied_model_online_loader] WARN: could not resolve dataset '%s' (error %d) - "
                 "control block(s) referencing it will report/publish nothing\n", datasetRef, err);
         return;
     }
@@ -114,7 +115,7 @@ resolveAndBuildDataset(IedConnection conn, LogicalNode* ln, const char* datasetR
             DataSetEntry_create(dataSet, wireRef, -1, NULL);
             free(wireRef);
         } else {
-            fprintf(stderr, "[ied_model_online_loader] WARN: could not convert dataset member '%s' "
+            SS_LOG_WARN("[ied_model_online_loader] WARN: could not convert dataset member '%s' "
                     "(dataset '%s') to wire form - member skipped\n", acsiMemberRef, datasetRef);
         }
         element = LinkedList_getNext(element);
@@ -357,7 +358,7 @@ buildReportControlBlocks(IedConnection conn, const char* lnRef, LogicalNode* ln,
                 confRev = ClientReportControlBlock_getConfRev(rcb);
                 ClientReportControlBlock_destroy(rcb);
             } else {
-                fprintf(stderr, "[ied_model_online_loader] WARN: getRCBValues failed for '%s' (error %d) - "
+                SS_LOG_WARN("[ied_model_online_loader] WARN: getRCBValues failed for '%s' (error %d) - "
                         "created with no dataset/confRev info\n", rcbRef, rcbErr);
             }
             free(rcbRef);
@@ -432,7 +433,7 @@ buildGooseControlBlocks(IedConnection conn, const char* lnRef, LogicalNode* ln, 
 
                 ClientGooseControlBlock_destroy(gocb);
             } else {
-                fprintf(stderr, "[ied_model_online_loader] WARN: getGoCBValues failed for '%s' (error %d) - "
+                SS_LOG_WARN("[ied_model_online_loader] WARN: getGoCBValues failed for '%s' (error %d) - "
                         "created with no dataset/confRev/address info\n", gcbDotRef, gcbErr);
             }
             appIdHex = buildAppIdHex(addr.appId);
@@ -479,7 +480,7 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
     IedClientError err = IED_ERROR_OK;
     uint64_t ldListStartMs = Hal_getTimeInMs();
     LinkedList ldNames = IedConnection_getLogicalDeviceList(conn, &err);
-    fprintf(stderr, "[ied_model_online_loader] LD list -> %s, %d LD(s) (%llums)\n",
+    SS_LOG_DEBUG("[ied_model_online_loader] LD list -> %s, %d LD(s) (%llums)\n",
             ldNames ? "ok" : "failed", ldNames ? LinkedList_size(ldNames) : 0,
             (unsigned long long) (Hal_getTimeInMs() - ldListStartMs));
     if (!ldNames || LinkedList_size(ldNames) == 0) {
@@ -527,7 +528,7 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
         IedClientError lnErr = IED_ERROR_OK;
         uint64_t lnDirStartMs = Hal_getTimeInMs();
         LinkedList lnNames = IedConnection_getLogicalDeviceDirectory(conn, &lnErr, ldName);
-        fprintf(stderr, "[ied_model_online_loader] LD '%s' LN directory -> %s, %d LN(s) (%llums)\n",
+        SS_LOG_DEBUG("[ied_model_online_loader] LD '%s' LN directory -> %s, %d LN(s) (%llums)\n",
                 ldName, lnNames ? "ok" : "failed", lnNames ? LinkedList_size(lnNames) : 0,
                 (unsigned long long) (Hal_getTimeInMs() - lnDirStartMs));
         if (lnNames) {
@@ -559,7 +560,7 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
                     buildReportControlBlocks(conn, lnRef, ln, ACSI_CLASS_BRCB, true, builtDatasets);
                     buildReportControlBlocks(conn, lnRef, ln, ACSI_CLASS_URCB, false, builtDatasets);
                     buildGooseControlBlocks(conn, lnRef, ln, builtDatasets);
-                    fprintf(stderr, "[ied_model_online_loader] LN '%s' built (%llums)\n", lnRef,
+                    SS_LOG_DEBUG("[ied_model_online_loader] LN '%s' built (%llums)\n", lnRef,
                             (unsigned long long) (Hal_getTimeInMs() - lnStartMs));
                     free(lnRef);
                 }
@@ -568,7 +569,7 @@ IedModelOnlineLoaderConnection_build(IedConnection conn, const char* iedName,
             }
             LinkedList_destroyDeep(lnNames, free);
         } else {
-            fprintf(stderr, "[ied_model_online_loader] WARN: getLogicalDeviceDirectory failed for '%s' "
+            SS_LOG_WARN("[ied_model_online_loader] WARN: getLogicalDeviceDirectory failed for '%s' "
                     "(error %d) - this logical device will have no logical nodes\n", ldName, lnErr);
         }
 
@@ -610,7 +611,7 @@ IedModelOnlineLoaderConnection_connectAndBuild(const char* host, int port, const
     IedClientError connectErr = IED_ERROR_OK;
     uint64_t connectStartMs = Hal_getTimeInMs();
     IedConnection_connect(conn, &connectErr, host, port);
-    fprintf(stderr, "[ied_model_online_loader] mms connect %s:%d -> %s (%llums)\n", host, port,
+    SS_LOG_DEBUG("[ied_model_online_loader] mms connect %s:%d -> %s (%llums)\n", host, port,
             connectErr == IED_ERROR_OK ? "ok" : "failed",
             (unsigned long long) (Hal_getTimeInMs() - connectStartMs));
     if (connectErr != IED_ERROR_OK) {
@@ -621,7 +622,7 @@ IedModelOnlineLoaderConnection_connectAndBuild(const char* host, int port, const
 
     uint64_t buildStartMs = Hal_getTimeInMs();
     IedModel* model = IedModelOnlineLoaderConnection_build(conn, iedName, config, outLnCategories, outError);
-    fprintf(stderr, "[ied_model_online_loader] %s:%d discovery build done, model=%s (%llums)\n", host,
+    SS_LOG_DEBUG("[ied_model_online_loader] %s:%d discovery build done, model=%s (%llums)\n", host,
             port, model ? "ok" : "failed", (unsigned long long) (Hal_getTimeInMs() - buildStartMs));
 
     /* One-shot: nothing to keep this association open for once discovery is

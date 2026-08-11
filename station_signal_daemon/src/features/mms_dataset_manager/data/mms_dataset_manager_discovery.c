@@ -5,6 +5,7 @@
 #include "features/mms_dataset_manager/data/mms_dataset_manager_naming.h"
 #include "features/mms_dataset_manager/domain/mms_dataset_manager_usecases.h"
 #include "features/mms_dataset_manager/utils/mms_dataset_manager_utils.h"
+#include "log.h"
 
 LinkedList
 MmsDatasetManagerDiscovery_findExistingServerDatasets(MmsDatasetManagerHandle handle) {
@@ -41,7 +42,7 @@ MmsDatasetManagerDiscovery_findExistingServerDatasets(MmsDatasetManagerHandle ha
              * refused contributes nothing to either the budget correction or
              * the adoption pool, which then looks identical to an LD that
              * genuinely holds no datasets at all. */
-            fprintf(stderr, "[mms_dataset_manager] could not list datasets under LD '%s': %s (%d) - this LD "
+            SS_LOG_WARN("[mms_dataset_manager] could not list datasets under LD '%s': %s (%d) - this LD "
                     "contributes nothing to the budget correction or the adoption pool\n",
                     ldName, IedClientError_toString(err), err);
             continue;
@@ -60,9 +61,9 @@ MmsDatasetManagerDiscovery_findExistingServerDatasets(MmsDatasetManagerHandle ha
             snprintf(full, fullLen, "%s/%s", ldName, mmsName);
             LinkedList_add(existing, full);
             perLdCount++;
-            fprintf(stderr, "[mms_dataset_manager]   existing dataset on server: '%s'\n", full);
+            SS_LOG_DEBUG("[mms_dataset_manager]   existing dataset on server: '%s'\n", full);
         }
-        fprintf(stderr, "[mms_dataset_manager] LD '%s' holds %d existing dataset(s)\n", ldName, perLdCount);
+        SS_LOG_DEBUG("[mms_dataset_manager] LD '%s' holds %d existing dataset(s)\n", ldName, perLdCount);
         LinkedList_destroyDeep(mmsNames, free);
     }
 
@@ -95,7 +96,7 @@ MmsDatasetManagerDiscovery_findExistingServerDatasets(MmsDatasetManagerHandle ha
             }
         }
         if (sclKnown) {
-            fprintf(stderr, "[mms_dataset_manager] excluding '%s' from the adoption pool - our own model says it "
+            SS_LOG_DEBUG("[mms_dataset_manager] excluding '%s' from the adoption pool - our own model says it "
                     "is a DIFFERENT RCB's SCL-declared static datSet, so adopting it would duplicate coverage "
                     "instead of adding any\n", candidate);
             LinkedList_remove(existing, candidate);
@@ -103,7 +104,7 @@ MmsDatasetManagerDiscovery_findExistingServerDatasets(MmsDatasetManagerHandle ha
         }
     }
 
-    fprintf(stderr, "[mms_dataset_manager] discovery complete: %d existing dataset(s) already on the server "
+    SS_LOG_DEBUG("[mms_dataset_manager] discovery complete: %d existing dataset(s) already on the server "
             "across this client's own LD(s), available as adoption candidates and as the ConfDataSet budget "
             "correction\n", LinkedList_size(existing));
 
@@ -119,14 +120,14 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
      * indistinguishable from tier 2 never having been consulted at all - the
      * log jumped straight from "resolving" to whatever tier 3/4 did next. */
     if (!liveDataset || liveDataset[0] == '\0') {
-        fprintf(stderr, "[mms_dataset_manager] tier 2 (pull live) for '%s': device has no DatSet assigned to this "
+        SS_LOG_DEBUG("[mms_dataset_manager] tier 2 (pull live) for '%s': device has no DatSet assigned to this "
                 "RCB right now - falling through\n", target->objectReference);
         return false;
     }
-    fprintf(stderr, "[mms_dataset_manager] tier 2 (pull live) for '%s': device reports DatSet='%s'\n",
+    SS_LOG_DEBUG("[mms_dataset_manager] tier 2 (pull live) for '%s': device reports DatSet='%s'\n",
             target->objectReference, liveDataset);
     if (MmsDatasetManagerNaming_looksLikeOurOwnName(liveDataset, target)) {
-        fprintf(stderr, "[mms_dataset_manager] tier 2 (pull live) for '%s': '%s' is this client's own "
+        SS_LOG_DEBUG("[mms_dataset_manager] tier 2 (pull live) for '%s': '%s' is this client's own "
                 "association-scoped name from a PRIOR connection and is already destroyed server-side - "
                 "dangling, falling through\n", target->objectReference, liveDataset);
         return false;
@@ -136,7 +137,7 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
     bool isDeletable = false;
     LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, liveDataset, &isDeletable);
     if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] live-assigned dataset '%s' for '%s' could not be resolved: %s (%d) "
+        SS_LOG_WARN("[mms_dataset_manager] live-assigned dataset '%s' for '%s' could not be resolved: %s (%d) "
                 "- will create our own instead\n", liveDataset, target->objectReference,
                 IedClientError_toString(err), err);
         if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
@@ -156,7 +157,7 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
         if (memberRef) {
             LinkedList_add(wireRefs, memberRef);
         } else {
-            fprintf(stderr, "[mms_dataset_manager] could not convert live dataset member '%s' "
+            SS_LOG_WARN("[mms_dataset_manager] could not convert live dataset member '%s' "
                     "(dataset '%s') to wire form - member skipped\n", acsiRef, liveDataset);
         }
         element = LinkedList_getNext(element);
@@ -164,13 +165,13 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
     LinkedList_destroyDeep(acsiMembers, free);
 
     if (LinkedList_size(wireRefs) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] live-assigned dataset '%s' for '%s' had no wire-convertible "
+        SS_LOG_DEBUG("[mms_dataset_manager] live-assigned dataset '%s' for '%s' had no wire-convertible "
                 "members - will create our own instead\n", liveDataset, target->objectReference);
         LinkedList_destroyDeep(wireRefs, free);
         return false;
     }
 
-    fprintf(stderr, "[mms_dataset_manager] reusing live-assigned dataset '%s' for '%s' (%d member(s))\n",
+    SS_LOG_DEBUG("[mms_dataset_manager] reusing live-assigned dataset '%s' for '%s' (%d member(s))\n",
             liveDataset, target->objectReference, LinkedList_size(wireRefs));
     /* The real decode shape every report on this RCB will be interpreted
      * against (the caller rebuilds its member cache from exactly this list) -
@@ -182,7 +183,7 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
     for (LinkedList pulledElement = LinkedList_getNext(wireRefs); pulledElement;
             pulledElement = LinkedList_getNext(pulledElement)) {
         pulledIndex++;
-        fprintf(stderr, "[mms_dataset_manager]   pulled member[%d/%d] of '%s': %s\n",
+        SS_LOG_DEBUG("[mms_dataset_manager]   pulled member[%d/%d] of '%s': %s\n",
                 pulledIndex, pulledCount, liveDataset, (char*) LinkedList_getData(pulledElement));
     }
 
@@ -209,14 +210,14 @@ MmsDatasetManagerDiscovery_pullLiveDataset(MmsDatasetManagerHandle handle, Repor
 static bool
 tryAdoptCandidate(MmsDatasetManagerHandle handle, ReportControlBlockTarget* target,
         MmsDatasetManagerSession* session, const char* candidate, LinkedList* outMemberRefs) {
-    fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) for '%s': considering candidate '%s'\n",
+    SS_LOG_DEBUG("[mms_dataset_manager] tier 3 (adopt) for '%s': considering candidate '%s'\n",
             target->objectReference, candidate);
 
     IedClientError err = IED_ERROR_OK;
     bool isDeletable = false;
     LinkedList acsiMembers = IedConnection_getDataSetDirectory(handle->connection, &err, candidate, &isDeletable);
     if (!acsiMembers || LinkedList_size(acsiMembers) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] discovered dataset '%s' could not be resolved: %s (%d) - "
+        SS_LOG_WARN("[mms_dataset_manager] discovered dataset '%s' could not be resolved: %s (%d) - "
                 "skipping as an adoption candidate\n", candidate, IedClientError_toString(err), err);
         if (acsiMembers) LinkedList_destroyDeep(acsiMembers, free);
         LinkedList_add(session->claimedDatasetNames, MmsDatasetManagerUtils_safeStringDup(candidate));
@@ -239,14 +240,14 @@ tryAdoptCandidate(MmsDatasetManagerHandle handle, ReportControlBlockTarget* targ
     LinkedList_destroyDeep(acsiMembers, free);
 
     if (LinkedList_size(wireRefs) == 0) {
-        fprintf(stderr, "[mms_dataset_manager] discovered dataset '%s' had no wire-convertible members - "
+        SS_LOG_DEBUG("[mms_dataset_manager] discovered dataset '%s' had no wire-convertible members - "
                 "skipping as an adoption candidate\n", candidate);
         LinkedList_destroyDeep(wireRefs, free);
         LinkedList_add(session->claimedDatasetNames, MmsDatasetManagerUtils_safeStringDup(candidate));
         return false;
     }
 
-    fprintf(stderr, "[mms_dataset_manager] adopting existing dataset '%s' for '%s' (%d member(s), deletable=%d) - "
+    SS_LOG_DEBUG("[mms_dataset_manager] adopting existing dataset '%s' for '%s' (%d member(s), deletable=%d) - "
             "reused instead of self-creating\n", candidate, target->objectReference, LinkedList_size(wireRefs),
             isDeletable);
     /* Same reasoning as pullLiveDataset's own member dump - this list becomes
@@ -257,7 +258,7 @@ tryAdoptCandidate(MmsDatasetManagerHandle handle, ReportControlBlockTarget* targ
     for (LinkedList adoptedElement = LinkedList_getNext(wireRefs); adoptedElement;
             adoptedElement = LinkedList_getNext(adoptedElement)) {
         adoptedIndex++;
-        fprintf(stderr, "[mms_dataset_manager]   adopted member[%d/%d] of '%s': %s\n",
+        SS_LOG_DEBUG("[mms_dataset_manager]   adopted member[%d/%d] of '%s': %s\n",
                 adoptedIndex, adoptedCount, candidate, (char*) LinkedList_getData(adoptedElement));
     }
 
@@ -274,7 +275,7 @@ MmsDatasetManagerDiscovery_adoptUnclaimedDataset(MmsDatasetManagerHandle handle,
 
     char* slash = strchr(target->lnReference, '/');
     if (!slash) {
-        fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) unavailable for '%s': LN reference '%s' has no '/', "
+        SS_LOG_WARN("[mms_dataset_manager] tier 3 (adopt) unavailable for '%s': LN reference '%s' has no '/', "
                 "so its LD cannot be determined\n", target->objectReference, target->lnReference);
         return NULL;
     }
@@ -289,12 +290,12 @@ MmsDatasetManagerDiscovery_adoptUnclaimedDataset(MmsDatasetManagerHandle handle,
                 element = LinkedList_getNext(element);
                 if (strcmp(candidate, ownName) != 0) continue;
                 if (MmsDatasetManagerNaming_stringListContains(session->claimedDatasetNames, candidate)) {
-                    fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) for '%s': its own previous name '%s' is "
+                    SS_LOG_DEBUG("[mms_dataset_manager] tier 3 (adopt) for '%s': its own previous name '%s' is "
                             "on the server but was already claimed this cycle - falling through to the "
                             "LD-wide scan\n", target->objectReference, candidate);
                     break;
                 }
-                fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) for '%s': found its OWN previous dataset "
+                SS_LOG_DEBUG("[mms_dataset_manager] tier 3 (adopt) for '%s': found its OWN previous dataset "
                         "name '%s' among the discovered candidates - preferring it over the LD-wide scan\n",
                         target->objectReference, candidate);
                 if (tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) {
@@ -316,7 +317,7 @@ MmsDatasetManagerDiscovery_adoptUnclaimedDataset(MmsDatasetManagerHandle handle,
         if (strncmp(candidate, target->lnReference, ldLen) != 0 || candidate[ldLen] != '/') continue;
         consideredCandidates++;
         if (MmsDatasetManagerNaming_stringListContains(session->claimedDatasetNames, candidate)) {
-            fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) for '%s': candidate '%s' already claimed by "
+            SS_LOG_DEBUG("[mms_dataset_manager] tier 3 (adopt) for '%s': candidate '%s' already claimed by "
                     "another target this cycle - skipping\n", target->objectReference, candidate);
             continue;
         }
@@ -324,7 +325,7 @@ MmsDatasetManagerDiscovery_adoptUnclaimedDataset(MmsDatasetManagerHandle handle,
         if (tryAdoptCandidate(handle, target, session, candidate, outMemberRefs)) return candidate;
     }
 
-    fprintf(stderr, "[mms_dataset_manager] tier 3 (adopt) found nothing usable for '%s': %d candidate(s) exist "
+    SS_LOG_DEBUG("[mms_dataset_manager] tier 3 (adopt) found nothing usable for '%s': %d candidate(s) exist "
             "under its LD, all already claimed or unusable - falling through to self-create\n",
             target->objectReference, consideredCandidates);
     return NULL;

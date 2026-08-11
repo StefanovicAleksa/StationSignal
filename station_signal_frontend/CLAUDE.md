@@ -23,6 +23,15 @@ Devices, Reports, Settings) over three Pinia stores (`devices`, `scan`, `setting
 surface is deliberately minimal — no axios (raw `fetch`), no date library, no UI kit, no i18n
 library. Keep it that way absent a real reason.
 
+## Logging
+`console.*` is never called directly — go through `logger` (`src/utils/logger.ts`). `debug()` is
+a no-op unless the bundle was built in dev mode (`VITE_STATION_SIGNAL_MODE=dev`, set by
+`../deploy/setup.sh dev`, OR'd with Vite's own `import.meta.env.DEV` so `pnpm dev` and Vitest are
+always verbose); `warn()`/`error()` always pass through. The mode mirrors the one the API and
+daemon run in — see `../deploy/README.md`. It resolves at build time, so a prod bundle contains
+no `console.debug` call at all rather than a suppressed one; that also means changing an installed
+box's mode only affects this half after a rebuild.
+
 ## Internationalization
 Every user-facing string goes through `t()` from `src/i18n`. Two locales: English and Serbian
 (Latin script). There is no i18n library — `src/i18n/index.ts` is a small singleton composable

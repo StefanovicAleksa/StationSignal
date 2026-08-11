@@ -6,6 +6,7 @@
 #include "features/ied_model/domain/ied_model_usecases.h"
 #include "features/ied_model/utils/ied_model_ln_category.h"
 #include "iec61850_dynamic_model.h"
+#include "log.h"
 
 static char*
 copyString(const char* s) {
@@ -358,7 +359,7 @@ IedModel_destroyGooseSubscriptionTarget(void* target) {
 LinkedList
 IedModel_getReadTargets(IedModelHandle handle) {
     if (handle->accessMode == IED_MODEL_ACCESS_REPORT_ONLY) {
-        fprintf(stderr, "[ied_model] read targets denied: handle for '%s' is REPORT_ONLY\n", handle->iedName);
+        SS_LOG_WARN("[ied_model] read targets denied: handle for '%s' is REPORT_ONLY\n", handle->iedName);
         return LinkedList_create();
     }
     return IedModelUseCases_getReadTargets(handle);
@@ -367,7 +368,7 @@ IedModel_getReadTargets(IedModelHandle handle) {
 LinkedList
 IedModel_getControlTargets(IedModelHandle handle) {
     if (handle->accessMode != IED_MODEL_ACCESS_READ_AND_WRITE) {
-        fprintf(stderr, "[ied_model] control targets denied: handle for '%s' is not READ_AND_WRITE\n",
+        SS_LOG_WARN("[ied_model] control targets denied: handle for '%s' is not READ_AND_WRITE\n",
                 handle->iedName);
         return LinkedList_create();
     }

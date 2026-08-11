@@ -10,6 +10,7 @@ import {
 } from '@/services/settingsApi'
 import { ApiError } from '@/types/api'
 import type { NetworkConfig, NetworkStatus } from '@/types/api'
+import { logger } from '@/utils/logger'
 import type { ProbeOutcome } from '@/services/settingsApi'
 import { t } from '@/i18n'
 
@@ -157,8 +158,10 @@ export const useSettingsStore = defineStore('settings', () => {
 
     const attempt: PollAttempt = { at: Date.now(), origin, ...result }
     pollLog.value = [...pollLog.value, attempt].slice(-MAX_POLL_LOG)
-    // Mirrored to the console so a failing run can be copied out of devtools wholesale.
-    console.warn('[station-signal] reconnect probe', attempt)
+    // Mirrored to the console so a failing run can be copied out of devtools wholesale. Debug,
+    // so a prod build stays quiet — pollLog is the real record either way, and the Settings page
+    // renders it.
+    logger.debug('[station-signal] reconnect probe', attempt)
 
     if (phase.value !== 'waitingForReconnect') return
 

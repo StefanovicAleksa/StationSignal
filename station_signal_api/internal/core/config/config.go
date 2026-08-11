@@ -1,18 +1,36 @@
 // Package config parses this process's own startup configuration — the daemon binary it
-// supervises, its own HTTP listen address, and log verbosity. It has nothing to do with the
-// daemon's wire contract (see daemonproto for that).
+// supervises, its own HTTP listen address, which deployment mode it runs in, and log verbosity.
+// It has nothing to do with the daemon's wire contract (see daemonproto for that).
 package config
 
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 )
 
+// Mode is which of the two deployment postures this process runs in. It is the single knob the
+// whole stack's verbosity hangs off: deploy/setup.sh takes it as its one argument, persists it to
+// /etc/station-signal/station-signal.env, and every process derives its own logging from it.
+type Mode string
+
+const (
+	// ModeDev is a workstation or an on-site box being actively debugged: debug logging on, plus
+	// the per-request HTTP access log.
+	ModeDev Mode = "dev"
+	// ModeProd is an unattended substation deployment: no debug logging anywhere, no access log.
+	ModeProd Mode = "prod"
+)
+
 // Config holds station_signal_api's startup configuration.
 type Config struct {
+	// Mode is "dev" or "prod" — see Mode. Defaults to prod: an install that never says which it
+	// wants is a deployment, and the quiet setting is the safe one to guess.
+	Mode Mode
+
 	// DaemonBinPath is the path to an already-built station_signal_daemon binary. This process
 	// never builds the daemon itself — see station_signal_api/CLAUDE.md's "Build vs. prebuilt
 	// binary" decision.
@@ -21,7 +39,9 @@ type Config struct {
 	// HTTPAddr is the address this API's own HTTP server listens on, e.g. ":8080".
 	HTTPAddr string
 
-	// LogLevel is one of "debug", "info", "warn", "error".
+	// LogLevel is one of "debug", "info", "warn", "error". Normally left unset and derived from
+	// Mode (dev → debug, prod → info); setting it explicitly overrides that, for turning one
+	// deployed box up or down without changing what mode it is in.
 	LogLevel string
 
 	// StructureFileDir is the directory (on this process's own host) where uploaded
@@ -47,8 +67,11 @@ func Load(args []string) (Config, error) {
 		"path to the prebuilt station_signal_daemon binary (required)")
 	httpAddr := fs.String("http-addr", envOrDefault("STATION_SIGNAL_API_HTTP_ADDR", ":8080"),
 		"address for this API's own HTTP server to listen on")
-	logLevel := fs.String("log-level", envOrDefault("STATION_SIGNAL_API_LOG_LEVEL", "info"),
-		"log level: debug, info, warn, error")
+	mode := fs.String("mode", envOrDefault("STATION_SIGNAL_MODE", string(ModeProd)),
+		"deployment mode: dev (debug logging + HTTP access log) or prod (neither)")
+	// Empty means "derive from mode" — the two are resolved together below.
+	logLevel := fs.String("log-level", envOrDefault("STATION_SIGNAL_API_LOG_LEVEL", ""),
+		"log level: debug, info, warn, error (defaults to debug in dev mode, info in prod)")
 	structureFileDir := fs.String("structure-file-dir", envOrDefault("STATION_SIGNAL_API_STRUCTURE_FILE_DIR", defaultStructureFileDir()),
 		"directory where uploaded SCL/ICD/CID structure files are stored")
 	netconfigHelperPath := fs.String("netconfig-helper", envOrDefault("STATION_SIGNAL_API_NETCONFIG_HELPER", "/opt/station_signal/bin/station-signal-netconfig.sh"),
@@ -60,10 +83,24 @@ func Load(args []string) (Config, error) {
 		return Config{}, err
 	}
 
+	resolvedMode := Mode(*mode)
+	if resolvedMode != ModeDev && resolvedMode != ModeProd {
+		return Config{}, fmt.Errorf("invalid mode %q: expected %q or %q", *mode, ModeDev, ModeProd)
+	}
+
+	resolvedLogLevel := *logLevel
+	if resolvedLogLevel == "" {
+		resolvedLogLevel = "info"
+		if resolvedMode == ModeDev {
+			resolvedLogLevel = "debug"
+		}
+	}
+
 	cfg := Config{
+		Mode:                          resolvedMode,
 		DaemonBinPath:                 *daemonBinPath,
 		HTTPAddr:                      *httpAddr,
-		LogLevel:                      *logLevel,
+		LogLevel:                      resolvedLogLevel,
 		StructureFileDir:              *structureFileDir,
 		NetconfigHelperPath:           *netconfigHelperPath,
 		NetconfigRevertTimeoutSeconds: *netconfigRevertTimeoutSeconds,
@@ -77,6 +114,22 @@ func Load(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// SlogLevel maps LogLevel onto slog's own level type. An unrecognized value falls back to Info
+// rather than erroring — same lenient posture as envIntOrDefault, and a typo here must not be
+// able to silence logging altogether.
+func (c Config) SlogLevel() slog.Level {
+	switch c.LogLevel {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func envOrDefault(key, def string) string {

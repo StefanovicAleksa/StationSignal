@@ -6,6 +6,7 @@
 #include "features/mms_dataset_manager/data/mms_dataset_manager_provisioning.h"
 #include "features/mms_dataset_manager/domain/mms_dataset_manager_usecases.h"
 #include "features/mms_dataset_manager/utils/mms_dataset_manager_utils.h"
+#include "log.h"
 
 MmsDatasetManagerHandle
 MmsDatasetManager_create(IedModelHandle iedModel, IedConnection connection, LinkedList targets,
@@ -86,9 +87,9 @@ MmsDatasetManager_beginCycle(MmsDatasetManagerHandle handle) {
      * counting per-RCB "resolved via none"/error 99 lines across a whole log
      * capture - exactly the reconstruction this codebase's own real-device
      * investigations have had to do by hand. */
-    fprintf(stderr, "[mms_dataset_manager] DynDataSet budget this cycle: SCL declares max=%d, starting budget=%d "
+    SS_LOG_DEBUG("[mms_dataset_manager] DynDataSet budget this cycle: SCL declares max=%d, starting budget=%d "
             "(uncorrected - not discoverable ahead of time)\n", sclDynMax, handle->session.remainingDynBudget);
-    fprintf(stderr, "[mms_dataset_manager] ConfDataSet budget this cycle: SCL declares max=%d, %d already exist "
+    SS_LOG_DEBUG("[mms_dataset_manager] ConfDataSet budget this cycle: SCL declares max=%d, %d already exist "
             "on server, starting budget=%d\n", sclConfMax, existingCount, handle->session.remainingConfBudget);
 }
 
@@ -212,7 +213,7 @@ MmsDatasetManager_endCycle(MmsDatasetManagerHandle handle, bool runOrphanCleanup
     int leakedThisCycle = 0;
     if (runOrphanCleanup) MmsDatasetManagerProvisioning_cleanupOrphaned(handle, &leakedThisCycle);
     if (leakedThisCycle > 0) {
-        fprintf(stderr, "[mms_dataset_manager] %d domain-scoped dataset(s) could not be reclaimed this cycle "
+        SS_LOG_WARN("[mms_dataset_manager] %d domain-scoped dataset(s) could not be reclaimed this cycle "
                 "(server denied deletion) - permanently spent against this device's dataset quota until a "
                 "device-side reset\n", leakedThisCycle);
     }

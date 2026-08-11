@@ -4,6 +4,7 @@
 #include "hal_time.h"
 #include "features/control_dispatcher/data/control_dispatcher_worker.h"
 #include "features/control_dispatcher/domain/control_dispatcher_usecases.h"
+#include "log.h"
 
 struct sControlDispatcherWorker {
     ControlDispatcherRequestQueue queue;   /* borrowed */
@@ -36,7 +37,7 @@ workerLoop(void* parameter) {
         uint64_t requestStartMs = Hal_getTimeInMs();
         char* json = ControlDispatcherUseCases_processRequest(request, worker->deviceManager,
                 worker->scanOrchestration);
-        fprintf(stderr, "[control_dispatcher] request %s type=%d done (%llums)\n", request->requestId,
+        SS_LOG_DEBUG("[control_dispatcher] request %s type=%d done (%llums)\n", request->requestId,
                 (int) request->type, (unsigned long long) (Hal_getTimeInMs() - requestStartMs));
         ControlDispatcherRequest_destroy(request);
 

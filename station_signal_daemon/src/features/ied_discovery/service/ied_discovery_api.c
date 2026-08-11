@@ -6,6 +6,7 @@
 #include "features/ied_discovery/data/ied_discovery_mms_probe.h"
 #include "features/ied_discovery/utils/ied_discovery_utils.h"
 #include "features/scl_bootstrap/service/scl_bootstrap_api.h"
+#include "log.h"
 
 void
 IedDiscoveryConfig_defaults(IedDiscoveryConfig* config) {
@@ -116,7 +117,7 @@ IedDiscovery_scanSubnet(IedDiscoveryHandle handle, const char* interfaceId, int 
      * wrong subnet (see ied_discovery_netif.c's address-selection comment) was indistinguishable
      * from "there are no devices here" - same empty result, no error, no output. */
     uint32_t network = IedDiscoveryCidr_networkAddress(address, netmask);
-    printf("[scan] sweeping %u.%u.%u.%u/%u on %s (%u hosts)\n",
+    SS_LOG_INFO("[scan] sweeping %u.%u.%u.%u/%u on %s (%u hosts)\n",
             (network >> 24) & 0xFF, (network >> 16) & 0xFF, (network >> 8) & 0xFF, network & 0xFF,
             IedDiscoveryCidr_prefixLength(netmask), interfaceId, IedDiscoveryCidr_hostCount(netmask));
     fflush(stdout);

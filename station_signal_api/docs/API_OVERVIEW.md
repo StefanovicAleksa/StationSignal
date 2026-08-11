@@ -53,7 +53,7 @@ domain/data/service split, holding what every feature's `data/` layer depends on
 | `daemonproto` | Go structs for the daemon's JSON wire contract (control envelopes, stream messages, error codes) |
 | `daemonclient` | the single long-lived control-channel connection, request/response correlation by `requestId` |
 | `streamrelay` | `Hub`: fans one daemon-side push-only stream out to N frontend subscribers, drop-not-queue on backpressure |
-| `config` | startup flags/env (daemon binary path, HTTP listen address, log level, structure file storage dir) |
+| `config` | startup flags/env (daemon binary path, HTTP listen address, deployment mode, log level, structure file storage dir) |
 | `structurefiles` | saves uploaded SCL/ICD/CID files to local disk for `POST /api/structure-files`; no daemon interaction — the returned path is read by the daemon directly, since it always runs on the same box |
 
 `internal/controllers/{rest,ws}` is the HTTP/WS handler layer — not itself a "feature" — that
@@ -92,6 +92,31 @@ http.Server.ListenAndServe()
 <block on SIGINT/SIGTERM>
 httpServer.Shutdown() -> <-supervisorDone
 ```
+
+## Logging and deployment mode
+
+One `*slog.Logger` is built in `main.go` and threaded by value into every constructor. Its level
+comes from a `slog.LevelVar` set right after `config.Load` — the logger has to exist first, since a
+config error is reported through it.
+
+`STATION_SIGNAL_MODE` (`dev` | `prod`, default `prod`, `-mode` flag, written by `deploy/setup.sh`
+into `/etc/station-signal/station-signal.env`) is the single knob:
+
+| | dev | prod |
+|---|---|---|
+| this process's slog level | debug | info |
+| chi's per-request access log | on | off |
+| daemon's `STATION_SIGNAL_LOG_LEVEL` | debug | info |
+
+`STATION_SIGNAL_API_LOG_LEVEL` / `-log-level` overrides the level the mode implies, for this
+process alone. Two things worth knowing:
+
+- chi's `middleware.Logger` writes through its own `log.Logger`, outside slog entirely, so no slog
+  level can quiet it. `rest.Router` registers it only when the logger has debug enabled.
+- `supervision/data.Spawn` sets `STATION_SIGNAL_LOG_LEVEL` on the child explicitly rather than
+  letting it inherit, because `run_dev.sh` starts this process under `sudo`, which scrubs the
+  environment. The daemon emits most of the combined log volume, so its level is the one that
+  actually determines how fast that file grows.
 
 ## Ports this API talks to (all on the daemon side, never exposed to the frontend directly)
 

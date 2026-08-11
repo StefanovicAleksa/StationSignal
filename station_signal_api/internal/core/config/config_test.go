@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,8 +53,73 @@ func TestLoad_DefaultsWhenNeitherFlagNorEnvSet(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, ":8080", cfg.HTTPAddr)
+	assert.Equal(t, ModeProd, cfg.Mode)
 	assert.Equal(t, "info", cfg.LogLevel)
 	assert.NotEmpty(t, cfg.StructureFileDir)
+}
+
+// The mode is the only knob deploy/setup.sh sets; the level it implies is what actually silences
+// (or restores) debug logging in this process and in the daemon it spawns.
+func TestLoad_ModeDerivesTheLogLevel(t *testing.T) {
+	bin := fakeBinary(t)
+
+	tests := []struct {
+		args      []string
+		wantMode  Mode
+		wantLevel string
+		wantSlog  slog.Level
+	}{
+		{[]string{"-mode", "dev"}, ModeDev, "debug", slog.LevelDebug},
+		{[]string{"-mode", "prod"}, ModeProd, "info", slog.LevelInfo},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.wantMode), func(t *testing.T) {
+			cfg, err := Load(append([]string{"-daemon-bin", bin}, tt.args...))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantMode, cfg.Mode)
+			assert.Equal(t, tt.wantLevel, cfg.LogLevel)
+			assert.Equal(t, tt.wantSlog, cfg.SlogLevel())
+		})
+	}
+}
+
+func TestLoad_ModeFallsBackToEnv(t *testing.T) {
+	bin := fakeBinary(t)
+	t.Setenv("STATION_SIGNAL_MODE", "dev")
+
+	cfg, err := Load([]string{"-daemon-bin", bin})
+
+	require.NoError(t, err)
+	assert.Equal(t, ModeDev, cfg.Mode)
+	assert.Equal(t, "debug", cfg.LogLevel)
+}
+
+// An explicit level is the escape hatch for turning one box up or down without changing its mode.
+func TestLoad_ExplicitLogLevelOverridesTheModeDefault(t *testing.T) {
+	bin := fakeBinary(t)
+
+	cfg, err := Load([]string{"-daemon-bin", bin, "-mode", "dev", "-log-level", "error"})
+
+	require.NoError(t, err)
+	assert.Equal(t, ModeDev, cfg.Mode)
+	assert.Equal(t, "error", cfg.LogLevel)
+	assert.Equal(t, slog.LevelError, cfg.SlogLevel())
+}
+
+func TestLoad_RejectsUnknownMode(t *testing.T) {
+	bin := fakeBinary(t)
+
+	_, err := Load([]string{"-daemon-bin", bin, "-mode", "staging"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "staging")
+}
+
+// A typo must not be able to turn logging off altogether.
+func TestSlogLevel_UnrecognizedLevelFallsBackToInfo(t *testing.T) {
+	assert.Equal(t, slog.LevelInfo, Config{LogLevel: "verbose"}.SlogLevel())
 }
 
 func TestLoad_StructureFileDirFlagTakesPrecedenceOverEnv(t *testing.T) {

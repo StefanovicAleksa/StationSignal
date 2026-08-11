@@ -11,7 +11,20 @@
 # first place. avahi/mDNS doesn't care how a client got its address, so it works with zero
 # client-side setup either way.
 #
-# Usage: ./deploy/setup.sh   (run WITHOUT sudo — see below)
+# Usage: ./deploy/setup.sh [dev|prod]   (run WITHOUT sudo — see below)
+#
+#   prod  no debug logging anywhere: the API logs at info, the daemon it spawns logs at info, the
+#         frontend's debug console output is compiled out, and the per-request HTTP access log is
+#         off. This is what an unattended substation box wants — everything lands in one
+#         append-mode file with no logrotate in front of it.
+#   dev   debug logging in all three, plus the access log.
+#
+# The mode is persisted to /etc/station-signal/station-signal.env, so a later `./deploy/setup.sh`
+# with no argument redeploys in whatever mode was chosen last (prod on a first install). To flip
+# an already-installed box without rebuilding, edit that file and
+# `sudo systemctl restart station-signal-api` — note the frontend's own debug output is baked in
+# at build time, so only a re-run of this script changes that half.
+#
 # Safe to re-run: every install step overwrites in place rather than failing on "already exists."
 set -euo pipefail
 
@@ -22,6 +35,26 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "       script as root gives 'go'/'npm' sudo's sanitized PATH instead of yours," >&2
     echo "       which can resolve to a different (often too-old) toolchain — same pitfall" >&2
     echo "       documented in run_dev.sh." >&2
+    exit 1
+fi
+
+MODE_ENV_FILE="/etc/station-signal/station-signal.env"
+
+# No argument means "keep whatever this box is already running as", so a redeploy after a git pull
+# can't silently flip a dev box back to prod (or vice versa). First install with no argument gets
+# prod: an unattended deployment is the safe guess, and dev is always one explicit word away.
+if [ "$#" -gt 1 ]; then
+    echo "error: too many arguments. Usage: ./deploy/setup.sh [dev|prod]" >&2
+    exit 1
+fi
+MODE="${1:-}"
+if [ -z "$MODE" ] && [ -r "$MODE_ENV_FILE" ]; then
+    MODE="$(sed -n 's/^STATION_SIGNAL_MODE=//p' "$MODE_ENV_FILE" | tail -n1)"
+fi
+MODE="${MODE:-prod}"
+if [ "$MODE" != "dev" ] && [ "$MODE" != "prod" ]; then
+    echo "error: unknown mode '$MODE'." >&2
+    echo "       Usage: ./deploy/setup.sh [dev|prod]  (omit to keep the currently installed mode)" >&2
     exit 1
 fi
 
@@ -41,6 +74,8 @@ AVAHI_HOST_NAME="stationsignal"
 # (station_signal_api), which this must be kept in sync with by hand.
 RECOVERY_ADDR="169.254.1.1"
 RECOVERY_CIDR="$RECOVERY_ADDR/24"
+
+echo "==> Installing in $MODE mode (debug logging $([ "$MODE" = dev ] && echo on || echo off))"
 
 echo "==> Preflight: checking required tools"
 for tool in gcc go npm curl sudo ip sed nmcli visudo; do
@@ -82,7 +117,9 @@ echo "==> Building frontend"
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
     (cd "$FRONTEND_DIR" && npm install)
 fi
-(cd "$FRONTEND_DIR" && npm run build)
+# Baked in at build time (src/utils/logger.ts reads it): unlike the API and daemon, the frontend
+# can't pick up a mode change from the environment file at restart, only from a rebuild.
+(cd "$FRONTEND_DIR" && VITE_STATION_SIGNAL_MODE="$MODE" npm run build)
 
 echo "==> Installing artifacts to $INSTALL_ROOT"
 sudo mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/frontend-dist" "$INSTALL_ROOT/structure_files"
@@ -133,6 +170,12 @@ sudo mkdir -p /etc/station-signal "$INSTALL_ROOT/netconfig-state"
 # connection name ("Wired connection 1") has spaces — unquoted, that breaks the sourced
 # assignment into a bogus command invocation ("connection: command not found").
 printf 'CONNECTION_NAME=%q\n' "$CONNECTION_NAME" | sudo tee /etc/station-signal/netconfig.conf >/dev/null
+
+# The mode, persisted where systemd reads it (EnvironmentFile= in the unit below) and where the
+# next argument-less run of this script reads it back. The API turns it into its own log level and
+# into STATION_SIGNAL_LOG_LEVEL for the daemon it spawns.
+echo "==> Recording deployment mode ($MODE) in $MODE_ENV_FILE"
+printf 'STATION_SIGNAL_MODE=%s\n' "$MODE" | sudo tee "$MODE_ENV_FILE" >/dev/null
 # Always validate with `visudo -cf` against a staged copy before touching /etc/sudoers.d — a
 # malformed sudoers file can lock out sudo entirely.
 STAGED_SUDOERS="$(mktemp)"
@@ -203,6 +246,7 @@ echo "per-laptop setup (Windows 10/11, macOS, and Linux all resolve it natively)
 echo "Android browsers don't resolve .local names reliably — those can still reach the app via"
 echo "http://$BOX_IP directly (nginx's default_server)."
 echo ""
+echo "Mode: $MODE (debug logging $([ "$MODE" = dev ] && echo on || echo off)) — recorded in $MODE_ENV_FILE"
 echo "API + daemon logs (both interleaved): /var/log/station_signal/station-signal-api.log"
 echo ""
 echo "Verify:"

@@ -5,6 +5,7 @@
 #include "features/goose_subscriber/data/goose_subscriber_connection.h"
 #include "features/goose_subscriber/data/goose_subscriber_frame_adapter.h"
 #include "features/goose_subscriber/domain/goose_subscriber_usecases.h"
+#include "log.h"
 
 /* Sleeps in small chunks so GooseSubscriberConnection_stop()'s bounded wait
  * for the liveness thread to exit doesn't have to wait out a full poll
@@ -144,7 +145,7 @@ GooseSubscriberConnection_create(GooseSubscriberHandle handle) {
          * root-caused. Prints exactly the filter this repo applies per
          * target, straight from parsed SCL, for direct comparison against a
          * tshark capture of the live publisher's actual frames. */
-        fprintf(stderr, "[GOOSE_DIAG] target=%s hasAddress=%d dstMac=%02X-%02X-%02X-%02X-%02X-%02X appId=0x%04X vlanId=0x%04X\n",
+        SS_LOG_DEBUG("[GOOSE_DIAG] target=%s hasAddress=%d dstMac=%02X-%02X-%02X-%02X-%02X-%02X appId=0x%04X vlanId=0x%04X\n",
                 entry->target->objectReference, entry->target->hasAddress,
                 entry->target->dstMac[0], entry->target->dstMac[1], entry->target->dstMac[2],
                 entry->target->dstMac[3], entry->target->dstMac[4], entry->target->dstMac[5],

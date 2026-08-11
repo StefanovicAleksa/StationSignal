@@ -17,10 +17,18 @@ type Process struct {
 
 // Spawn starts the daemon binary at binPath and returns the Process handle plus a channel
 // that receives its exit error (nil for a clean exit) exactly once.
-func Spawn(binPath string, logger *slog.Logger) (*Process, <-chan error, error) {
+//
+// daemonLogLevel is exported into the child's environment as STATION_SIGNAL_LOG_LEVEL (the
+// daemon's only configuration input, read once at startup — see its src/log.h), so the daemon's
+// verbosity always matches this process's own. Set explicitly rather than relying on plain
+// inheritance because run_dev.sh launches this process under sudo, which scrubs the environment
+// — the daemon would silently fall back to its default and dev mode would produce no debug
+// output from the process that emits most of it.
+func Spawn(binPath string, daemonLogLevel string, logger *slog.Logger) (*Process, <-chan error, error) {
 	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "STATION_SIGNAL_LOG_LEVEL="+daemonLogLevel)
 
 	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("start daemon: %w", err)
