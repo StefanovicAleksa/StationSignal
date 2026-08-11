@@ -47,6 +47,15 @@ func (a *API) handleStartReporting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Uploaded structure files are swept once they go unreferenced for a while, and a device
+	// mid-start is not yet in the registry the sweep consults. Touching the file first restarts
+	// its clock, so a technician who browsed a file, got distracted, and only then hit Connect
+	// can't have it deleted between this request and the daemon reading it. A no-op for an
+	// sclFilePath that isn't one of our uploads (any path on the daemon's disk is legal).
+	if params.SCLFilePath != "" {
+		a.structureFiles.Touch(params.SCLFilePath)
+	}
+
 	device, err := a.reporting.Start(r.Context(), session.FromContext(r.Context()), params)
 	if err != nil {
 		a.writeError(w, classifyStartReportingError(err))

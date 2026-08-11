@@ -75,11 +75,16 @@ type mockStructureFileStore struct {
 	err  error
 
 	gotOriginalName string
+	touched         []string
 }
 
 func (m *mockStructureFileStore) Save(originalName string, r io.Reader) (string, error) {
 	m.gotOriginalName = originalName
 	return m.path, m.err
+}
+
+func (m *mockStructureFileStore) Touch(path string) {
+	m.touched = append(m.touched, path)
 }
 
 type mockNetworkService struct {

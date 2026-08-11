@@ -73,6 +73,24 @@ func main() {
 		logger.Error("failed to initialize structure file storage", "error", err)
 		os.Exit(1)
 	}
+	// Nothing can be referencing an upload yet — this process just started, so its device
+	// registry is empty and crash re-arm has nothing to replay — which makes startup the one
+	// moment the whole directory is provably disposable. Clears anything a kill -9 left behind.
+	if removed, err := structureFiles.Sweep(nil, 0); err != nil {
+		logger.Warn("could not clear leftover uploaded structure files at startup", "error", err)
+	} else if removed > 0 {
+		logger.Info("cleared leftover uploaded structure files at startup", "count", removed)
+	}
+	go structurefiles.RunJanitor(ctx, structureFiles, func() map[string]bool {
+		inUse := make(map[string]bool)
+		for _, d := range reportingSvc.Snapshot() {
+			if d.StartParams.SCLFilePath != "" {
+				inUse[d.StartParams.SCLFilePath] = true
+			}
+		}
+		return inUse
+	}, logger)
+
 	networkSvc := networksvc.New(
 		func() int { return len(reportingSvc.Snapshot()) },
 		func() int { return len(scanningSvc.Snapshot()) },

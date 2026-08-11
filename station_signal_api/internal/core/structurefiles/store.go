@@ -2,6 +2,11 @@
 // reporting device's sclFilePath. This API and the station_signal_daemon it supervises always run
 // on the same box (see station_signal_api/CLAUDE.md's single-box deployment model), so a path
 // returned here is one the daemon can read directly from its own filesystem.
+//
+// Storage is deliberately temporary. A real station SCD runs to tens of megabytes and the target
+// box is a Raspberry Pi with a fixed, small disk, so nothing uploaded here is kept once it has
+// stopped being useful — see Sweep for the exact retention rule and why anything has to be kept
+// at all.
 package structurefiles
 
 import (
@@ -13,7 +18,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// MaxUnreferencedAge is how long an uploaded file survives once nothing is using it. It only has
+// to cover the gap between the upload and the POST /api/devices that names it — the daemon parses
+// the file into memory during that one call and never reads it again ("it has zero purpose
+// afterward", per the daemon's own orchestration_api.c) — so this is generous already.
+const MaxUnreferencedAge = 30 * time.Minute
+
+// SweepEvery is how often the janitor looks. Retention is therefore MaxUnreferencedAge plus at
+// most one interval.
+const SweepEvery = 5 * time.Minute
 
 // ErrUnsupportedExtension is returned by Save when the uploaded file's extension isn't one of
 // the recognized SCL structure-file formats.
@@ -71,6 +87,82 @@ func (s *Store) Save(originalName string, r io.Reader) (string, error) {
 	}
 
 	return path, nil
+}
+
+// Touch resets a stored file's age, so an upload that is actively being used to start a device
+// can't be swept out from under the daemon mid-start. A path outside this store's directory is
+// silently ignored rather than treated as an error: sclFilePath is allowed to name any file on
+// the daemon's own filesystem, not just one this store wrote.
+func (s *Store) Touch(path string) {
+	if !s.owns(path) {
+		return
+	}
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
+}
+
+// Sweep deletes every file in the store's directory that is both older than maxAge and absent
+// from inUse, returning how many it removed.
+//
+// This is the whole retention policy, expressed as one rule with no lifecycle hooks to get wrong:
+// it covers a file uploaded and never used, a start that failed, and a device that has since been
+// stopped, without any of them needing to notify anything.
+//
+// inUse exists for one reason: crash re-arm. The daemon reads the file only while starting a
+// device, but if it dies, the API restarts it and replays every active device's StartParams —
+// sclFilePath included — so a file stays alive as long as some running device could need
+// replaying. That bounds usage by the number of devices actually being watched, not by how many
+// files have ever been uploaded. Passing a nil inUse (nothing can be running) with a zero maxAge
+// therefore empties the directory, which is exactly what a fresh process wants.
+func (s *Store) Sweep(inUse map[string]bool, maxAge time.Duration) (int, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, fmt.Errorf("read structure file directory %q: %w", s.dir, err)
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	var firstErr error
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+		if inUse[path] {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			// Vanished between ReadDir and here — already gone, which is the goal.
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("remove stale structure file %q: %w", path, err)
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
+}
+
+// owns reports whether path is a file directly inside this store's directory — the guard that
+// keeps Touch/Sweep from ever acting on something the store didn't write.
+func (s *Store) owns(path string) bool {
+	if path == "" {
+		return false
+	}
+	dir, err := filepath.Abs(s.dir)
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	return filepath.Dir(abs) == dir
 }
 
 func randomHex(n int) (string, error) {

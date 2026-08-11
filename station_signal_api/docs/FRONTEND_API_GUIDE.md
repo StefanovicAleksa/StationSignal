@@ -179,6 +179,17 @@ Pass this `path` straight through as `sclFilePath` in a subsequent `POST /api/de
 already an absolute path the daemon can read. Each upload is stored under a fresh generated
 name, so re-uploading a file with the same original filename never overwrites a previous one.
 
+⚠️ **Uploads are temporary — use one within 30 minutes.** A station SCD can be tens of megabytes
+and the box is a small-disk Raspberry Pi, so nothing is kept longer than it is useful. An upload
+that no running device is using is deleted once it has sat for 30 minutes (checked every 5), and
+everything left over is cleared when the API restarts. `POST /api/devices` resets that clock for
+the file it names, and a file stays alive for as long as the device using it is running — so the
+normal upload-then-connect flow is never affected, no matter how long that device then runs.
+
+The case to handle is a user who picks a file, leaves the page open for an hour, and only then
+hits Connect: the start fails with `ORCHESTRATION_FAILED` (the daemon can't read the path). Treat
+that as "upload it again" rather than a device fault. Re-uploading is always safe.
+
 **Errors:** `400 INVALID_ARGUMENT` for a missing `file` field, an unsupported extension, or a
 too-large upload; `500` (generic, no `code`) if the file couldn't be written to disk.
 

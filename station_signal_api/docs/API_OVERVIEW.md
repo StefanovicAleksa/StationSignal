@@ -54,7 +54,7 @@ domain/data/service split, holding what every feature's `data/` layer depends on
 | `daemonclient` | the single long-lived control-channel connection, request/response correlation by `requestId` |
 | `streamrelay` | `Hub`: fans one daemon-side push-only stream out to N frontend subscribers, drop-not-queue on backpressure |
 | `config` | startup flags/env (daemon binary path, HTTP listen address, deployment mode, log level, structure file storage dir) |
-| `structurefiles` | saves uploaded SCL/ICD/CID files to local disk for `POST /api/structure-files`; no daemon interaction — the returned path is read by the daemon directly, since it always runs on the same box |
+| `structurefiles` | saves uploaded SCL/ICD/CID files to local disk for `POST /api/structure-files`; no daemon interaction — the returned path is read by the daemon directly, since it always runs on the same box. Storage is temporary: see below |
 
 `internal/controllers/{rest,ws}` is the HTTP/WS handler layer — not itself a "feature" — that
 calls into each feature's `service/` only, translating REST/WS requests into service calls and
@@ -92,6 +92,28 @@ http.Server.ListenAndServe()
 <block on SIGINT/SIGTERM>
 httpServer.Shutdown() -> <-supervisorDone
 ```
+
+## Uploaded structure files are temporary
+
+A station SCD runs to tens of megabytes and the box is a Raspberry Pi with a fixed disk, so
+`/opt/station_signal/structure_files` is never allowed to accumulate. One rule, applied by a
+janitor goroutine started in `main.go` (`structurefiles.RunJanitor`, every 5 minutes): **delete
+every file that is both older than 30 minutes and not referenced by a running device.** That
+single condition covers an upload nobody used, a start that failed, and a device since stopped,
+with no lifecycle hooks to keep in sync. Startup runs the same sweep with a zero age and no
+references — nothing can be running yet — which clears whatever a `kill -9` left behind.
+
+Two subtleties:
+
+- **Why keep anything past the start at all.** The daemon parses the file into memory during
+  `START_REPORTING` and never reads it again. But if the daemon crashes, this API restarts it and
+  replays every active device's `StartParams`, `sclFilePath` included — so a running device pins
+  its file, or crash re-arm would silently fail for exactly the devices that need it. Usage is
+  therefore bounded by devices being watched, not by uploads ever made.
+- **Mid-start.** A device being started isn't in the registry the sweep consults yet, so
+  `handleStartReporting` calls `Store.Touch` on the path first. `Touch`/`Sweep` both ignore paths
+  outside the store's own directory, since `sclFilePath` may legitimately name any file already
+  on the daemon's disk.
 
 ## Logging and deployment mode
 

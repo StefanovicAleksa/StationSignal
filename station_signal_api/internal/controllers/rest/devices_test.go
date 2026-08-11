@@ -342,3 +342,32 @@ func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, wantCode stri
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, wantCode, body.Error.Code)
 }
+
+// Uploaded structure files are swept once unreferenced, and a device mid-start isn't in the
+// registry that sweep consults yet — so starting with one has to pin it first.
+func TestHandleStartReporting_TouchesTheStructureFileItStartsWith(t *testing.T) {
+	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
+	files := &mockStructureFileStore{}
+	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(
+		`{"host":"10.0.0.5","interfaceId":"eth0","iedName":"IED1","sclFilePath":"/data/structure_files/abc-device.icd"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, []string{"/data/structure_files/abc-device.icd"}, files.touched)
+}
+
+func TestHandleStartReporting_TouchesNothingWhenNoStructureFileIsNamed(t *testing.T) {
+	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
+	files := &mockStructureFileStore{}
+	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Empty(t, files.touched)
+}

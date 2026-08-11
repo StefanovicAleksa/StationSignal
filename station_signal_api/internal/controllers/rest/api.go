@@ -57,9 +57,10 @@ type networkService interface {
 
 // structureFileStore is the seam unit tests mock instead of the concrete
 // *structurefiles.Store — it saves an uploaded SCL/ICD/CID file to disk and returns the path
-// the daemon can later read it back from.
+// the daemon can later read it back from, and keeps one alive across the start that uses it.
 type structureFileStore interface {
 	Save(originalName string, r io.Reader) (string, error)
+	Touch(path string)
 }
 
 // API holds the dependencies every REST handler needs.
