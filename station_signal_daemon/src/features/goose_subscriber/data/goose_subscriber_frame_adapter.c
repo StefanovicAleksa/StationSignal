@@ -2,6 +2,7 @@
 #include "hal_time.h"
 #include "features/goose_subscriber/data/goose_subscriber_frame_adapter.h"
 #include "features/goose_subscriber/domain/goose_subscriber_usecases.h"
+#include "log.h"
 
 static GooseSubscriberTargetEntry*
 findTargetEntry(GooseSubscriberHandle handle, GooseSubscriber subscriber) {
@@ -16,6 +17,21 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
     GooseSubscriberHandle handle = (GooseSubscriberHandle) parameter;
     if (!handle) return;
 
+    /* TEMPORARY diagnostic - remove once GOOSE reception silence is
+     * root-caused (see goose_subscriber_connection.c's own [GOOSE_DIAG]
+     * lines). This is THE line that answers "does anything ever reach this
+     * callback at all" - every other branch below this point was previously
+     * silent on every path (valid-but-duplicate, valid-but-filtered-to-zero,
+     * invalid/unparseable), so a dev-mode capture with GOOSE reception
+     * apparently dead could not distinguish "no frames arrive at the raw
+     * socket" from "frames arrive but get dropped somewhere in this
+     * function." Fires unconditionally, before the validity check, since
+     * GoCbRef/isValid/parseError are all safe to read regardless of parse
+     * outcome. */
+    SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: goCbRef=%s isValid=%d parseError=%d\n",
+            GooseSubscriber_getGoCbRef(subscriber), GooseSubscriber_isValid(subscriber),
+            (int) GooseSubscriber_getParseError(subscriber));
+
     /* A frame that fails to parse/sequence (isValid()==false) has nothing
      * safe to normalize - drop it here without touching liveness state.
      * test=true/needsCommission=true frames ARE still forwarded below (not
@@ -23,7 +39,11 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
      * not be treated as live data by a standard-compliant receiver, but
      * that's the caller's policy decision (e.g. ipc_dispatcher surfacing
      * them as diagnostics), not this adapter's to make silently. */
-    if (!GooseSubscriber_isValid(subscriber)) return;
+    if (!GooseSubscriber_isValid(subscriber)) {
+        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - invalid/unparseable frame "
+                "(goCbRef=%s)\n", GooseSubscriber_getGoCbRef(subscriber));
+        return;
+    }
 
     /* This frame is genuinely fresh (non-duplicate) per libiec61850's own
      * stNum/sqNum check inside parseGoosePayload - record it as the last
@@ -80,6 +100,8 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
             entry->hasForwardedStNum, entry->lastForwardedStNum, stNum)) {
         /* Heartbeat retransmission (MinTime/MaxTime keep-alive) - the
          * dataset didn't change, nothing worth forwarding as an event. */
+        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - duplicate stNum=%u heartbeat "
+                "(goCbRef=%s)\n", stNum, GooseSubscriber_getGoCbRef(subscriber));
         return;
     }
 
@@ -136,9 +158,23 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
          * it downstream instead, at the one point both this feature's GoCBs
          * AND mms_report_client's RCBs actually converge. */
         if (record->entryCount > 0) {
+            SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: forwarding record - goCbRef=%s "
+                    "stNum=%u sqNum=%u entryCount=%d\n", GooseSubscriber_getGoCbRef(subscriber),
+                    stNum, GooseSubscriber_getSqNum(subscriber), record->entryCount);
             handle->recordCallback(handle->recordCallbackParam, record);
         } else {
+            /* This is the bootstrap-seed / genuinely-unchanged case, not a
+             * reception problem - but indistinguishable from one without
+             * this line, since it's silent otherwise (mirrors
+             * mms_report_client's "0 survived the per-RCB value-diff filter"
+             * log, which GOOSE never had an equivalent of). */
+            SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - 0 entries survived the "
+                    "value-diff filter (bootstrap-seed or unchanged) - goCbRef=%s stNum=%u\n",
+                    GooseSubscriber_getGoCbRef(subscriber), stNum);
             GooseSubscriberUseCases_freeRecord(record);
         }
+    } else {
+        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - record build failed (allocation "
+                "failure) - goCbRef=%s stNum=%u\n", GooseSubscriber_getGoCbRef(subscriber), stNum);
     }
 }

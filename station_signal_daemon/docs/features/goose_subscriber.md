@@ -415,10 +415,22 @@ thread of its own beyond these two):
 - **Liveness detection is TAL-driven and per-target**, bounded by `effectivePollMs`
   (self-derived, floored at 50ms) — a stale target is detected with up to one poll interval of
   latency, not instantly.
-- **The temporary `[GOOSE_DIAG]` stderr diagnostic** in `GooseSubscriberConnection_create`
-  (`data/goose_subscriber_connection.c`) dumping each target's resolved dst-MAC/APPID/VLAN filter
-  is explicitly marked in-code as removable once GOOSE reception silence is root-caused — still
-  present as of this doc, not yet cleaned up.
+- **The temporary `[GOOSE_DIAG]` diagnostic**, now routed through `src/log.h`'s dedicated
+  `SS_LOG_GOOSE` sink (its own append-mode file, `STATION_SIGNAL_GOOSE_LOG_FILE`, default
+  `/var/log/station_signal/station-signal-goose.log`, DEBUG-gated same as everything else) instead
+  of stderr — explicitly marked in-code as removable once GOOSE reception silence is root-caused,
+  still present as of this doc, not yet cleaned up. Two call sites: `GooseSubscriberConnection_create`/
+  `_start` (`data/goose_subscriber_connection.c`) log each target's resolved dst-MAC/APPID/VLAN
+  filter, the total target count, and whether `GooseReceiver_start` actually entered the running
+  state; `GooseSubscriberFrameAdapter_onGooseReceived` (`data/goose_subscriber_frame_adapter.c`)
+  logs **every** outcome of every callback invocation — valid/invalid, duplicate-heartbeat-dropped,
+  filtered-to-zero-entries-dropped, allocation-failure-dropped, or forwarded — since every one of
+  those paths was previously silent, making "frames never reach the raw socket" indistinguishable
+  from "frames arrive but this codebase drops them" from a log capture alone. If a device shows
+  `GooseReceiver_start ... entered the running state` but never one single subsequent
+  `onGooseReceived` line, reception is failing below libiec61850's own receiver thread (wrong
+  interface, VLAN/NIC-offload tag stripping, a filter mismatch against what a `tshark` capture on
+  the same interface actually shows) rather than in this codebase's own filtering.
 - **No `ReasonForInclusion`-equivalent signal** — unlike `mms_report_client`, which can trust an
   RCB's own `ReasonForInclusion` bitmask under some conditions, GOOSE gives this feature no such
   signal at all: every candidate is unconditionally diff-gated. A `NULL` cache slot is the *only*

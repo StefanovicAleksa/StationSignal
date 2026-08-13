@@ -38,6 +38,7 @@
  * the line looks like.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,5 +104,62 @@ static inline StationSignalLogLevel StationSignalLog_threshold(void)
 
 /* The operation failed. */
 #define SS_LOG_ERROR(...) SS_LOG(SS_LOG_LEVEL_ERROR, __VA_ARGS__)
+
+/*
+ * TEMPORARY diagnostic sink - remove once GOOSE reception silence is
+ * root-caused (same investigation the [GOOSE_DIAG] line in
+ * goose_subscriber_connection.c already exists for - see that file and
+ * docs/features/goose_subscriber.md's Known Limitations section).
+ *
+ * Everything routed through SS_LOG_GOOSE goes to its own append-mode file
+ * instead of stderr, so it survives independent of STATION_SIGNAL_LOG_LEVEL's
+ * stderr stream and can be tailed on its own without scrolling through the
+ * per-RCB MMS enable volume that dominates the combined log on any station
+ * with more than a couple dozen RCBs. Gated on the same debug threshold as
+ * SS_LOG_DEBUG (dev mode only) - this is diagnostic trace, not a steady-state
+ * feature.
+ *
+ * Path: STATION_SIGNAL_GOOSE_LOG_FILE, defaulting to
+ * /var/log/station_signal/station-signal-goose.log (same directory
+ * deploy/setup.sh already creates and chowns for the combined log). Falls
+ * back to stderr if that path can't be opened (wrong permissions, missing
+ * directory on a non-deployed dev checkout, etc.) - a diagnostic tool that
+ * can silently produce nothing is worse than useless.
+ */
+static inline FILE*
+StationSignalLog_gooseSink(void)
+{
+    static FILE* sink = NULL;
+    static int attempted = 0;
+
+    if (!attempted) {
+        attempted = 1;
+
+        const char* path = getenv("STATION_SIGNAL_GOOSE_LOG_FILE");
+        if (!path || path[0] == '\0') {
+            path = "/var/log/station_signal/station-signal-goose.log";
+        }
+
+        sink = fopen(path, "a");
+        if (!sink) {
+            fprintf(stderr,
+                    "[log] could not open GOOSE diagnostic log file '%s' (%s) - "
+                    "falling back to stderr for SS_LOG_GOOSE output\n",
+                    path, strerror(errno));
+            sink = stderr;
+        }
+    }
+
+    return sink;
+}
+
+#define SS_LOG_GOOSE(...)                                            \
+    do {                                                             \
+        if (SS_LOG_LEVEL_DEBUG >= StationSignalLog_threshold()) {    \
+            FILE* ssGooseSink = StationSignalLog_gooseSink();        \
+            fprintf(ssGooseSink, __VA_ARGS__);                       \
+            fflush(ssGooseSink);                                     \
+        }                                                            \
+    } while (0)
 
 #endif /* STATION_SIGNAL_LOG_H_ */
