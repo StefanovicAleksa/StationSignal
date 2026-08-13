@@ -15,20 +15,36 @@ import (
 )
 
 const (
-	subscriberBufferSize = 16
-	dialRetries          = 5
-	dialRetryDelay       = 20 * time.Millisecond
+	// DefaultBufferSize is the right size for a per-device MMS/GOOSE report hub: continuous,
+	// high-frequency data where a dropped message is fine to lose (a fresher value supersedes
+	// it), so a small buffer that fails fast under backpressure is the correct tradeoff.
+	DefaultBufferSize = 16
+	// ScanBufferSize is for the one shared scan-result Hub specifically, where that tradeoff is
+	// wrong: the daemon's scan_orchestration dedupes discovered hosts in its own seen-set and
+	// never resends one, so a dropped scan-result message means that device is silently gone
+	// from the list until the whole scan is restarted — not superseded, just lost. Sized to
+	// match the daemon's own IedDiscoveryConfig.maxHosts subnet-sweep ceiling, so even a fully
+	// populated /24 sweep's worth of individually-arriving discovery events can't overflow it
+	// within one scan, regardless of how slow a subscriber is to drain. The cost is negligible
+	// (small JSON frames, at most this many buffered pointers per subscriber).
+	ScanBufferSize = 1024
+
+	dialRetries    = 5
+	dialRetryDelay = 20 * time.Millisecond
 )
 
 // Hub dials one daemon-side stream URL and rebroadcasts every frame it reads, verbatim, to
 // each current subscriber. A subscriber that can't keep up has its backlog dropped rather
 // than queued — the same "no replay" semantics the daemon itself applies to its own stream
-// consumers. One exception: a CONNECTION_STATUS frame (a per-device stream's connection
-// state, not report/GOOSE change data) is retained and replayed to every new subscriber —
-// see Subscribe's own comment for why a live-only relay loses this frame almost every time.
+// consumers, and every drop is logged (see broadcast) so a subscriber falling behind is at
+// least diagnosable instead of silently invisible. One exception: a CONNECTION_STATUS frame
+// (a per-device stream's connection state, not report/GOOSE change data) is retained and
+// replayed to every new subscriber — see Subscribe's own comment for why a live-only relay
+// loses this frame almost every time.
 type Hub struct {
-	url    string
-	logger *slog.Logger
+	url        string
+	logger     *slog.Logger
+	bufferSize int
 
 	mu       sync.Mutex
 	subs     map[chan []byte]struct{}
@@ -39,18 +55,20 @@ type Hub struct {
 }
 
 // NewHub dials url and starts relaying immediately. Call Close when the underlying daemon
-// resource (device or scan) goes away.
-func NewHub(ctx context.Context, url string, logger *slog.Logger) *Hub {
+// resource (device or scan) goes away. bufferSize sizes every subscriber's own channel (see
+// DefaultBufferSize/ScanBufferSize's doc comments for which one a given stream type wants).
+func NewHub(ctx context.Context, url string, logger *slog.Logger, bufferSize int) *Hub {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	hctx, cancel := context.WithCancel(ctx)
 	h := &Hub{
-		url:    url,
-		logger: logger,
-		subs:   make(map[chan []byte]struct{}),
-		cancel: cancel,
-		done:   make(chan struct{}),
+		url:        url,
+		logger:     logger,
+		bufferSize: bufferSize,
+		subs:       make(map[chan []byte]struct{}),
+		cancel:     cancel,
+		done:       make(chan struct{}),
 	}
 	go h.run(hctx)
 	return h
@@ -60,7 +78,7 @@ func NewHub(ctx context.Context, url string, logger *slog.Logger) *Hub {
 // cancel function the caller must invoke exactly once when done (e.g. on client
 // disconnect). The channel is closed once cancel is called or the Hub itself closes.
 func (h *Hub) Subscribe() (<-chan []byte, func()) {
-	ch := make(chan []byte, subscriberBufferSize)
+	ch := make(chan []byte, h.bufferSize)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
 	retained := h.retained
@@ -71,8 +89,8 @@ func (h *Hub) Subscribe() (<-chan []byte, func()) {
 		// does) succeed well before this subscriber — the frontend's browser WS — has even
 		// been opened; without this, "connected" would be lost forever the moment it happens
 		// too early, leaving the UI stuck on "Connecting..." despite the device genuinely
-		// being up. Fresh channel, buffer size subscriberBufferSize, so this practically never
-		// hits the default case, but stays non-blocking regardless.
+		// being up. Fresh channel, buffer size h.bufferSize, so this practically never hits
+		// the default case, but stays non-blocking regardless.
 		select {
 		case ch <- retained:
 		default:
@@ -154,6 +172,11 @@ func (h *Hub) broadcast(data []byte) {
 		case ch <- data:
 		default:
 			// Slow subscriber: drop this message for them rather than block the whole hub.
+			// Debug level, not Warn - for a report/GOOSE hub (small bufferSize, drop-under-
+			// backpressure is the intended, correct behavior) this is routine and would be
+			// noisy at a louder level; for the scan hub it's a real problem, but still only
+			// worth surfacing to someone actively debugging, not by default.
+			h.logger.Debug("stream hub dropped message for lagging subscriber", "url", h.url)
 		}
 	}
 }

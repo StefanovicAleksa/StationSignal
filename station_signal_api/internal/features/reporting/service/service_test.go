@@ -54,7 +54,7 @@ func newTestHub(t *testing.T) *streamrelay.Hub {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return streamrelay.NewHub(ctx, "ws://127.0.0.1:1", nil)
+	return streamrelay.NewHub(ctx, "ws://127.0.0.1:1", nil, streamrelay.DefaultBufferSize)
 }
 
 const testSessionID = "test-session"

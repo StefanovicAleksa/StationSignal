@@ -87,7 +87,7 @@ func TestHub_FansOutToMultipleSubscribers(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	ch1, cancel1 := hub.Subscribe()
@@ -105,7 +105,7 @@ func TestHub_SlowSubscriberDropsWithoutBlockingOthers(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	slow, cancelSlow := hub.Subscribe() // never read from
@@ -113,8 +113,8 @@ func TestHub_SlowSubscriberDropsWithoutBlockingOthers(t *testing.T) {
 	fast, cancelFast := hub.Subscribe()
 	defer cancelFast()
 
-	// Send far more messages than the subscriber buffer (subscriberBufferSize) can hold.
-	for i := 0; i < subscriberBufferSize*3; i++ {
+	// Send far more messages than the subscriber buffer (DefaultBufferSize) can hold.
+	for i := 0; i < DefaultBufferSize*3; i++ {
 		fu.send(t, []byte(`{"n":1}`))
 	}
 
@@ -123,14 +123,14 @@ func TestHub_SlowSubscriberDropsWithoutBlockingOthers(t *testing.T) {
 	assert.Equal(t, `{"n":1}`, string(recvOrTimeout(t, fast)))
 
 	// The slow subscriber's buffered channel should be full but not deadlocking anything;
-	// draining it should yield at most subscriberBufferSize buffered messages.
+	// draining it should yield at most DefaultBufferSize buffered messages.
 	drained := 0
 	for {
 		select {
 		case <-slow:
 			drained++
 		default:
-			assert.LessOrEqual(t, drained, subscriberBufferSize)
+			assert.LessOrEqual(t, drained, DefaultBufferSize)
 			return
 		}
 	}
@@ -140,7 +140,7 @@ func TestHub_CloseClosesAllSubscriberChannels(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 
 	ch, cancelSub := hub.Subscribe()
 	defer cancelSub()
@@ -155,7 +155,7 @@ func TestHub_SubscribeAfterCloseDoesNotPanic(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	hub.Close()
 
 	assert.NotPanics(t, func() {
@@ -169,7 +169,7 @@ func TestHub_UnsubscribeCancelClosesOnlyThatChannel(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	ch1, cancel1 := hub.Subscribe()
@@ -188,7 +188,7 @@ func TestHub_CancelIsIdempotent(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	_, cancelSub := hub.Subscribe()
@@ -203,7 +203,7 @@ func TestHub_ReplaysLastConnectionStatusToNewSubscriber(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	// Witness proves the send was fully processed (and forgotten - no other subscriber left)
@@ -228,7 +228,7 @@ func TestHub_ReplaysOnlyTheMostRecentConnectionStatus(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	// A witness subscriber, held open across both sends, makes each send's processing
@@ -255,7 +255,7 @@ func TestHub_DoesNotReplayReportOrScanMessages(t *testing.T) {
 	fu := newFakeUpstream(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	hub := NewHub(ctx, fu.url(), nil)
+	hub := NewHub(ctx, fu.url(), nil, DefaultBufferSize)
 	defer hub.Close()
 
 	// Witness confirms the send was actually processed (and, since it's the only subscriber
@@ -283,7 +283,7 @@ func TestHub_DialFailureLogsAndExitsCleanly(t *testing.T) {
 
 	// Nothing listens on this port — dialWithRetry should exhaust its retries and give up;
 	// Close() must still return promptly rather than hang.
-	hub := NewHub(ctx, "ws://127.0.0.1:1", nil)
+	hub := NewHub(ctx, "ws://127.0.0.1:1", nil, DefaultBufferSize)
 
 	done := make(chan struct{})
 	go func() {

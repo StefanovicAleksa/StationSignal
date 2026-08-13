@@ -71,7 +71,8 @@ func (g *daemonGateway) Start(ctx context.Context, params domain.StartParams) (d
 		LnCategories:   params.LnCategories,
 		StartParams:    params,
 	}
-	hub := streamrelay.NewHub(g.hubCtx, fmt.Sprintf("ws://127.0.0.1:%d", result.WSPort), g.logger)
+	hub := streamrelay.NewHub(g.hubCtx, fmt.Sprintf("ws://127.0.0.1:%d", result.WSPort), g.logger,
+		streamrelay.DefaultBufferSize)
 	return device, hub, nil
 }
 

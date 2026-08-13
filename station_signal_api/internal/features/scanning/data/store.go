@@ -36,7 +36,7 @@ func NewStore(hubCtx context.Context, logger *slog.Logger) *Store {
 func (s *Store) Add(scan domain.Scan) {
 	s.mu.Lock()
 	if len(s.scans) == 0 && s.hub == nil {
-		s.hub = streamrelay.NewHub(s.hubCtx, scanStreamURL, s.logger)
+		s.hub = streamrelay.NewHub(s.hubCtx, scanStreamURL, s.logger, streamrelay.ScanBufferSize)
 	}
 	s.scans[scan.ID] = scan
 	s.mu.Unlock()
