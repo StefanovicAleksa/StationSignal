@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "ipc_dispatcher"
 #include <stdlib.h>
 #include "features/ipc_dispatcher/service/ipc_dispatcher_api.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ring_buffer.h"
@@ -6,6 +7,7 @@
 #include "features/ipc_dispatcher/data/ipc_dispatcher_mms_adapter.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_goose_adapter.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_conn_state_adapter.h"
+#include "log.h"
 
 void
 IpcDispatcherConfig_defaults(IpcDispatcherConfig* config) {
@@ -66,16 +68,22 @@ IpcDispatcher_start(IpcDispatcherHandle handle) {
     IpcDispatcherError err;
     handle->wsServer = IpcDispatcherWsServer_create(
             handle->config.port, handle->config.maxConnections, handle->ringBuffer, &err);
-    if (!handle->wsServer) return err;
+    if (!handle->wsServer) {
+        SS_LOG_ERROR("[ipc_dispatcher] failed to start (err=%d)\n", (int) err);
+        return err;
+    }
 
     err = IpcDispatcherWsServer_start(handle->wsServer);
     if (err != IPC_DISPATCHER_OK) {
+        SS_LOG_ERROR("[ipc_dispatcher] failed to start (err=%d)\n", (int) err);
         IpcDispatcherWsServer_destroy(handle->wsServer);
         handle->wsServer = NULL;
         return err;
     }
 
     handle->running = true;
+    SS_LOG_INFO("[ipc_dispatcher] started on 127.0.0.1:%d (maxConnections=%d)\n",
+            handle->config.port, handle->config.maxConnections);
     return IPC_DISPATCHER_OK;
 }
 
@@ -91,6 +99,7 @@ IpcDispatcher_stop(IpcDispatcherHandle handle) {
     if (handle->wsServer) {
         IpcDispatcherWsServer_destroy(handle->wsServer);
         handle->wsServer = NULL;
+        SS_LOG_INFO("[ipc_dispatcher] stopped\n");
     }
     handle->running = false;
 }

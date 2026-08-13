@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "control_dispatcher"
 #include <stdio.h>
 #include <stdlib.h>
 #include "hal_thread.h"

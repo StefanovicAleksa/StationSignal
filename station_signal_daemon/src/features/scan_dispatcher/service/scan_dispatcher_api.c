@@ -1,8 +1,10 @@
+#define SS_LOG_FEATURE "scan_dispatcher"
 #include <stdlib.h>
 #include "features/scan_dispatcher/service/scan_dispatcher_api.h"
 #include "features/scan_dispatcher/data/scan_dispatcher_ring_buffer.h"
 #include "features/scan_dispatcher/data/scan_dispatcher_ws_server.h"
 #include "features/scan_dispatcher/data/scan_dispatcher_adapter.h"
+#include "log.h"
 
 void
 ScanDispatcherConfig_defaults(ScanDispatcherConfig* config) {
@@ -52,16 +54,22 @@ ScanDispatcher_start(ScanDispatcherHandle handle) {
     ScanDispatcherError err;
     handle->wsServer = ScanDispatcherWsServer_create(
             handle->config.port, handle->config.maxConnections, handle->ringBuffer, &err);
-    if (!handle->wsServer) return err;
+    if (!handle->wsServer) {
+        SS_LOG_ERROR("[scan_dispatcher] failed to start (err=%d)\n", (int) err);
+        return err;
+    }
 
     err = ScanDispatcherWsServer_start(handle->wsServer);
     if (err != SCAN_DISPATCHER_OK) {
+        SS_LOG_ERROR("[scan_dispatcher] failed to start (err=%d)\n", (int) err);
         ScanDispatcherWsServer_destroy(handle->wsServer);
         handle->wsServer = NULL;
         return err;
     }
 
     handle->running = true;
+    SS_LOG_INFO("[scan_dispatcher] started on 127.0.0.1:%d (maxConnections=%d)\n",
+            handle->config.port, handle->config.maxConnections);
     return SCAN_DISPATCHER_OK;
 }
 
@@ -75,6 +83,7 @@ ScanDispatcher_stop(ScanDispatcherHandle handle) {
     if (handle->wsServer) {
         ScanDispatcherWsServer_destroy(handle->wsServer);
         handle->wsServer = NULL;
+        SS_LOG_INFO("[scan_dispatcher] stopped\n");
     }
     handle->running = false;
 }

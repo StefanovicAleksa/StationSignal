@@ -415,10 +415,13 @@ thread of its own beyond these two):
 - **Liveness detection is TAL-driven and per-target**, bounded by `effectivePollMs`
   (self-derived, floored at 50ms) — a stale target is detected with up to one poll interval of
   latency, not instantly.
-- **The temporary `[GOOSE_DIAG]` diagnostic**, now routed through `src/log.h`'s dedicated
-  `SS_LOG_GOOSE` sink (its own append-mode file, `STATION_SIGNAL_GOOSE_LOG_FILE`, default
-  `/var/log/station_signal/station-signal-goose.log`, DEBUG-gated same as everything else) instead
-  of stderr — explicitly marked in-code as removable once GOOSE reception silence is root-caused,
+- **The temporary `[GOOSE_DIAG]` diagnostic**, plain `SS_LOG_DEBUG` calls like every other call
+  site in this feature — `data/goose_subscriber_connection.c` and
+  `data/goose_subscriber_frame_adapter.c` both declare `#define SS_LOG_FEATURE
+  "goose_subscriber"`, so this feature's output (this diagnostic included) lands in its own file,
+  `station-signal-goose_subscriber.log` under `STATION_SIGNAL_LOG_DIR` (see the parent repo's
+  `CLAUDE.md` Logging bullet for the general per-feature-file scheme this is just one instance
+  of) — explicitly marked in-code as removable once GOOSE reception silence is root-caused,
   still present as of this doc, not yet cleaned up. Two call sites: `GooseSubscriberConnection_create`/
   `_start` (`data/goose_subscriber_connection.c`) log each target's resolved dst-MAC/APPID/VLAN
   filter, the total target count, and whether `GooseReceiver_start` actually entered the running

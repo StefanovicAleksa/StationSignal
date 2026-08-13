@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "goose_subscriber"
 #include <stdio.h>
 #include "hal_time.h"
 #include "features/goose_subscriber/data/goose_subscriber_frame_adapter.h"
@@ -28,7 +29,7 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
      * function." Fires unconditionally, before the validity check, since
      * GoCbRef/isValid/parseError are all safe to read regardless of parse
      * outcome. */
-    SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: goCbRef=%s isValid=%d parseError=%d\n",
+    SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: goCbRef=%s isValid=%d parseError=%d\n",
             GooseSubscriber_getGoCbRef(subscriber), GooseSubscriber_isValid(subscriber),
             (int) GooseSubscriber_getParseError(subscriber));
 
@@ -40,7 +41,7 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
      * that's the caller's policy decision (e.g. ipc_dispatcher surfacing
      * them as diagnostics), not this adapter's to make silently. */
     if (!GooseSubscriber_isValid(subscriber)) {
-        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - invalid/unparseable frame "
+        SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: dropped - invalid/unparseable frame "
                 "(goCbRef=%s)\n", GooseSubscriber_getGoCbRef(subscriber));
         return;
     }
@@ -100,7 +101,7 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
             entry->hasForwardedStNum, entry->lastForwardedStNum, stNum)) {
         /* Heartbeat retransmission (MinTime/MaxTime keep-alive) - the
          * dataset didn't change, nothing worth forwarding as an event. */
-        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - duplicate stNum=%u heartbeat "
+        SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: dropped - duplicate stNum=%u heartbeat "
                 "(goCbRef=%s)\n", stNum, GooseSubscriber_getGoCbRef(subscriber));
         return;
     }
@@ -158,7 +159,7 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
          * it downstream instead, at the one point both this feature's GoCBs
          * AND mms_report_client's RCBs actually converge. */
         if (record->entryCount > 0) {
-            SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: forwarding record - goCbRef=%s "
+            SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: forwarding record - goCbRef=%s "
                     "stNum=%u sqNum=%u entryCount=%d\n", GooseSubscriber_getGoCbRef(subscriber),
                     stNum, GooseSubscriber_getSqNum(subscriber), record->entryCount);
             handle->recordCallback(handle->recordCallbackParam, record);
@@ -168,13 +169,13 @@ GooseSubscriberFrameAdapter_onGooseReceived(GooseSubscriber subscriber, void* pa
              * this line, since it's silent otherwise (mirrors
              * mms_report_client's "0 survived the per-RCB value-diff filter"
              * log, which GOOSE never had an equivalent of). */
-            SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - 0 entries survived the "
+            SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: dropped - 0 entries survived the "
                     "value-diff filter (bootstrap-seed or unchanged) - goCbRef=%s stNum=%u\n",
                     GooseSubscriber_getGoCbRef(subscriber), stNum);
             GooseSubscriberUseCases_freeRecord(record);
         }
     } else {
-        SS_LOG_GOOSE("[GOOSE_DIAG] onGooseReceived: dropped - record build failed (allocation "
+        SS_LOG_DEBUG("[GOOSE_DIAG] onGooseReceived: dropped - record build failed (allocation "
                 "failure) - goCbRef=%s stNum=%u\n", GooseSubscriber_getGoCbRef(subscriber), stNum);
     }
 }

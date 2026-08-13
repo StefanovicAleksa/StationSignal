@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "scl_bootstrap"
 #include <stdio.h>
 #include <stdlib.h>
 #include "features/scl_bootstrap/service/scl_bootstrap_api.h"

@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "goose_subscriber"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

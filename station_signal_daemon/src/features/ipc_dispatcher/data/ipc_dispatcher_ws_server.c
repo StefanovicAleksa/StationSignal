@@ -1,8 +1,10 @@
+#define SS_LOG_FEATURE "ipc_dispatcher"
 #include <stdlib.h>
 #include <string.h>
 #include "libwebsockets.h"
 #include "hal_thread.h"
 #include "features/ipc_dispatcher/data/ipc_dispatcher_ws_server.h"
+#include "log.h"
 
 /* Per-connection session data (lws's per_session_data_size mechanism) - only
  * a read cursor into the shared ring buffer is needed. No pending-write
@@ -48,8 +50,14 @@ ipcDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* u
 
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
-            if (server->currentConnections >= server->maxConnections) return -1; /* reject: over the cap */
+            if (server->currentConnections >= server->maxConnections) {
+                SS_LOG_WARN("[ipc_dispatcher] rejected client - at max connections (%d)\n",
+                        server->maxConnections);
+                return -1; /* reject: over the cap */
+            }
             server->currentConnections++;
+            SS_LOG_INFO("[ipc_dispatcher] client connected (%d/%d)\n",
+                    server->currentConnections, server->maxConnections);
             /* Start-from-now: a newly connected client gets no backlog
              * replay in v1 - only messages pushed after this point. The one
              * exception is connection status (retainedStatusSent below) -
@@ -63,6 +71,8 @@ ipcDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* u
 
         case LWS_CALLBACK_CLOSED:
             server->currentConnections--;
+            SS_LOG_INFO("[ipc_dispatcher] client disconnected (%d/%d)\n",
+                    server->currentConnections, server->maxConnections);
             break;
 
         case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
@@ -103,7 +113,13 @@ ipcDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* u
             uint64_t dropped = 0;
             char* json = IpcDispatcherRingBuffer_readNext(server->ringBuffer, &session->cursor, &dropped);
             /* dropped (lagging-client messages skipped) is not surfaced over
-             * the wire in v1 - a future message `type` could report it. */
+             * the wire in v1 - a future message `type` could report it. Still
+             * worth logging, though - previously this failure mode was
+             * invisible even in principle. */
+            if (dropped > 0) {
+                SS_LOG_WARN("[ipc_dispatcher] lagging client dropped %llu message(s) "
+                        "(ring buffer overrun, no replay)\n", (unsigned long long) dropped);
+            }
             if (json) {
                 size_t payloadLen = strlen(json);
                 unsigned char* buf = malloc(LWS_PRE + payloadLen);

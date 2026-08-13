@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "mms_dataset_manager"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

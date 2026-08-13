@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "ied_model"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

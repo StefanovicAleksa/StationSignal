@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "goose_subscriber"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +132,7 @@ GooseSubscriberConnection_create(GooseSubscriberHandle handle) {
      * GOOSE_SUBSCRIBER_ERR_NO_TARGETS if it didn't, but that failure aborts
      * the whole device start (torn down by orchestration's fail-hard
      * policy) and is easy to miss among unrelated MMS log volume. */
-    SS_LOG_GOOSE("[GOOSE_DIAG] subscribing to %d GOOSE target(s) on interface '%s'\n",
+    SS_LOG_DEBUG("[GOOSE_DIAG] subscribing to %d GOOSE target(s) on interface '%s'\n",
             handle->targetCount, handle->interfaceId);
 
     for (int i = 0; i < handle->targetCount; i++) {
@@ -154,11 +155,13 @@ GooseSubscriberConnection_create(GooseSubscriberHandle handle) {
         /* TEMPORARY diagnostic - remove once GOOSE reception silence is
          * root-caused. Prints exactly the filter this repo applies per
          * target, straight from parsed SCL, for direct comparison against a
-         * tshark capture of the live publisher's actual frames. Moved from
-         * SS_LOG_DEBUG to SS_LOG_GOOSE so every line of this investigation
-         * (setup-time filter + runtime reception, below) lands in the one
-         * dedicated file instead of split across stderr and here. */
-        SS_LOG_GOOSE("[GOOSE_DIAG] target=%s hasAddress=%d dstMac=%02X-%02X-%02X-%02X-%02X-%02X appId=0x%04X vlanId=0x%04X\n",
+         * tshark capture of the live publisher's actual frames. This file's
+         * own SS_LOG_FEATURE means every line of this investigation
+         * (setup-time filter + runtime reception, in
+         * goose_subscriber_frame_adapter.c) lands in this feature's own log
+         * file, station-signal-goose_subscriber.log, without needing its own
+         * special-cased macro. */
+        SS_LOG_DEBUG("[GOOSE_DIAG] target=%s hasAddress=%d dstMac=%02X-%02X-%02X-%02X-%02X-%02X appId=0x%04X vlanId=0x%04X\n",
                 entry->target->objectReference, entry->target->hasAddress,
                 entry->target->dstMac[0], entry->target->dstMac[1], entry->target->dstMac[2],
                 entry->target->dstMac[3], entry->target->dstMac[4], entry->target->dstMac[5],
@@ -187,7 +190,7 @@ GooseSubscriberConnection_start(GooseSubscriberHandle handle) {
          * interfaceId) is already an error return the caller must handle -
          * this just makes it visible in the same dedicated file as the rest
          * of this investigation instead of only as a return code. */
-        SS_LOG_GOOSE("[GOOSE_DIAG] GooseReceiver_start on interface '%s' did NOT enter the "
+        SS_LOG_DEBUG("[GOOSE_DIAG] GooseReceiver_start on interface '%s' did NOT enter the "
                 "running state - no frame will ever be delivered on this connection\n",
                 handle->interfaceId);
         return GOOSE_SUBSCRIBER_ERR_RECEIVER_START_FAILED;
@@ -200,7 +203,7 @@ GooseSubscriberConnection_start(GooseSubscriberHandle handle) {
      * failing below libiec61850's own receiver thread (wrong interface,
      * VLAN offload stripping the tag, a filter mismatch versus what's
      * actually on the wire) rather than in this codebase's own filtering. */
-    SS_LOG_GOOSE("[GOOSE_DIAG] GooseReceiver_start on interface '%s' entered the running state "
+    SS_LOG_DEBUG("[GOOSE_DIAG] GooseReceiver_start on interface '%s' entered the running state "
             "(%d target(s) registered)\n", handle->interfaceId, handle->targetCount);
 
     handle->stopRequested = false;

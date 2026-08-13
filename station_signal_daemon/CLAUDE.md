@@ -40,20 +40,30 @@ file only describes current-state facts.
     `git diff third_party/` before committing it.
   - **Logging: `src/log.h`, `SS_LOG_DEBUG/INFO/WARN/ERROR`, never a raw `fprintf(stderr, ...)`.**
     Header-only (a `src/log.c` would have to be added to `rebuild_proj.sh`'s globs and all 16 test
-    Makefiles to link), macros prefixed `SS_` to stay clear of `third_party/include/logging.h`,
-    and no newline appended — each message keeps its own `\n`. The threshold is read once from
-    **`STATION_SIGNAL_LOG_LEVEL`** (`debug|info|warn|error`, default `info`); the parent repo's
-    API exports it when spawning this process, from the dev/prod mode `deploy/setup.sh` recorded.
-    What goes where: DEBUG for per-member/per-step trace (silent in a deployment), INFO for
-    lifecycle and per-cycle outcomes, WARN for degraded-but-continuing, ERROR for a failed
-    operation. The enable-path volume documented in `CHANGELOG.md` as "a temporary diagnostic
-    posture" now lives entirely at DEBUG. **`SS_LOG_GOOSE`** is a second, narrower sink layered on
-    top — same DEBUG-only gating, but written to its own append-mode file
-    (**`STATION_SIGNAL_GOOSE_LOG_FILE`**, default `/var/log/station_signal/station-signal-goose.log`,
-    falling back to stderr if unopenable) instead of stderr, so the GOOSE reception-silence
-    investigation (see `goose_subscriber/`'s own bullet and `docs/features/goose_subscriber.md`)
-    can be tailed without the per-RCB MMS enable volume drowning it out. Temporary, same as the
-    investigation it exists for — remove both once root-caused.
+    Makefiles to link) and libc-only (no `hal_time.h` — `tests/Makefile` links
+    `test_orchestration_staging`, which includes this header, without `-lhal` specifically to
+    prove that file stays pure libc; timestamps use `gettimeofday()`/`localtime_r()` instead),
+    macros prefixed `SS_` to stay clear of `third_party/include/logging.h`. The threshold is read
+    once from **`STATION_SIGNAL_LOG_LEVEL`** (`debug|info|warn|error`, default `info`); the parent
+    repo's API exports it when spawning this process, from the dev/prod mode `deploy/setup.sh`
+    recorded. What goes where: DEBUG for per-member/per-step trace (silent in a deployment), INFO
+    for lifecycle and per-cycle outcomes, WARN for degraded-but-continuing, ERROR for a failed
+    operation.
+    **One log file per feature, not one combined stream.** Each `.c` file that wants its own file
+    declares `#define SS_LOG_FEATURE "<feature-name>"` as its first line, before its own
+    `#include "log.h"` — every `SS_LOG_*` call in that file then lands in
+    `station-signal-<feature-name>.log` under **`STATION_SIGNAL_LOG_DIR`** (default
+    `/var/log/station_signal`, auto-created best-effort if missing), each line prefixed with a
+    `YYYY-MM-DD HH:MM:SS.mmm` timestamp and line-buffered (survives a `SIGKILL`/crash, unlike a
+    regular file's default full buffering). A file that opts out (`main.c`,
+    `src/orchestration/`, `src/scan_orchestration/`, `src/device_manager/`) falls through to the
+    `"daemon"` default. A file that genuinely can't be opened falls back to stderr with one
+    warning line. This replaced the enable-path volume `CHANGELOG.md` documents as "a temporary
+    diagnostic posture" — previously all combined into stderr and drowning out lower-volume
+    features (which is what made a real GOOSE-reception investigation hard to read) — and folded
+    in the one-off `SS_LOG_GOOSE` sink built during that investigation, now just
+    `goose_subscriber`'s own `SS_LOG_DEBUG` calls landing in `station-signal-goose_subscriber.log`
+    like every other feature.
   - `main.c` takes **no arguments** and has no terminal/CLI surface — it's a pure background
     process-runner. It creates `device_manager` + `scan_orchestration` + `control_dispatcher`,
     starts the one always-on control websocket (default `127.0.0.1:8767`), and blocks until
@@ -120,9 +130,8 @@ prompt — `control_dispatcher`'s four JSON commands (see Commands above) are th
 way to start/stop anything. Full history of how `main.c` got here (multi-IED support, the
 discovery-prompt removal, the earlier argv layout) is in `CHANGELOG.md`. Still no argv and no
 config file — the exceptions to "reads nothing" are the two environment variables behind
-`src/log.h` (see Commands above), `STATION_SIGNAL_LOG_LEVEL` and the temporary
-`STATION_SIGNAL_GOOSE_LOG_FILE`, both read once, affecting output volume/destination only and
-nothing about behavior.
+`src/log.h` (see Commands above), `STATION_SIGNAL_LOG_LEVEL` and `STATION_SIGNAL_LOG_DIR`, both
+read once, affecting output volume/destination only and nothing about behavior.
 
 Every historical bugfix (rollback ordering, reconnect races, value-diff cache semantics,
 quality-pairing, GI removal/reinstatement, dynamic dataset creation, EntryID resumption, Gap-4

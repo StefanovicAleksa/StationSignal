@@ -1,8 +1,10 @@
+#define SS_LOG_FEATURE "scan_dispatcher"
 #include <stdlib.h>
 #include <string.h>
 #include "libwebsockets.h"
 #include "hal_thread.h"
 #include "features/scan_dispatcher/data/scan_dispatcher_ws_server.h"
+#include "log.h"
 
 /* Per-connection session data (lws's per_session_data_size mechanism) - only
  * a read cursor into the shared ring buffer is needed, same as
@@ -36,8 +38,14 @@ scanDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* 
 
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
-            if (server->currentConnections >= server->maxConnections) return -1; /* reject: over the cap */
+            if (server->currentConnections >= server->maxConnections) {
+                SS_LOG_WARN("[scan_dispatcher] rejected client - at max connections (%d)\n",
+                        server->maxConnections);
+                return -1; /* reject: over the cap */
+            }
             server->currentConnections++;
+            SS_LOG_INFO("[scan_dispatcher] client connected (%d/%d)\n",
+                    server->currentConnections, server->maxConnections);
             /* Start-from-now: a newly connected client gets no backlog
              * replay - only messages pushed after this point. */
             if (session) session->cursor = ScanDispatcherRingBuffer_headSeq(server->ringBuffer);
@@ -45,6 +53,8 @@ scanDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* 
 
         case LWS_CALLBACK_CLOSED:
             server->currentConnections--;
+            SS_LOG_INFO("[scan_dispatcher] client disconnected (%d/%d)\n",
+                    server->currentConnections, server->maxConnections);
             break;
 
         case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
@@ -60,7 +70,17 @@ scanDispatcherCallback(struct lws* wsi, enum lws_callback_reasons reason, void* 
             uint64_t dropped = 0;
             char* json = ScanDispatcherRingBuffer_readNext(server->ringBuffer, &session->cursor, &dropped);
             /* dropped (lagging-client messages skipped) is not surfaced over
-             * the wire in v1. */
+             * the wire in v1. Still worth logging - a dropped scan result is
+             * a discovered device silently missing from the list until the
+             * whole scan is restarted (the daemon's own seen-set dedup never
+             * resends one), unlike a report stream where dropping a
+             * superseded value is harmless. */
+            if (dropped > 0) {
+                SS_LOG_WARN("[scan_dispatcher] lagging client dropped %llu message(s) "
+                        "(ring buffer overrun, no replay) - discovered device(s) may be "
+                        "permanently missing from this client's list\n",
+                        (unsigned long long) dropped);
+            }
             if (json) {
                 size_t payloadLen = strlen(json);
                 unsigned char* buf = malloc(LWS_PRE + payloadLen);

@@ -1,3 +1,4 @@
+#define SS_LOG_FEATURE "ied_discovery"
 #include <stdlib.h>
 #include <stdio.h>
 #include "features/ied_discovery/service/ied_discovery_api.h"
