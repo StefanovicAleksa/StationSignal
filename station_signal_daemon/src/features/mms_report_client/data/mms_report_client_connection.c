@@ -323,6 +323,18 @@ typedef struct {
     uint32_t confRev;
     uint16_t sqNum;
     bool hasEntryId;
+    /* Ownership, per IEC 61850-7-2 clause 17.2.2. Read on every snapshot
+     * because "the write was refused" and "the write was refused BECAUSE
+     * someone else holds this block" are the same log line without them - the
+     * exact gap that made a substation capture unable to say why 110 of 110
+     * RCBs failed. `owner` is an OWNED, pre-formatted string (the dotted-quad
+     * of the owning client's address when the device reports a 4-byte
+     * OCTET STRING, a hex dump otherwise), NULL when the device reports no
+     * owner at all. */
+    bool resv;
+    bool hasResvTms;
+    int16_t resvTms;
+    char* owner;
 } RcbLiveState;
 
 static void
@@ -330,6 +342,37 @@ destroyRcbLiveState(RcbLiveState* state) {
     if (!state) return;
     free(state->datSet);
     state->datSet = NULL;
+    free(state->owner);
+    state->owner = NULL;
+}
+
+/* Formats an RCB's `Owner` attribute for the log. IEC 61850-7-2 types it as an
+ * OCTET STRING with no fixed interpretation; every device seen in practice puts
+ * the owning client's IP in it, so a 4-byte value is rendered as a dotted quad
+ * and anything else as hex. Returns NULL (not a placeholder string) when the
+ * device reports no owner - the caller distinguishes "unowned" from "owned by
+ * something we can't name". Caller owns the result. */
+static char*
+formatRcbOwner(MmsValue* owner) {
+    if (!owner) return NULL;
+
+    int size = MmsValue_getOctetStringSize(owner);
+    if (size <= 0) return NULL;
+
+    uint8_t* bytes = MmsValue_getOctetStringBuffer(owner);
+    if (!bytes) return NULL;
+
+    char buf[128];
+    if (size == 4) {
+        snprintf(buf, sizeof(buf), "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]);
+    } else {
+        size_t used = 0;
+        for (int i = 0; i < size && used + 3 < sizeof(buf); i++) {
+            used += (size_t) snprintf(buf + used, sizeof(buf) - used, "%02x", bytes[i]);
+        }
+        buf[used] = '\0';
+    }
+    return MmsReportClientUtils_safeStringDup(buf);
 }
 
 /* Snapshots an already-fetched RCB object's device-reported values into an
@@ -351,12 +394,24 @@ captureAndLogRcbState(const char* objectReference, const char* when, ClientRepor
     out->confRev = ClientReportControlBlock_getConfRev(rcb);
     out->sqNum = ClientReportControlBlock_getSqNum(rcb);
     out->hasEntryId = ClientReportControlBlock_getEntryId(rcb) != NULL;
+    out->resv = ClientReportControlBlock_getResv(rcb);
+    out->hasResvTms = ClientReportControlBlock_hasResvTms(rcb);
+    out->resvTms = out->hasResvTms ? ClientReportControlBlock_getResvTms(rcb) : 0;
+    out->owner = formatRcbOwner(ClientReportControlBlock_getOwner(rcb));
+
+    char resvTmsText[32];
+    if (out->hasResvTms) {
+        snprintf(resvTmsText, sizeof(resvTmsText), "%d", (int) out->resvTms);
+    } else {
+        snprintf(resvTmsText, sizeof(resvTmsText), "absent");
+    }
 
     SS_LOG_DEBUG("[mms_report_client] '%s' live RCB state (%s): RptEna=%d DatSet='%s' OptFlds=0x%x "
-            "TrgOps=0x%x BufTm=%u IntgPd=%u ConfRev=%u SqNum=%u EntryID=%s\n",
+            "TrgOps=0x%x BufTm=%u IntgPd=%u ConfRev=%u SqNum=%u EntryID=%s Resv=%d ResvTms=%s Owner=%s\n",
             objectReference, when, out->rptEna, out->datSet ? out->datSet : "(empty)", out->optFlds,
             out->trgOps, out->bufTm, out->intgPd, out->confRev, (unsigned) out->sqNum,
-            out->hasEntryId ? "present" : "absent");
+            out->hasEntryId ? "present" : "absent", out->resv, resvTmsText,
+            out->owner ? out->owner : "(none)");
 }
 
 /* Reads the RCB straight back off the device as its OWN MMS read - deliberately
@@ -407,6 +462,15 @@ typedef struct {
     const char* expectedString;
     int expectedBits;
     bool expectedBool;
+    /* Suppresses the TEMPORARILY_UNAVAILABLE retry loop below. That loop exists
+     * for a device still initializing after its own reboot, where waiting
+     * genuinely helps. On the reservation step against a device whose RCBs are
+     * all held by another client, the same code means "not yours" and will
+     * never clear - and paying 3 x 500ms for each of 192 RCBs turned one
+     * START_REPORTING into a 28.8-second wait that was never going to succeed.
+     * Set only once a cycle has established that this device is uniformly
+     * refusing reservations - see RcbEnableCycleState. */
+    bool noTempUnavailableRetry;
 } RcbStep;
 
 /* Writes one element of an RCB, then proves (or disproves) that it landed.
@@ -430,8 +494,8 @@ typedef struct {
  * discarding it, so a LATER step's decision can be based on what the device
  * reports NOW rather than on a snapshot taken before this write. That is not a
  * convenience: a real SIPROTEC clears TrgOps/OptFlds whenever DatSet changes,
- * so enableOneTarget's steps 2 and 3 MUST judge against the state left behind
- * by step 1, not against its own entry snapshot (see this file's CHANGELOG
+ * so enableOneTarget's steps 3 and 4 MUST judge against the state left behind
+ * by step 2, not against its own entry snapshot (see this file's CHANGELOG
  * entry - deciding from the stale snapshot silently enabled RCBs with
  * TrgOps=0, which can never report anything at all). Ownership transfers to
  * the caller, which must call destroyRcbLiveState; pass NULL to have it
@@ -450,6 +514,7 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
 
     int tempUnavailableRetries = 0;
     while (err == IED_ERROR_TEMPORARILY_UNAVAILABLE
+            && !step->noTempUnavailableRetry
             && tempUnavailableRetries < MMS_REPORT_CLIENT_TEMP_UNAVAILABLE_MAX_RETRIES
             && !handle->stopRequested) {
         tempUnavailableRetries++;
@@ -546,12 +611,191 @@ runRcbStep(MmsReportClientHandle handle, ClientReportControlBlock rcb, const cha
 typedef enum {
     RCB_ENABLE_OUTCOME_ENABLED,           /* bound and enabled, reporting */
     RCB_ENABLE_OUTCOME_NOT_NEEDED,        /* benign: device's data already fully covered elsewhere */
+    RCB_ENABLE_OUTCOME_OWNED_ELSEWHERE,   /* another MMS client holds this RCB - see below */
     RCB_ENABLE_OUTCOME_FAILED,            /* a dataset/enable was genuinely needed and didn't happen */
     RCB_ENABLE_OUTCOME_SKIPPED_STOPPING,  /* a stop landed mid-loop; excluded from the tally */
 } RcbEnableOutcome;
 
+/* OWNED_ELSEWHERE is a third benign-but-not-silent outcome, distinct from both
+ * NOT_NEEDED and FAILED. On a bench IED this client is the only master and it
+ * never fires. In a live substation the station SCADA (SICAM PAS, in the case
+ * this was diagnosed from) permanently holds a couple of RCB instances per
+ * device, and IEC 61850-7-2 gives an RCB exactly one owner - so those blocks are
+ * not a defect to fix, not a spare slot to ignore, and above all NOT something
+ * to keep retrying or to wrestle away from the SCADA. They are simply someone
+ * else's, and the operator needs to be told that in those words. */
+
+/* Outcome of the reservation step below. */
+typedef enum {
+    RCB_RESERVE_ACQUIRED,         /* this client now owns the RCB */
+    RCB_RESERVE_UNSUPPORTED,      /* device has no Resv/ResvTms - proceed unreserved, see below */
+    RCB_RESERVE_OWNED_ELSEWHERE,  /* another client holds it */
+    RCB_RESERVE_FAILED,           /* a real error */
+} RcbReserveResult;
+
+/* How long a buffered RCB reservation is leased for, in seconds. IEC 61850-7-2
+ * has the server release a BRCB reservation this long after the reserving
+ * client's association drops, so an ungraceful daemon exit cannot strand a
+ * block forever. Long enough to cover a whole enable cycle plus a reconnect
+ * backoff tier, short enough that a crashed daemon frees the block well inside
+ * a technician's coffee break. Refreshed on every reconnect (each connect cycle
+ * re-runs the full enable sequence, reservation included). */
+#define MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS 60
+
+/* After this many targets in a row have come back "owned by another client",
+ * stop paying the TEMPORARILY_UNAVAILABLE retry cost on the reservation step
+ * for the rest of the cycle. Three is enough to rule out a one-off (a genuinely
+ * still-booting device recovers within the first target or two, and its first
+ * successful reservation resets the run), and small enough that a 192-RCB
+ * device that is fully owned finishes in seconds instead of half a minute. */
+#define MMS_REPORT_CLIENT_OWNED_ELSEWHERE_LATCH_THRESHOLD 3
+
+/* Per-connect-cycle state shared across every target's enable attempt. Lives on
+ * enableAllTargets' stack and is handed to each enableOneTarget call - never on
+ * the handle, because none of it is meaningful across a reconnect (the device's
+ * own ownership picture may have genuinely changed in between, and a fresh
+ * cycle must re-measure rather than inherit a stale verdict). Mirrors
+ * MmsDatasetManagerSession.associationSpecificCreateRejected's own
+ * latch-per-cycle-never-persist posture. */
+typedef struct {
+    int consecutiveOwnedElsewhere;
+    bool reservationRetriesDisabled;
+    int consecutiveObjectDoesNotExist;
+    bool modelMismatchReported;
+} RcbEnableCycleState;
+
+/* How many RCBs must be missing from the device back-to-back before the cycle
+ * concludes it is talking to the wrong device entirely, rather than hitting a
+ * few RCBs an otherwise-matching device happens not to implement. A real
+ * capture shows this at its most extreme - 110 of 110 RCBs answering
+ * object-does-not-exist because the operator pointed an uploaded SCD at an IP
+ * belonging to a different IED - reported as 110 identical failures with no
+ * hint of the actual cause. */
+#define MMS_REPORT_CLIENT_MODEL_MISMATCH_THRESHOLD 5
+
+/* Claims the RCB for this client before anything else is written to it.
+ *
+ * WHY THIS EXISTS AT ALL. IEC 61850-7-2 clause 17.2.2 makes an RCB a
+ * single-owner resource: a client reserves it (URCB: Resv=TRUE; BRCB: a
+ * positive ResvTms lease) and only the reserving client may then write
+ * DatSet/OptFlds/TrgOps/RptEna. Edition 1 and Edition 2 servers permit
+ * *implicit* reservation - the DatSet write reserves the block as a side
+ * effect - so a client that never reserves still works against them. Edition
+ * 2.1 explicitly forbids that and refuses every such write with
+ * OBJECT_ACCESS_DENIED until the block is reserved.
+ *
+ * This daemon skipped the reservation entirely for its whole life. Every bench
+ * target happened to be Edition 2 (including this repo's own ied_simulator,
+ * which ran on libiec61850's Edition 2 default), so nothing ever caught it -
+ * while on real in-service SIPROTEC 6MD hardware EVERY RCB write was refused,
+ * on three different devices, producing `0 enabled, N FAILED` and not one MMS
+ * report. See CHANGELOG.md for the full incident.
+ *
+ * UNSUPPORTED IS NOT A FAILURE. A device with no Resv/ResvTms at all (or one
+ * that rejects the write as an unknown/unsupported attribute) is an Edition
+ * 1/2 device doing implicit reservation, which is exactly the population that
+ * worked before this step existed. Those must keep working untouched, so that
+ * case returns UNSUPPORTED and the sequence continues unreserved.
+ *
+ * A refusal that names access or availability, by contrast, is the device
+ * telling us the block belongs to somebody else - and that is a hard stop for
+ * this target, deliberately BEFORE any other write. */
+static RcbReserveResult
+reserveOneTarget(MmsReportClientHandle handle, ClientReportControlBlock rcb,
+        ReportControlBlockTarget* target, const RcbLiveState* entryState, RcbEnableCycleState* cycle) {
+    /* A BRCB whose ResvTms the device doesn't even expose has no lease to take.
+     * Nothing to write, nothing to fail on - Edition 1/2 implicit reservation
+     * territory. (URCBs always carry Resv, so only BRCBs can land here.) */
+    if (target->buffered && !entryState->readOk) {
+        SS_LOG_DEBUG("[mms_report_client] '%s' reservation: entry read-back failed, cannot tell whether this "
+                "device supports ResvTms - attempting the sequence unreserved\n", target->objectReference);
+        return RCB_RESERVE_UNSUPPORTED;
+    }
+    if (target->buffered && !entryState->hasResvTms) {
+        SS_LOG_DEBUG("[mms_report_client] '%s' reservation: device exposes no ResvTms on this buffered RCB "
+                "(Edition 1/2 implicit reservation) - proceeding unreserved\n", target->objectReference);
+        return RCB_RESERVE_UNSUPPORTED;
+    }
+
+    /* A BRCB already carrying ResvTms=-1 is pre-assigned to a specific client
+     * by configuration and can never be leased by anyone else - per
+     * IEC 61850-7-2 that value means "reserved for the configured Owner only".
+     * Writing to it would be refused; say so precisely instead. */
+    if (target->buffered && entryState->resvTms < 0) {
+        SS_LOG_INFO("[mms_report_client] '%s' is pre-assigned to a configured client (ResvTms=%d, Owner=%s) - "
+                "this RCB is reserved for that client by device configuration and cannot be used by this "
+                "tool; leaving it untouched\n", target->objectReference, (int) entryState->resvTms,
+                entryState->owner ? entryState->owner : "(none)");
+        return RCB_RESERVE_OWNED_ELSEWHERE;
+    }
+
+    char intended[128];
+    RcbStep reserveStep;
+    memset(&reserveStep, 0, sizeof(reserveStep));
+    reserveStep.noTempUnavailableRetry = cycle->reservationRetriesDisabled;
+    if (target->buffered) {
+        ClientReportControlBlock_setResvTms(rcb, (int16_t) MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS);
+        snprintf(intended, sizeof(intended), "ResvTms=%d", MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS);
+        reserveStep.element = RCB_ELEMENT_RESV_TMS;
+        reserveStep.name = "0/7 Resv (claim)";
+        reserveStep.intendedText = intended;
+        /* Deliberately unverified: a server may legitimately grant a shorter
+         * lease than asked for, so an exact read-back match is the wrong test.
+         * What proves the claim is the write returning OK - and, failing that,
+         * every later step refusing. */
+        reserveStep.verify = RCB_STEP_VERIFY_NONE;
+    } else {
+        ClientReportControlBlock_setResv(rcb, true);
+        snprintf(intended, sizeof(intended), "Resv=true");
+        reserveStep.element = RCB_ELEMENT_RESV;
+        reserveStep.name = "0/7 Resv (claim)";
+        reserveStep.intendedText = intended;
+        reserveStep.verify = RCB_STEP_VERIFY_NONE;
+    }
+
+    IedClientError err = runRcbStep(handle, rcb, target->objectReference, &reserveStep, NULL, NULL);
+
+    switch (err) {
+        case IED_ERROR_OK:
+            SS_LOG_DEBUG("[mms_report_client] '%s' reservation acquired\n", target->objectReference);
+            return RCB_RESERVE_ACQUIRED;
+
+        case IED_ERROR_ACCESS_DENIED:
+        case IED_ERROR_TEMPORARILY_UNAVAILABLE:
+            /* The two codes a server uses for "this block is not yours" -
+                * confirmed against the vendored reference server
+                * (reporting.c: reserved-by-a-different-client ->
+                * TEMPORARILY_UNAVAILABLE; pre-configured-owner mismatch ->
+                * OBJECT_ACCESS_DENIED). */
+            SS_LOG_INFO("[mms_report_client] '%s' is held by another MMS client (reservation refused: %s (%d), "
+                    "device reports Resv=%d Owner=%s) - leaving it untouched; this is normal on an in-service "
+                    "IED whose station SCADA already owns some report blocks\n", target->objectReference,
+                    IedClientError_toString(err), err, entryState->resv,
+                    entryState->owner ? entryState->owner : "(none)");
+            return RCB_RESERVE_OWNED_ELSEWHERE;
+
+        case IED_ERROR_OBJECT_DOES_NOT_EXIST:
+        case IED_ERROR_OBJECT_ACCESS_UNSUPPORTED:
+        case IED_ERROR_SERVICE_NOT_SUPPORTED:
+        case IED_ERROR_SERVICE_NOT_IMPLEMENTED:
+        case IED_ERROR_OBJECT_REFERENCE_INVALID:
+            /* No such attribute on this device - Edition 1/2 implicit
+             * reservation. Exactly the devices that worked before this step
+             * existed; they must keep working. */
+            SS_LOG_DEBUG("[mms_report_client] '%s' reservation: device does not implement this attribute "
+                    "(%s (%d)) - Edition 1/2 implicit reservation, proceeding unreserved\n",
+                    target->objectReference, IedClientError_toString(err), err);
+            return RCB_RESERVE_UNSUPPORTED;
+
+        default:
+            SS_LOG_ERROR("[mms_report_client] '%s' reservation FAILED: %s (%d) - this RCB will not report\n",
+                    target->objectReference, IedClientError_toString(err), err);
+            return RCB_RESERVE_FAILED;
+    }
+}
+
 static RcbEnableOutcome
-enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) {
+enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target, RcbEnableCycleState* cycle) {
     /* Defense-in-depth against enableAllTargets' own loop-top check below -
      * covers the narrow gap between that check and this call actually
      * landing, if a stop lands on the connection concurrently mid-loop. */
@@ -564,11 +808,33 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     if (!rcb) {
         SS_LOG_WARN("[mms_report_client] getRCBValues failed for '%s': %s (%d)\n",
                 target->objectReference, IedClientError_toString(err), err);
+
+        /* An RCB the loaded model says exists but the device has never heard of
+         * is, once it happens over and over, not a per-RCB fault at all - it
+         * means this model does not describe this device. Said once, plainly,
+         * instead of leaving the reader to infer it from a wall of identical
+         * per-RCB failures. */
+        if (err == IED_ERROR_OBJECT_DOES_NOT_EXIST) {
+            cycle->consecutiveObjectDoesNotExist++;
+            if (!cycle->modelMismatchReported
+                    && cycle->consecutiveObjectDoesNotExist >= MMS_REPORT_CLIENT_MODEL_MISMATCH_THRESHOLD) {
+                cycle->modelMismatchReported = true;
+                SS_LOG_ERROR("[mms_report_client] the first %d report control blocks in this device's loaded "
+                        "model do not exist on the device at all ('%s' among them). The structure file/model "
+                        "in use almost certainly does not match the IED at this address - check that the "
+                        "uploaded SCD's IED name and this device's address refer to the same physical "
+                        "device\n", cycle->consecutiveObjectDoesNotExist, target->objectReference);
+            }
+        } else {
+            cycle->consecutiveObjectDoesNotExist = 0;
+        }
+
         if (handle->rcbStatusCallback) {
             handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false, err);
         }
         return RCB_ENABLE_OUTCOME_FAILED;
     }
+    cycle->consecutiveObjectDoesNotExist = 0;
 
     /* Everything the device itself says about this RCB before this client
      * touches anything - taken straight from the getRCBValues above, no extra
@@ -580,6 +846,50 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     RcbLiveState entryState;
     memset(&entryState, 0, sizeof(entryState));
     captureAndLogRcbState(target->objectReference, "on entry, before any write", rcb, &entryState);
+
+    /* CLAIM THE RCB BEFORE ANYTHING ELSE TOUCHES IT OR THE DEVICE.
+     *
+     * Deliberately ahead of dataset resolution, not just ahead of the write
+     * sequence: resolution's tier-4 self-create makes real createDataSet calls
+     * on the wire, and a domain-scoped dataset created for an RCB that then
+     * turns out to belong to the station SCADA is never cleaned up and
+     * permanently consumes that device's dataset quota. A real capture shows
+     * exactly that leak - one in-service IED went from 5 to 9 leftover datasets
+     * across two connect cycles that enabled nothing at all. Reserving first
+     * means a block owned elsewhere costs exactly one write and zero
+     * device-side state. */
+    RcbReserveResult reservation = reserveOneTarget(handle, rcb, target, &entryState, cycle);
+
+    /* Latch bookkeeping: a run of consecutive "not yours" verdicts means this
+     * device is uniformly refusing us, so stop waiting out a retry loop that
+     * cannot help. Any other outcome ends the run - a device that grants even
+     * one reservation is not uniformly refusing, whatever it did before. */
+    if (reservation == RCB_RESERVE_OWNED_ELSEWHERE) {
+        cycle->consecutiveOwnedElsewhere++;
+        if (!cycle->reservationRetriesDisabled
+                && cycle->consecutiveOwnedElsewhere >= MMS_REPORT_CLIENT_OWNED_ELSEWHERE_LATCH_THRESHOLD) {
+            cycle->reservationRetriesDisabled = true;
+            SS_LOG_INFO("[mms_report_client] %d report control blocks in a row are owned by another MMS "
+                    "client - this device appears to be fully in use, so the remaining targets this cycle "
+                    "will skip the retry wait on their own reservation attempt (they are still each tried "
+                    "once)\n", cycle->consecutiveOwnedElsewhere);
+        }
+    } else {
+        cycle->consecutiveOwnedElsewhere = 0;
+    }
+
+    if (reservation == RCB_RESERVE_OWNED_ELSEWHERE || reservation == RCB_RESERVE_FAILED) {
+        /* No report handler has been installed and no dataset has been touched
+         * at this point, so there is nothing to unwind. */
+        bool ownedElsewhere = (reservation == RCB_RESERVE_OWNED_ELSEWHERE);
+        if (handle->rcbStatusCallback) {
+            handle->rcbStatusCallback(handle->rcbStatusCallbackParam, target->objectReference, false,
+                    ownedElsewhere ? IED_ERROR_ACCESS_DENIED : IED_ERROR_UNKNOWN);
+        }
+        destroyRcbLiveState(&entryState);
+        ClientReportControlBlock_destroy(rcb);
+        return ownedElsewhere ? RCB_ENABLE_OUTCOME_OWNED_ELSEWHERE : RCB_ENABLE_OUTCOME_FAILED;
+    }
 
     /* The value-diff cache is deliberately NEVER reset here anymore - on the
      * very first connect it's already all-NULL (fresh from buildMemberRefCache),
@@ -727,33 +1037,56 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * put through runRcbStep (see its own doc comment, and the block comment
      * above it, for why this is no longer a single bundled write):
      *
-     *   0. RptEna=false - only if the device reports it as already enabled.
-     *                     DatSet/OptFlds/TrgOps are only writable while
-     *                     RptEna is FALSE, so on a reconnect that finds the
-     *                     RCB still active, every step below is illegal until
-     *                     this one has run.
-     *   1. DatSet       - bind the dataset resolved above.            FATAL
-     *   2. OptFlds      - buffered only, OR in EntryID.
-     *   3. TrgOps       - OR in dchg/qchg/gi.
-     *   4. EntryID      - buffered only, the resume point.
-     *   5. RptEna=true  - and only now is the RCB actually enabled.    FATAL
-     *   6. GI           - a trigger request against an already-active RCB.
+     *   0. Resv/ResvTms - claim the block. Already run, ABOVE dataset
+     *                     resolution rather than here, so an RCB owned by
+     *                     another client costs no createDataSet call - see
+     *                     reserveOneTarget and the call site.        FATAL
+     *   1. RptEna=false - only if the device reports it as already enabled
+     *                     AND this client owns it. DatSet/OptFlds/TrgOps are
+     *                     only writable while RptEna is FALSE, so on a
+     *                     reconnect that finds the RCB still active, every
+     *                     step below is illegal until this one has run.
+     *   2. DatSet       - bind the dataset resolved above.            FATAL
+     *   3. OptFlds      - buffered only, OR in EntryID.
+     *   4. TrgOps       - OR in dchg/qchg/gi.
+     *   5. EntryID      - buffered only, the resume point.
+     *   6. RptEna=true  - and only now is the RCB actually enabled.    FATAL
+     *   7. GI           - a trigger request against an already-active RCB.
      *
-     * Only steps 1 and 5 are fatal: without a bound dataset, or without the
-     * enable itself, the RCB genuinely cannot report. A failure in step
-     * 0/2/3/4/6 is logged loudly and the sequence continues - a degraded RCB
-     * that is still bound and enabled beats no RCB at all, and the log then
-     * says exactly which capability is degraded and why. */
+     * Only steps 0, 2 and 6 are fatal: without the reservation the device will
+     * refuse everything below it, and without a bound dataset or the enable
+     * itself the RCB genuinely cannot report. A failure in step 1/3/4/5/7 is
+     * logged loudly and the sequence continues - a degraded RCB that is still
+     * bound and enabled beats no RCB at all, and the log then says exactly
+     * which capability is degraded and why. */
 
-    /* Step 0. */
-    if (entryState.rptEna) {
+    /* Step 1 (pre-disable).
+     *
+     * NEVER DISABLE REPORTING THIS CLIENT DOES NOT OWN. This used to fire
+     * unconditionally on any RCB found enabled, which in a live substation
+     * means firing it at a block actively feeding the station SCADA. A real
+     * capture caught it aimed at an RCB mid-report to SICAM PAS (SqNum=82); the
+     * SIPROTEC refused the write and the SCADA was unaffected, but a device
+     * that honored it would have silently cut the substation's own reporting.
+     * That is not a risk this tool gets to take.
+     *
+     * Two things make it safe to proceed: we hold the reservation (the device
+     * itself just granted it, so the block is ours), or the device claims no
+     * owner at all and no reservation - the Edition 1/2 case, where a live
+     * RptEna=1 with nobody claiming it is this client's own leftover from a
+     * previous connection, which is exactly the buffered-reconnect case this
+     * step was written for. */
+    bool weOwnThisRcb = (reservation == RCB_RESERVE_ACQUIRED)
+            || (reservation == RCB_RESERVE_UNSUPPORTED && !entryState.resv && !entryState.owner);
+
+    if (entryState.rptEna && weOwnThisRcb) {
         SS_LOG_DEBUG("[mms_report_client] '%s' is already enabled on the device - disabling first so its "
                 "configuration attributes become writable (IEC 61850-7-2: DatSet/OptFlds/TrgOps/BufTm/IntgPd "
                 "are only writable while RptEna is FALSE)\n", target->objectReference);
         ClientReportControlBlock_setRptEna(rcb, false);
         RcbStep disableStep = {
             .element = RCB_ELEMENT_RPT_ENA,
-            .name = "0/6 RptEna=false (pre-disable)",
+            .name = "1/7 RptEna=false (pre-disable)",
             .intendedText = "RptEna=false",
             .verify = RCB_STEP_VERIFY_RPT_ENA,
             .expectedBool = false,
@@ -762,14 +1095,21 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
          * steps below will each fail on their own and name themselves, which
          * is strictly more diagnostic than bailing out here would be. */
         runRcbStep(handle, rcb, target->objectReference, &disableStep, NULL, NULL);
+    } else if (entryState.rptEna) {
+        SS_LOG_WARN("[mms_report_client] '%s' step '1/7 RptEna=false (pre-disable)': SKIPPED - the device "
+                "reports this RCB as actively reporting (RptEna=1, SqNum=%u, Resv=%d, Owner=%s) and this "
+                "client does not hold its reservation, so disabling it would cut off whoever does. Leaving "
+                "it running; the configuration steps below will fail on their own if it really is ours\n",
+                target->objectReference, (unsigned) entryState.sqNum, entryState.resv,
+                entryState.owner ? entryState.owner : "(none)");
     } else {
-        SS_LOG_DEBUG("[mms_report_client] '%s' step '0/6 RptEna=false (pre-disable)': skipped (device "
+        SS_LOG_DEBUG("[mms_report_client] '%s' step '1/7 RptEna=false (pre-disable)': skipped (device "
                 "already reports RptEna=0, configuration attributes are writable as-is)\n",
                 target->objectReference);
     }
 
-    /* Step 1. Its own read-back is captured into postDatSetState and becomes
-     * the basis for steps 2 and 3 below - see those steps' own comments and
+    /* Step 2. Its own read-back is captured into postDatSetState and becomes
+     * the basis for steps 3 and 4 below - see those steps' own comments and
      * runRcbStep's outLive doc comment for why entryState is NOT usable there. */
     RcbLiveState postDatSetState;
     memset(&postDatSetState, 0, sizeof(postDatSetState));
@@ -781,7 +1121,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 resolution.tierName);
         RcbStep datSetStep = {
             .element = RCB_ELEMENT_DATSET,
-            .name = "1/6 DatSet",
+            .name = "2/7 DatSet",
             .intendedText = intended,
             .verify = RCB_STEP_VERIFY_DATSET,
             .expectedString = resolution.datasetReference,
@@ -818,7 +1158,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         err = IED_ERROR_OK;
     }
     if (err != IED_ERROR_OK) {
-        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 1 - the dataset binding itself was "
+        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 2 - the dataset binding itself was "
                 "rejected and the device does not already report the dataset we resolved, so there is nothing "
                 "left to enable\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
@@ -832,7 +1172,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         return RCB_ENABLE_OUTCOME_FAILED;
     }
 
-    /* Step 2. Proactively request OptFlds.EntryID for every buffered RCB,
+    /* Step 3. Proactively request OptFlds.EntryID for every buffered RCB,
      * rather than relying on however the device happens to already be
      * configured - a real device was found sending ZERO EntryID across every
      * single report (confirmed via a temporary diagnostic log: 2581/2581
@@ -851,7 +1191,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * visit/reconfiguration first.
      *
      * JUDGED AGAINST postDatSetState, NOT entryState. A real SIPROTEC clears
-     * OptFlds (and TrgOps - see step 3) whenever step 1 writes a DIFFERENT
+     * OptFlds (and TrgOps - see step 4) whenever step 2 writes a DIFFERENT
      * DatSet, so this RCB's OptFlds may well have been wiped microseconds ago
      * and entryState is stale by definition here. Reading the stale snapshot is
      * exactly the bug that silently broke step 3 on real hardware (see this
@@ -875,7 +1215,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 postDatSetState.readOk ? "" : " - read-back failed, assuming none set", RPT_OPT_ENTRY_ID);
         RcbStep optFldsStep = {
             .element = RCB_ELEMENT_OPT_FLDS,
-            .name = "2/6 OptFlds",
+            .name = "3/7 OptFlds",
             .intendedText = intended,
             .verify = RCB_STEP_VERIFY_OPT_FLDS,
             .expectedBits = RPT_OPT_ENTRY_ID,
@@ -898,7 +1238,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 target->objectReference, postDatSetState.optFlds);
     }
 
-    /* Step 3. Proactively OR in TrgOps.dchg/qchg/gi for every RCB, rather
+    /* Step 4. Proactively OR in TrgOps.dchg/qchg/gi for every RCB, rather
      * than relying on however the device happens to already be configured - a
      * real device (via OMICRON IED Scout's "Simulate IED" feature, standing
      * in for this device's real engineering export) was found with TrgOps
@@ -932,12 +1272,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * IED_ERROR_TEMPORARILY_UNAVAILABLE once enabled (confirmed directly:
      * integration_tests/mms_report_client's
      * test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix fails
-     * with exactly that error if this write is deferred to after step 5).
+     * with exactly that error if this write is deferred to after step 6).
      *
      * JUDGED AGAINST postDatSetState, NOT entryState - THIS IS THE BUG THIS
-     * STEP ONCE HAD. A real SIPROTEC clears TrgOps to 0x0 whenever step 1
+     * STEP ONCE HAD. A real SIPROTEC clears TrgOps to 0x0 whenever step 2
      * writes a DIFFERENT DatSet. An RCB that arrived already carrying
-     * dchg|qchg|gi therefore had its triggers wiped by step 1, while this
+     * dchg|qchg|gi therefore had its triggers wiped by step 2, while this
      * skip-condition - reading the pre-step-1 snapshot - still saw 0x13 and
      * skipped the rewrite. The result was an RCB enabled with TrgOps=0x0: it
      * can never emit a change report, and because TrgOps.gi is gone it doesn't
@@ -961,7 +1301,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 postDatSetState.readOk ? "" : " - read-back failed, assuming none set", neededTrgOps);
         RcbStep trgOpsStep = {
             .element = RCB_ELEMENT_TRG_OPS,
-            .name = "3/6 TrgOps",
+            .name = "4/7 TrgOps",
             .intendedText = intended,
             .verify = RCB_STEP_VERIFY_TRG_OPS,
             .expectedBits = neededTrgOps,
@@ -982,7 +1322,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
                 "set after the DatSet write, TrgOps=0x%x)\n", target->objectReference, postDatSetState.trgOps);
     }
 
-    /* Step 4. Resume a buffered RCB's delivery from the last EntryID this
+    /* Step 5. Resume a buffered RCB's delivery from the last EntryID this
      * client actually received, instead of re-requesting the server's entire
      * unacknowledged backlog on every RptEna transition - see
      * MmsReportClientMemberRefCacheEntry.lastEntryId's own doc comment for
@@ -1043,7 +1383,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     if (hasResumableEntryId) {
         RcbStep entryIdStep = {
             .element = RCB_ELEMENT_ENTRY_ID,
-            .name = "4/6 EntryID",
+            .name = "5/7 EntryID",
             .intendedText = "the cached EntryID as this RCB's resume point",
             .verify = RCB_STEP_VERIFY_NONE,
         };
@@ -1059,7 +1399,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
              * implementation-defined, so rather than guess at it, fall back
              * to the pre-existing full-resume behavior instead of leaving
              * this RCB unreported - non-fatal, the sequence continues to
-             * step 5.
+             * step 6.
              *
              * Clear the cached EntryID back to NULL rather than leaving it in
              * place. Required alongside MmsReportClientReportAdapter_onReport's
@@ -1131,7 +1471,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
     {
         RcbStep rptEnaStep = {
             .element = RCB_ELEMENT_RPT_ENA,
-            .name = "5/6 RptEna=true",
+            .name = "6/7 RptEna=true",
             .intendedText = "RptEna=true",
             .verify = RCB_STEP_VERIFY_RPT_ENA,
             .expectedBool = true,
@@ -1139,7 +1479,7 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
         err = runRcbStep(handle, rcb, target->objectReference, &rptEnaStep, &rptEnaApplied, &finalState);
     }
     if (err != IED_ERROR_OK) {
-        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 5 - the device refused to enable "
+        SS_LOG_ERROR("[mms_report_client] '%s' ABORTING enable at step 6 - the device refused to enable "
                 "reporting on this RCB\n", target->objectReference);
         IedConnection_uninstallReportHandler(handle->connection, target->objectReference);
         if (handle->rcbStatusCallback) {
@@ -1159,12 +1499,12 @@ enableOneTarget(MmsReportClientHandle handle, ReportControlBlockTarget* target) 
      * can-it-actually-report verdict at the end of this function, where both
      * flavours of "enabled on paper only" are surfaced together. */
 
-    /* Step 6. */
+    /* Step 7. */
     if (requestGi) {
         ClientReportControlBlock_setGI(rcb, true);
         RcbStep giStep = {
             .element = RCB_ELEMENT_GI,
-            .name = "6/6 GI",
+            .name = "7/7 GI",
             .intendedText = "GI=true (one-shot general interrogation against the now-active RCB)",
             .verify = RCB_STEP_VERIFY_NONE,
         };
@@ -1285,12 +1625,16 @@ enableAllTargets(MmsReportClientHandle handle) {
 
     int enabledCount = 0;
     int notNeededCount = 0;
+    int ownedElsewhereCount = 0;
     int failedCount = 0;
+    RcbEnableCycleState cycle;
+    memset(&cycle, 0, sizeof(cycle));
     LinkedList element = LinkedList_getNext(handle->targets);
     while (element && !handle->stopRequested) {
-        switch (enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element))) {
+        switch (enableOneTarget(handle, (ReportControlBlockTarget*) LinkedList_getData(element), &cycle)) {
             case RCB_ENABLE_OUTCOME_ENABLED:    enabledCount++; break;
             case RCB_ENABLE_OUTCOME_NOT_NEEDED: notNeededCount++; break;
+            case RCB_ENABLE_OUTCOME_OWNED_ELSEWHERE: ownedElsewhereCount++; break;
             case RCB_ENABLE_OUTCOME_FAILED:     failedCount++; break;
             case RCB_ENABLE_OUTCOME_SKIPPED_STOPPING: break; /* teardown, not an outcome worth counting */
         }
@@ -1305,14 +1649,35 @@ enableAllTargets(MmsReportClientHandle handle) {
      * genuinely are failures, so a healthy cycle reads clean rather than
      * ending on the word FAILED every time. */
     if (!handle->stopRequested) {
-        int total = enabledCount + notNeededCount + failedCount;
+        int total = enabledCount + notNeededCount + ownedElsewhereCount + failedCount;
+
+        /* "Owned by another client" is always named, even at zero, precisely
+         * because it is the number that explains an otherwise baffling
+         * substation run: an operator seeing "0 enabled" needs to know in the
+         * same line whether the device refused us or simply had nothing spare
+         * left. It is deliberately not folded into the failure count - see
+         * RCB_ENABLE_OUTCOME_OWNED_ELSEWHERE's own comment. */
         if (failedCount > 0) {
             SS_LOG_ERROR("[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
-                    "(device already fully covered), %d FAILED - see the per-RCB lines above\n",
-                    total, enabledCount, notNeededCount, failedCount);
+                    "(device already fully covered), %d owned by another MMS client, %d FAILED - see the "
+                    "per-RCB lines above\n",
+                    total, enabledCount, notNeededCount, ownedElsewhereCount, failedCount);
         } else {
             SS_LOG_INFO("[mms_report_client] enable cycle complete for %d RCB(s): %d enabled, %d not needed "
-                    "(device already fully covered), no failures\n", total, enabledCount, notNeededCount);
+                    "(device already fully covered), %d owned by another MMS client, no failures\n",
+                    total, enabledCount, notNeededCount, ownedElsewhereCount);
+        }
+
+        /* The specific shape a live-substation run takes when this client is
+         * shut out entirely. Worth its own line: without it the operator sees
+         * "0 enabled" and reasonably concludes the tool is broken, when in fact
+         * the device is fully in use by the station's own SCADA. */
+        if (enabledCount == 0 && ownedElsewhereCount > 0) {
+            SS_LOG_WARN("[mms_report_client] no report control block on this device is available to this tool - "
+                    "all %d that were tried are already owned by another MMS client (typically the station "
+                    "SCADA/gateway). IEC 61850 gives each RCB a single owner, so this is not recoverable from "
+                    "here; the device needs spare RCB instances freed, or a different IED\n",
+                    ownedElsewhereCount);
         }
     }
 
@@ -1490,6 +1855,43 @@ MmsReportClientConnection_stop(MmsReportClientHandle handle) {
      * foreign/adopted dataset are never touched. See
      * MmsDatasetManager_cleanupOnStop for the full contract. */
     MmsDatasetManager_cleanupOnStop(handle->datasetManager);
+
+    /* Hand every RCB reservation back before dropping the association.
+     *
+     * Not strictly required for correctness - a URCB's Resv clears when the
+     * owning association closes, and a BRCB's ResvTms lease
+     * (MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS) expires on its own - but on
+     * a live substation IED "correct in sixty seconds" is not the same as
+     * correct. A technician who stops one device and immediately restarts it,
+     * or moves to the next bay and comes back, should not find the blocks this
+     * tool just released still locked against them. Releasing explicitly makes
+     * the RCB available again the instant we let go.
+     *
+     * Strictly best-effort: every failure here is ignored (the lease expiry is
+     * the real guarantee), and it deliberately never touches an RCB this client
+     * does not own - a refused write simply means it was never ours. */
+    if (handle->connection && handle->targets
+            && IedConnection_getState(handle->connection) == IED_STATE_CONNECTED) {
+        LinkedList element = LinkedList_getNext(handle->targets);
+        while (element) {
+            ReportControlBlockTarget* target = (ReportControlBlockTarget*) LinkedList_getData(element);
+            IedClientError err = IED_ERROR_OK;
+            ClientReportControlBlock rcb =
+                IedConnection_getRCBValues(handle->connection, &err, target->objectReference, NULL);
+            if (rcb) {
+                if (target->buffered) {
+                    ClientReportControlBlock_setResvTms(rcb, 0);
+                    IedConnection_setRCBValues(handle->connection, &err, rcb, RCB_ELEMENT_RESV_TMS, true);
+                } else {
+                    ClientReportControlBlock_setResv(rcb, false);
+                    IedConnection_setRCBValues(handle->connection, &err, rcb, RCB_ELEMENT_RESV, true);
+                }
+                ClientReportControlBlock_destroy(rcb);
+            }
+            element = LinkedList_getNext(element);
+        }
+        SS_LOG_DEBUG("[mms_report_client] stop: released this client's RCB reservations\n");
+    }
 
     if (handle->connection) IedConnection_close(handle->connection);
     if (handle->wakeSignal) Semaphore_post(handle->wakeSignal);

@@ -1932,3 +1932,133 @@ a Q-group LN, `<RptEnabled max="5">`, `<Services><ReportSettings datSet="Conf">`
 `<GSE><Address>` block with a hex APPID/VLAN-ID (the Siemens files carry no `<GSE><Address>` at
 all, so this is the first fixture that actually exercises that parse). Far cheaper to keep than
 a 20 MB station SCD, and it states its own intent.
+
+## RCB reservation was never implemented — every in-service substation IED refused every write
+
+The daemon worked on the bench and on simulators for its whole life, and produced **zero** MMS
+reports against the same IED models once they were installed and in service in a real trafo
+station. A log capture spanning both situations in one evening made it a controlled comparison.
+
+### What the capture showed
+
+| Target | Result |
+|---|---|
+| bench `192.168.1.85:49152`, `172.16.0.5:102` (E13, C5) | 73 / 64 / 17 / 20 RCBs enabled, 60 reports forwarded |
+| **in service** `192.168.0.207:102` (`X1_A207`) | **0 enabled**, 9→20 FAILED every cycle, **0 reports** |
+| simulator `192.168.0.237:49152`, **the same `X1_A207` SCD** | **20 enabled, no failures**, reports received |
+| **in service** `192.168.0.60:102` (`D1_6MD`) | **0 enabled**, 84 FAILED |
+| **in service** `D6_6MD` | **0 enabled**, 11 FAILED |
+| simulator `192.168.0.237:49153`, **the same `D6` SCD** | **40 enabled, no failures** |
+
+Same SCD, same IED names, same daemon build, same `eth0`. The only variable that changed the
+outcome was bench/simulator vs. in-service device. On all three real devices the shape was
+identical: BRCBs refused step `1/6 DatSet` with `access-denied (21)`, URCBs with
+`temporary-unavailable (26)` after three pointless retries, every one then `ABORTING enable at
+step 1`.
+
+### Root cause
+
+IEC 61850-7-2 clause 17.2.2 makes an RCB a single-owner resource: a client reserves it (URCB:
+`Resv=TRUE`; BRCB: a positive `ResvTms` lease) and only the reserving client may then write
+`DatSet`/`OptFlds`/`TrgOps`/`RptEna`. **This daemon never reserved anything** — `RCB_ELEMENT_RESV`
+and `RCB_ELEMENT_RESV_TMS` appeared nowhere in `src/`, and the first thing written to any RCB was
+`DatSet`.
+
+Edition 1 and Edition 2 servers permit *implicit* reservation — the `DatSet` write reserves the
+block as a side effect — so a client that never reserves still works against them. Edition 2.1
+explicitly forbids it. From the vendored reference server
+(`third_party_src/libiec61850/src/iec61850/server/mms_mapping/reporting.c`):
+
+```c
+/* 2152 - for edition 2.1 don't allow implicit RCB reservation */
+if (rc->reserved == false)
+    if (strcmp(elementName,"Resv") && strcmp(elementName,"ResvTms"))
+        retVal = DATA_ACCESS_ERROR_OBJECT_ACCESS_DENIED;      /* the BRCB failure */
+
+/* 2166 */
+if (rc->reserved && rc->clientConnection != connection)
+    retVal = DATA_ACCESS_ERROR_TEMPORARILY_UNAVAILABLE;       /* the URCB failure */
+```
+
+`access-denied` = a non-`Resv` write to an unreserved RCB on an Edition 2.1 server (or an
+`Owner`/IP mismatch against a pre-configured client). `temporary-unavailable` = reserved by a
+different client. The real SIPROTEC 6MD devices behave the Edition 2.1 way; nothing on the bench
+did. Confirmed independently on site: OMICRON IED Scout, which performs the reservation
+handshake, reads and reports on those same in-service devices without trouble.
+
+### Why the bench could never have caught it
+
+`ied_server_config.c:56` — libiec61850's server defaults to `IEC_61850_EDITION_2`. Every bench
+target ran that default, **including this repo's own `ied_simulator`**. The whole E2E suite was
+therefore testing Edition 2 semantics against a daemon that only ever worked under Edition 2
+semantics. `SimServer_create`/`_createWithDatasetLimits` now both set
+`IedServerConfig_setEdition(config, IEC_61850_EDITION_2_1)`; **do not lower that back to make a
+test pass.** Setting it alone, with no other change, turned 17 of 19 E2E tests red with exactly
+the substation's `access-denied (21)` at step `1/6 DatSet` — the failure reproduced on a desk.
+
+### A second master really is present, and it is not the whole story
+
+Three in-service devices, every RCB reading `RptEna=1` on entry:
+
+| Device | RCBs held by another client | Total RCBs |
+|---|---|---|
+| `X1_A207` | `MEAS/LLN0.RP.urcbA01`, `urcbB01` | 60 |
+| `D1_6MD` | `MEAS/LLN0.RP.urcbA01`, `urcbB01` | 192 |
+| `D6_6MD` | `MEAS/LLN0.RP.urcbI01`, `urcbJ01` | 110 |
+
+All six with one fingerprint — `OptFlds=0x5 TrgOps=0x1f BufTm=100 IntgPd=10800000 ConfRev=2`,
+datasets `@Unbufferedlist`/`@Unbufferedlist_3` (association-specific, created by an association
+that is not ours). One client, one profile, across the whole station: the station SCADA
+(SICAM PAS). Note it takes **two** URCB instances per IED and **no** buffered RCBs at all — so
+~108 of D6's 110 RCBs were idle while this daemon got none of them. The ownership was real but
+marginal; the missing reservation was what actually cost the other ~108.
+
+### What changed
+
+**A reservation step now runs first, above dataset resolution.** BRCBs take a 60-second `ResvTms`
+lease (`MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS`), URCBs write `Resv=true`. It sits ahead of
+`MmsDatasetManager_resolveForTarget` rather than merely ahead of the write sequence, because
+tier-4 self-create makes real `createDataSet` calls: a domain-scoped dataset created for an RCB
+that then turns out to belong to the SCADA is never cleaned up and permanently consumes device
+quota. The capture shows exactly that leak — one in-service IED went 5 → 9 leftover datasets
+across two cycles that enabled nothing at all. The enable sequence is renumbered `0/7`…`7/7`, and
+steps 0, 2 and 6 are the fatal ones.
+
+**`RCB_RESERVE_UNSUPPORTED` is not a failure.** A device with no `Resv`/`ResvTms`, or one that
+rejects the write as unknown/unsupported, is an Edition 1/2 device doing implicit reservation —
+exactly the population that worked before this step existed. Those continue unreserved, untouched.
+
+**`RCB_ENABLE_OUTCOME_OWNED_ELSEWHERE` is a third outcome**, distinct from both `NOT_NEEDED` and
+`FAILED`, and named in every cycle summary even at zero: an operator seeing `0 enabled` needs to
+know in the same line whether the device refused us or simply had nothing spare. When nothing at
+all could be claimed, one further line says so in plain words rather than leaving "0 enabled" to
+look like a broken tool.
+
+**The pre-disable no longer fires at RCBs this client does not own.** `RptEna=false` used to run
+unconditionally against any RCB found enabled. The capture caught it aimed at
+`X1_A207MEAS/LLN0.RP.urcbA01` while that block was mid-report to PAS (`SqNum=82`). The SIPROTEC
+refused it and the SCADA was unaffected — but a device that honored it would have silently cut the
+substation's own reporting. It now requires either a granted reservation, or an Edition 1/2 device
+reporting no owner and no reservation at all (the buffered-reconnect case it was written for).
+
+**Reservations are released on stop**, before `IedConnection_close`. Not required for correctness
+(a URCB's `Resv` clears with the association and a BRCB's lease expires), but "correct in sixty
+seconds" is not the same as correct when a technician stops a device and immediately restarts it.
+
+**Two performance/diagnostic latches**, both per-cycle and never persisted, mirroring
+`MmsDatasetManagerSession.associationSpecificCreateRejected`. Three consecutive `OWNED_ELSEWHERE`
+verdicts drop the `TEMPORARILY_UNAVAILABLE` retry wait for the rest of the cycle — that retry
+exists for a still-booting device, and against a uniformly-refusing one it cost 3 × 500 ms per RCB,
+turning one `START_REPORTING` against a 192-RCB device into a **28.8-second** wait that was never
+going to succeed. Five consecutive `object-does-not-exist` results now say once, plainly, that the
+loaded model does not describe this device — the capture has an operator pointing an uploaded SCD
+at the wrong IP and getting 110 identical per-RCB failures with no hint of the actual cause.
+
+### The test that was missing
+
+`test_rcbOwnedByCompetingClient_isLeftRunning_andRestOfDeviceStillEnables` stands up a second MMS
+client that reserves and enables one BRCB and holds it, then asserts the report client (1) declines
+that block without calling it a failure, (2) still enables the rest of the device, and (3) leaves
+the competing client's reporting **still running** — asked of the device, not of ourselves. That
+third assertion is the safety regression guard. Every other test in the suite runs with this client
+as the only master, which is precisely the blind spot that let this ship.

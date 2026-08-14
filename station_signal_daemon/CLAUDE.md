@@ -276,11 +276,16 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   IEC 61850-7-2 order, because that spec makes `DatSet`/`OptFlds`/`TrgOps`/`BufTm`/`IntgPd`
   writable only while `RptEna` is FALSE, and because a bundled rejection names the *request*,
   never the *element* (see `CHANGELOG.md` for the four reverted commits that failed to diagnose
-  a real SIPROTEC without this). The dataset is resolved **first**, before any local mutation or
+  a real SIPROTEC without this). **The RCB is RESERVED first, before dataset resolution and before
+  any other write** (step 0 below). The dataset is then resolved, before any local mutation or
   wire write — a target that resolves no dataset is left completely untouched, with no writes and
-  no report handler installed. Then, per target: **0.** `RptEna=false`, only if the device reports
-  it already enabled (so the config writes below are legal — the common buffered-reconnect case);
-  **1.** `DatSet`, always explicitly re-asserted, never a server-side default — *fatal* if
+  no report handler installed. Then, per target: **0.** `Resv=true` (URCB) / a positive `ResvTms`
+  lease (BRCB, `MMS_REPORT_CLIENT_BRCB_RESERVATION_SECONDS`, 60s) — *fatal*, and deliberately
+  ordered ahead of dataset resolution so an RCB owned by another client costs no `createDataSet`
+  call (see the "owned elsewhere" paragraph below); **1.** `RptEna=false`, only if the device
+  reports it already enabled **and this client owns the RCB** (so the config writes below are
+  legal — the common buffered-reconnect case);
+  **2.** `DatSet`, always explicitly re-asserted, never a server-side default — *fatal* if
   rejected **unless that step's own read-back already shows exactly the dataset that was
   resolved**, in which case the binding is correct regardless and the enable continues (SCL's
   `<Services><ReportSettings datSet="Conf">` declares DatSet configurable offline only, not
@@ -290,17 +295,42 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   already has, so refusing it says nothing about whether the RCB can report, and aborting would
   take down all 231 of that file's RCBs). The read-back costs nothing extra — `runRcbStep`
   already performs it unconditionally. A read-back that itself fails leaves this false, so a
-  refused write with no confirmation is still fatal; **2.** `OptFlds` with `RPT_OPT_ENTRY_ID` OR'd in, buffered RCBs only, only if the bit
-  isn't already set; **3.** `TrgOps` (next paragraph); **4.** `EntryID`, buffered RCBs with a
-  cached resume point; **5.** `RptEna=true`, the step that actually activates the RCB — *fatal*
-  if rejected; **6.** `GI` (with one exception, two paragraphs down) purely to force a
+  refused write with no confirmation is still fatal; **3.** `OptFlds` with `RPT_OPT_ENTRY_ID` OR'd in, buffered RCBs only, only if the bit
+  isn't already set; **4.** `TrgOps` (next paragraph); **5.** `EntryID`, buffered RCBs with a
+  cached resume point; **6.** `RptEna=true`, the step that actually activates the RCB — *fatal*
+  if rejected; **7.** `GI` (with one exception, two paragraphs down) purely to force a
   deterministic snapshot — never trusted/forwarded on its own merits, it lands on the same
-  bootstrap-suppression path any first observation would. Only steps 1 and 5 abort the enable;
-  a failure in 0/2/3/4/6 is logged loudly and the sequence continues, since a degraded-but-enabled
+  bootstrap-suppression path any first observation would. Only steps 0, 2 and 6 abort the enable;
+  a failure in 1/3/4/5/7 is logged loudly and the sequence continues, since a degraded-but-enabled
   RCB beats no RCB. `BufTm`/`IntgPd`/`ConfRev` are never written at any step.
-  **Steps 2 and 3 judge against the state left behind by step 1, never against the entry snapshot.**
+  **Reservation is what makes any of the rest legal, and skipping it made this daemon useless on
+  every in-service IED it was ever pointed at.** IEC 61850-7-2 §17.2.2 gives an RCB one owner;
+  Edition 1/2 servers reserve *implicitly* on the `DatSet` write, Edition 2.1 forbids that and
+  refuses every non-`Resv` write to an unreserved block with `access-denied`. Real SIPROTEC 6MD
+  hardware behaves the Edition 2.1 way; every bench target (including this repo's own
+  `ied_simulator`, on libiec61850's Edition 2 default) did not — so three real substation devices
+  produced `0 enabled` and zero reports while the identical SCD on a simulator enabled everything.
+  A device that has no `Resv`/`ResvTms`, or rejects the write as unsupported, is Edition 1/2 and
+  **continues unreserved** — that population must keep working. Reservations are released on stop,
+  before `IedConnection_close`. `ied_simulator` now runs as Edition 2.1 specifically so the bench
+  can see this class of bug; **do not lower it to make a test pass.** See `CHANGELOG.md`.
+  **An RCB owned by another MMS client is its own outcome, not a failure.** A refused reservation
+  (`access-denied`/`temporary-unavailable`) means the station SCADA holds that block — normal and
+  permanent on an in-service IED, not a defect and not something to retry or wrestle away. It is
+  counted separately in every cycle summary (`N enabled, N not needed, N owned by another MMS
+  client, N FAILED`), always named even at zero, since `0 enabled` otherwise reads as a broken
+  tool. Two per-cycle latches (never persisted, mirroring
+  `MmsDatasetManagerSession.associationSpecificCreateRejected`): three consecutive owned-elsewhere
+  verdicts drop the `TEMPORARILY_UNAVAILABLE` retry wait for the rest of the cycle, and five
+  consecutive `object-does-not-exist` results report once that the loaded model does not match the
+  device at this address.
+  **The pre-disable never fires at an RCB this client does not own** — step 1 requires either a
+  granted reservation or an Edition 1/2 device reporting no owner and no reservation. It used to
+  fire unconditionally, and was caught aimed at a block actively reporting to the station SCADA;
+  a device that honored it would have cut the substation's own reporting.
+  **Steps 3 and 4 judge against the state left behind by step 2, never against the entry snapshot.**
   A real SIPROTEC clears `TrgOps` *and* `OptFlds` whenever `DatSet` is written to a **different**
-  value, so an RCB that arrived already carrying `dchg|qchg|gi` has it wiped by step 1; deciding
+  value, so an RCB that arrived already carrying `dchg|qchg|gi` has it wiped by step 2; deciding
   from the pre-step-1 snapshot skipped the rewrite and enabled the RCB with `TrgOps=0x0`, which can
   never emit a change report and does not even answer step 6's GI — three of eighteen enabled RCBs
   were silently dark on real hardware while every write returned `IED_ERROR_OK` (see `CHANGELOG.md`).
@@ -350,7 +380,7 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   cache exists to filter out. Only written back if at least one needed bit is missing, to avoid
   touching this attribute on every single reconnect once a device has accepted it once — same
   minimal-footprint posture as the OptFlds.EntryID OR below. `BufTm`/`IntgPd`/`ConfRev` are still
-  left untouched. Written as step 3, i.e. **before** the `RptEna=true` of step 5: most servers,
+  left untouched. Written as step 4, i.e. **before** the `RptEna=true` of step 6: most servers,
   including this repo's own `ied_simulator`, reject a TrgOps change once the RCB is enabled, and
   `integration_tests/mms_report_client`'s `test_dynamicDataset_giOnlyRcb_reportsRealChangeAfterTrgOpsFix`
   fails with `IED_ERROR_TEMPORARILY_UNAVAILABLE` if this write is ever deferred past the enable —
@@ -392,7 +422,7 @@ feature under Architecture below — see `CHANGELOG.md` for the full root-cause 
   `mms_dataset_manager/`'s job (see its own bullet below): discovery of what already exists on the
   device, whole-device cluster planning, self-creation, budgets, adoption and cleanup all live
   there. This feature calls `MmsDatasetManager_beginCycle` once per connect, asks
-  `MmsDatasetManager_resolveForTarget` per RCB, binds whatever comes back as step 1 below, and
+  `MmsDatasetManager_resolveForTarget` per RCB, binds whatever comes back as step 2 below (only ever for a target whose reservation this client already holds — see the enable sequence above), and
   calls `_endCycle` when the loop finishes (plus `_cleanupOnStop` on the way down, before
   `IedConnection_close`). It keeps only the *decode-shape reconciliation* that follows a
   resolution (`refreshPulledMemberRefCache`/`ensureLnFallbackMemberRefCache`), because that

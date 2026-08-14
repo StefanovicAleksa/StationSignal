@@ -4,10 +4,9 @@
 #include "iec61850_dynamic_model.h"
 
 /* Shared model-building code for SimServer_create/_createWithDatasetLimits -
- * identical model either way, only how the IedServer itself is constructed
- * differs (plain IedServer_create vs IedServer_createWithConfig). Returns the
- * built IedModel* and hands back the two DataAttribute* the caller needs to
- * populate its own SimServer handle. */
+ * identical model either way, only what else gets set on the IedServerConfig
+ * differs. Returns the built IedModel* and hands back the two DataAttribute*
+ * the caller needs to populate its own SimServer handle. */
 static IedModel*
 buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal, DataAttribute** outModStVal,
         DataAttribute** outBehStVal) {
@@ -289,6 +288,27 @@ buildModel(DataAttribute** outIndicationStVal, DataAttribute** outSpcso1StVal, D
     return model;
 }
 
+/* Every simulator instance runs as an IEC 61850 Edition 2.1 server, NOT the
+ * library's Edition 2 default (ied_server_config.c: `self->edition =
+ * IEC_61850_EDITION_2`). Edition 2 permits *implicit* RCB reservation - the
+ * DatSet write reserves the block by itself - so a client that never writes
+ * Resv/ResvTms still enables reporting fine. Edition 2.1 forbids that
+ * (reporting.c: "for edition 2.1 don't allow implicit RCB reservation") and
+ * refuses any non-Resv write to an unreserved RCB with
+ * DATA_ACCESS_ERROR_OBJECT_ACCESS_DENIED.
+ *
+ * The real SIPROTEC 6MD devices in the substation behave the Edition 2.1 way.
+ * Running this fixture on the library default is exactly why the whole bench
+ * suite passed for months against a daemon that never reserved anything, while
+ * every RCB write on an in-service device was refused - see CHANGELOG.md. Do
+ * not lower this back to Edition 2 to make a test pass. */
+static IedServerConfig
+createServerConfig(void) {
+    IedServerConfig config = IedServerConfig_create();
+    IedServerConfig_setEdition(config, IEC_61850_EDITION_2_1);
+    return config;
+}
+
 SimServer
 SimServer_create(void) {
     DataAttribute* indicationStVal;
@@ -297,15 +317,21 @@ SimServer_create(void) {
     DataAttribute* behStVal;
     IedModel* model = buildModel(&indicationStVal, &spcso1StVal, &modStVal, &behStVal);
 
+    IedServerConfig config = createServerConfig();
+
     SimServer self = calloc(1, sizeof(struct sSimServer));
     self->model = model;
-    self->server = IedServer_create(model);
+    self->server = IedServer_createWithConfig(model, NULL, config);
     self->indicationStVal = indicationStVal;
     self->indicationValue = false;
     self->spcso1StVal = spcso1StVal;
     self->spcso1Value = false;
     self->modStVal = modStVal;
     self->behStVal = behStVal;
+
+    /* Values are copied out synchronously during IedServer_createWithConfig
+     * (confirmed against the vendored source) - safe to destroy immediately. */
+    IedServerConfig_destroy(config);
 
     return self;
 }
@@ -318,7 +344,7 @@ SimServer_createWithDatasetLimits(int maxDataSetEntries, int maxAssociationSpeci
     DataAttribute* behStVal;
     IedModel* model = buildModel(&indicationStVal, &spcso1StVal, &modStVal, &behStVal);
 
-    IedServerConfig config = IedServerConfig_create();
+    IedServerConfig config = createServerConfig();
     IedServerConfig_setMaxDataSetEntries(config, maxDataSetEntries);
     IedServerConfig_setMaxAssociationSpecificDataSets(config, maxAssociationSpecificDataSets);
 

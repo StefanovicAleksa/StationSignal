@@ -70,12 +70,37 @@
 #define TEST_PORT_DELETE_WHILE_ENABLED 10221
 #define TEST_PORT_SPARE_RCB 10222
 #define TEST_PORT_CATEGORY_FILTER 10223
+#define TEST_PORT_COMPETING_CLIENT 10224
 #define TEST_PASSWORD "secret123"
 #define FIXTURE_PATH_SIBLING_BUFFERED "fixtures/reporter1_sibling_buffered.cid"
 #define FIXTURE_PATH_GI_ONLY "fixtures/reporter1_gi_only.cid"
 #define FIXTURE_PATH_SPARE_RCB "fixtures/reporter1_spare_rcb.cid"
 #define POLL_INTERVAL_MS 100
 #define POLL_MAX_ATTEMPTS 100 /* 100 * 100ms = 10s bound on each wait */
+
+/* Several tests below stand up their fixture by acting as a SECOND MMS client
+ * against the same simulator - pre-assigning a DatSet, enabling an RCB - and
+ * then assert on what the real report client does with it. SimServer runs as an
+ * IEC 61850 Edition 2.1 server (see sim_server.c's own comment on why), which
+ * forbids implicit RCB reservation: any write to an unreserved RCB is refused
+ * with IED_ERROR_ACCESS_DENIED. So these setup blocks have to claim the block
+ * first, exactly like a real client - which is the whole behavior under test.
+ *
+ * Buffered RCBs take a ResvTms lease, unbuffered ones a Resv flag, mirroring
+ * mms_report_client_connection.c's own reserveOneTarget. */
+static void
+reserveSetupRcb(IedConnection conn, ClientReportControlBlock rcb, bool buffered) {
+    IedClientError resvErr = IED_ERROR_OK;
+    if (buffered) {
+        ClientReportControlBlock_setResvTms(rcb, 60);
+        IedConnection_setRCBValues(conn, &resvErr, rcb, RCB_ELEMENT_RESV_TMS, true);
+    } else {
+        ClientReportControlBlock_setResv(rcb, true);
+        IedConnection_setRCBValues(conn, &resvErr, rcb, RCB_ELEMENT_RESV, true);
+    }
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, resvErr,
+            "expected the test's own setup client to be able to reserve the RCB it is about to configure");
+}
 
 static volatile bool rcbEnabled;
 static volatile bool reportReceived;
@@ -845,6 +870,7 @@ test_orphanCleanup_ownUnclaimedDatasetDeleted_foreignDatasetLeftUntouched(void) 
     ClientReportControlBlock brcbDynSetupRcb = IedConnection_getRCBValues(setupConn, &setupErr,
             "Reporter1LD1/GGIO1.BR.brcbDyn", NULL);
     TEST_ASSERT_NOT_NULL(brcbDynSetupRcb);
+    reserveSetupRcb(setupConn, brcbDynSetupRcb, true);
     ClientReportControlBlock_setDataSetReference(brcbDynSetupRcb, "Reporter1LD1/GGIO1$livepreassigned");
     IedConnection_setRCBValues(setupConn, &setupErr, brcbDynSetupRcb, RCB_ELEMENT_DATSET, true);
     TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected assigning brcbDyn's DatSet to succeed");
@@ -1216,6 +1242,7 @@ test_pulledLiveDataset_preAssignedByAnotherClient_reusedInsteadOfSelfCreated(voi
      * own doc comment: "LDName/LNName$DataSetName" - this codebase's own
      * standard "$"-joined convention, NOT the dot-joined form createDataSet
      * itself just took above. */
+    reserveSetupRcb(setupConn, setupRcb, false);
     ClientReportControlBlock_setDataSetReference(setupRcb, "Reporter1LD1/GGIO1$preassigned1");
     IedConnection_setRCBValues(setupConn, &setupErr, setupRcb, RCB_ELEMENT_DATSET, true);
     TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, setupErr, "expected assigning urcbDyn's DatSet to succeed");
@@ -2022,6 +2049,7 @@ test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable(void) {
 
     ClientReportControlBlock rcb = IedConnection_getRCBValues(conn, &err, "Reporter1LD1/GGIO1.RP.urcbDyn", NULL);
     TEST_ASSERT_NOT_NULL(rcb);
+    reserveSetupRcb(conn, rcb, false);
     ClientReportControlBlock_setDataSetReference(rcb, "Reporter1LD1/GGIO1$deleteTestDs");
     ClientReportControlBlock_setRptEna(rcb, true);
     IedConnection_setRCBValues(conn, &err, rcb, RCB_ELEMENT_DATSET | RCB_ELEMENT_RPT_ENA, true);
@@ -2134,6 +2162,134 @@ test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed(void) {
 
     MmsReportClient_destroy(client);
     IedModel_release(iedModel);
+    SimServer_stop(sim);
+    SimServer_destroy(sim);
+}
+
+static volatile bool competingRcbEnabledByUs;
+static volatile bool competingRcbReportedNotEnabled;
+static volatile bool otherRcbEnabledAlongside;
+
+static void
+onRcbStatusForCompetingClientTest(void* userParam, const char* rcbReference, bool enabled,
+        IedClientError lastError) {
+    (void) userParam;
+    (void) lastError;
+    if (!rcbReference) return;
+
+    if (strcmp(rcbReference, "Reporter1LD1/LLN0.BR.brcbMain") == 0) {
+        if (enabled) competingRcbEnabledByUs = true;
+        else competingRcbReportedNotEnabled = true;
+    } else if (enabled) {
+        otherRcbEnabledAlongside = true;
+    }
+}
+
+/*
+ * THE SUBSTATION, REPRODUCED. Everything else in this suite runs with this
+ * client as the only master on the device, which is exactly the blind spot that
+ * let a daemon that never reserved an RCB ship and then fail completely on
+ * every in-service IED it was pointed at.
+ *
+ * Here a SECOND MMS client - standing in for the station SCADA (SICAM PAS, in
+ * the incident this was diagnosed from) - reserves and enables one buffered RCB
+ * and holds it for the duration, exactly as PAS does on a live device. Three
+ * things must then be true of the real report client, and all three were false
+ * before the reservation step existed:
+ *
+ *   1. It does NOT enable the RCB the other client owns, and does not report
+ *      that as a failure - it is someone else's block, which is a normal,
+ *      permanent condition on an in-service IED, not a defect.
+ *   2. It DOES enable the rest of the device. A device is not all-or-nothing:
+ *      the real capture showed the SCADA holding 2 RCBs out of 60, with the
+ *      other 58 sitting idle and this tool getting none of them.
+ *   3. The competing client's RCB is STILL enabled at the end. This is the
+ *      safety assertion, and the important one: the old code fired an
+ *      unconditional RptEna=false at any RCB it found enabled, which against a
+ *      permissive device would have silently switched off the substation's own
+ *      SCADA reporting.
+ */
+void
+test_rcbOwnedByCompetingClient_isLeftRunning_andRestOfDeviceStillEnables(void) {
+    SimServer sim = SimServer_create();
+    SimServer_start(sim, TEST_PORT_COMPETING_CLIENT);
+
+    competingRcbEnabledByUs = false;
+    competingRcbReportedNotEnabled = false;
+    otherRcbEnabledAlongside = false;
+
+    /* ---- The "station SCADA": reserve and enable brcbMain, then hold it. ---- */
+    IedClientError competingErr = IED_ERROR_OK;
+    IedConnection competingConn = IedConnection_create();
+    IedConnection_connect(competingConn, &competingErr, "127.0.0.1", TEST_PORT_COMPETING_CLIENT);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, competingErr, "expected the competing client to connect");
+
+    ClientReportControlBlock competingRcb = IedConnection_getRCBValues(competingConn, &competingErr,
+            "Reporter1LD1/LLN0.BR.brcbMain", NULL);
+    TEST_ASSERT_NOT_NULL(competingRcb);
+    reserveSetupRcb(competingConn, competingRcb, true);
+
+    /* brcbMain is created with no server-side dataset (sim_server.c passes
+     * dataSetName=NULL), so - exactly like any real client - this one has to
+     * bind one before RptEna=true is legal. Without it the server refuses the
+     * enable with TEMPORARILY_UNAVAILABLE from updateReportDataset, which is
+     * indistinguishable from the reservation having failed. */
+    ClientReportControlBlock_setDataSetReference(competingRcb, "Reporter1LD1/LLN0$ds1");
+    IedConnection_setRCBValues(competingConn, &competingErr, competingRcb, RCB_ELEMENT_DATSET, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, competingErr,
+            "expected the competing client to be able to bind a dataset to the RCB it reserved");
+
+    ClientReportControlBlock_setRptEna(competingRcb, true);
+    IedConnection_setRCBValues(competingConn, &competingErr, competingRcb, RCB_ELEMENT_RPT_ENA, true);
+    TEST_ASSERT_EQUAL_MESSAGE(IED_ERROR_OK, competingErr,
+            "expected the competing client to be able to enable the RCB it reserved");
+
+    /* ---- The real report client, against the same device. ---- */
+    IedModelLoadError modelError;
+    IedModelHandle iedModel = IedModel_loadFromFile(FIXTURE_PATH, "Reporter1",
+            IED_MODEL_ACCESS_READ_AND_WRITE, IED_MODEL_LN_CATEGORY_ALL, &modelError);
+    TEST_ASSERT_NOT_NULL(iedModel);
+
+    MmsReportClientConfig config;
+    MmsReportClientConfig_defaults(&config);
+
+    MmsReportClientError clientError;
+    MmsReportClientHandle client = MmsReportClient_create(iedModel, "127.0.0.1", TEST_PORT_COMPETING_CLIENT,
+            &config, &clientError);
+    TEST_ASSERT_NOT_NULL(client);
+    MmsReportClient_setRcbStatusCallback(client, onRcbStatusForCompetingClientTest, NULL);
+    TEST_ASSERT_EQUAL(MMS_REPORT_CLIENT_OK, MmsReportClient_start(client));
+
+    /* (2) The rest of the device must still come up - this is what separates
+     * "correctly declined one owned block" from "gave up on the whole IED". */
+    TEST_ASSERT_TRUE_MESSAGE(waitUntil(&otherRcbEnabledAlongside),
+            "expected the report client to enable the RCBs the competing client does NOT own - one owned "
+            "block must never cost the whole device");
+
+    /* (1) ...and it must not have taken, or claimed to take, the owned one.
+     * waitBriefly gives the cycle time to reach brcbMain and do the wrong
+     * thing; the assertion above already proved the callback is live, so a
+     * silent "never ran" cannot pass this. */
+    TEST_ASSERT_FALSE_MESSAGE(waitBriefly(&competingRcbEnabledByUs),
+            "brcbMain is reserved and enabled by another client - this client must not report having "
+            "enabled it");
+
+    /* (3) THE SAFETY ASSERTION. Ask the device, not ourselves: is the competing
+     * client's reporting still on? A regression that reinstates the
+     * unconditional pre-disable fails precisely here. */
+    ClientReportControlBlock afterRcb = IedConnection_getRCBValues(competingConn, &competingErr,
+            "Reporter1LD1/LLN0.BR.brcbMain", NULL);
+    TEST_ASSERT_NOT_NULL(afterRcb);
+    TEST_ASSERT_TRUE_MESSAGE(ClientReportControlBlock_getRptEna(afterRcb),
+            "the competing client's RCB must still be enabled - this tool must never disable reporting it "
+            "does not own, which on a live substation would cut off the station SCADA");
+    ClientReportControlBlock_destroy(afterRcb);
+
+    MmsReportClient_destroy(client);
+    IedModel_release(iedModel);
+    ClientReportControlBlock_destroy(competingRcb);
+    IedConnection_close(competingConn);
+    IedConnection_destroy(competingConn);
     SimServer_stop(sim);
     SimServer_destroy(sim);
 }
@@ -2268,6 +2424,7 @@ main(void) {
     RUN_TEST(test_dynamicDataset_countBudgetExhausted_secondChunkFailsCleanly);
     RUN_TEST(test_deleteDataSet_refusedWhileRcbEnabled_succeedsAfterDisable);
     RUN_TEST(test_unneededSpareDynRcb_isLeftUntouched_andNotReportedAsFailed);
+    RUN_TEST(test_rcbOwnedByCompetingClient_isLeftRunning_andRestOfDeviceStillEnables);
     RUN_TEST(test_categoryFilter_rcbAlwaysEnabled_butNonMatchingDataPointsNeverDelivered);
 
     return UNITY_END();
