@@ -1,15 +1,14 @@
 /**
  * Console logging, gated on the build's deployment mode.
  *
- * `VITE_STATION_SIGNAL_MODE` is baked in at build time by `deploy/setup.sh dev|prod` (see the
- * parent repo's `deploy/README.md`), mirroring the mode the API and daemon run in. In prod
- * `debug()` is a no-op, so diagnostic chatter never reaches a technician's devtools console;
- * `warn()`/`error()` always pass through, since those report something actually going wrong.
+ * In prod `debug()` is a no-op, so diagnostic chatter never reaches a technician's devtools
+ * console; `warn()`/`error()` always pass through, since those report something actually going
+ * wrong.
  *
- * `import.meta.env.DEV` is OR'd in so `pnpm dev` and the Vitest run are always verbose without
- * anyone having to set the variable locally.
+ * The mode flag itself lives in `./mode` — it gates UI as well as logging now, and both have to
+ * agree on one answer. See that module for how it is resolved and why it is build-time.
  */
-const isDevMode = import.meta.env.VITE_STATION_SIGNAL_MODE === 'dev' || import.meta.env.DEV
+import { isDevMode } from './mode'
 
 export const logger = {
   debug(...args: unknown[]): void {

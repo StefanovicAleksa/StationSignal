@@ -129,16 +129,44 @@ into `/etc/station-signal/station-signal.env`) is the single knob:
 | this process's slog level | debug | info |
 | chi's per-request access log | on | off |
 | daemon's `STATION_SIGNAL_LOG_LEVEL` | debug | info |
+| `POST /api/settings/logs/clear` route | registered | **not registered** (404) |
 
 `STATION_SIGNAL_API_LOG_LEVEL` / `-log-level` overrides the level the mode implies, for this
 process alone. Two things worth knowing:
 
 - chi's `middleware.Logger` writes through its own `log.Logger`, outside slog entirely, so no slog
   level can quiet it. `rest.Router` registers it only when the logger has debug enabled.
-- `supervision/data.Spawn` sets `STATION_SIGNAL_LOG_LEVEL` on the child explicitly rather than
-  letting it inherit, because `run_dev.sh` starts this process under `sudo`, which scrubs the
-  environment. The daemon emits most of the combined log volume, so its level is the one that
-  actually determines how fast that file grows.
+- `supervision/data.Spawn` sets `STATION_SIGNAL_LOG_LEVEL` **and `STATION_SIGNAL_LOG_DIR`** on the
+  child explicitly rather than letting them inherit, because `run_dev.sh` starts this process under
+  `sudo`, which scrubs the environment. The daemon emits most of the combined log volume, so its
+  level is the one that actually determines how fast that file grows — and the directory has to
+  match this process's own `LogDir`, or the clear-logs action below would empty a directory the
+  daemon isn't writing to.
+- The clear-logs route is gated on `cfg.Mode == ModeDev` **explicitly**, deliberately unlike the
+  access log above it, which keys off log level. Turning verbosity up on a prod box
+  (`-log-level debug`) is a reasonable thing to do and must not also hand out an endpoint that
+  wipes that box's logs.
+
+## Clearing the logs
+
+There is no logrotate in front of these files anywhere (`deploy/setup.sh`, `deploy/README.md`), so
+the log directory only grows. `internal/core/logfiles` empties it, for capture hygiene rather than
+disk space: clearing right before an on-site test session means the logs collected afterwards
+contain only that session.
+
+Two properties are load-bearing:
+
+- **It truncates; it never unlinks.** The daemon opens each log with `fopen(path, "a")` and caches
+  the `FILE*` for its whole process lifetime with no reopen path (`src/log.h`), and because that
+  header is `static inline` there can be several handles on one file. systemd holds another on
+  `station-signal-api.log` via `StandardOutput=append:`. Deleting would leave all of them writing
+  into an orphaned inode — logging silently stops and nothing reports an error. `os.Truncate` is
+  safe precisely because every writer is in append mode.
+- **Partial success is a 200.** `station-signal-api.log` is created by systemd as root, so the
+  unprivileged API cannot truncate it directly; it shells out to
+  `deploy/scripts/station-signal-clearlogs.sh` via a second narrow sudoers grant for that one case.
+  Where that helper is absent (a dev laptop, where `run_dev.sh` already runs this process as root),
+  anything still unwritable is reported as `skippedCount` rather than failing the request.
 
 ## Ports this API talks to (all on the daemon side, never exposed to the frontend directly)
 

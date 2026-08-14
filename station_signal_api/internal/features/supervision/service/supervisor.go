@@ -17,15 +17,17 @@ import (
 type Supervisor struct {
 	binPath     string
 	controlAddr string // e.g. "127.0.0.1:8767" — polled for readiness after each spawn
-	// daemonLogLevel is handed to every spawn so the child's verbosity tracks this process's
-	// own — see data.Spawn for why it is passed explicitly rather than inherited.
+	// daemonLogLevel/daemonLogDir are handed to every spawn so the child's verbosity and log
+	// location track this process's own — see data.Spawn for why they are passed explicitly
+	// rather than inherited.
 	daemonLogLevel string
+	daemonLogDir   string
 	logger         *slog.Logger
 
 	// spawnFn/pollReadyFn default to data.Spawn/data.PollReady in New(). Unit tests in this
 	// package construct a Supervisor{} literal directly with fakes here, driving the full
 	// backoff/restart/ctx-cancellation loop without a real OS process.
-	spawnFn     func(binPath string, daemonLogLevel string, logger *slog.Logger) (*data.Process, <-chan error, error)
+	spawnFn     func(binPath string, daemonLogLevel string, daemonLogDir string, logger *slog.Logger) (*data.Process, <-chan error, error)
 	pollReadyFn func(ctx context.Context, addr string, pollEvery, timeout time.Duration) bool
 
 	mu      sync.Mutex
@@ -36,7 +38,7 @@ type Supervisor struct {
 
 // New builds a Supervisor for the daemon binary at binPath, using controlAddr (the daemon's
 // control-channel address) as the readiness probe target.
-func New(binPath, controlAddr, daemonLogLevel string, logger *slog.Logger) *Supervisor {
+func New(binPath, controlAddr, daemonLogLevel, daemonLogDir string, logger *slog.Logger) *Supervisor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -44,6 +46,7 @@ func New(binPath, controlAddr, daemonLogLevel string, logger *slog.Logger) *Supe
 		binPath:        binPath,
 		controlAddr:    controlAddr,
 		daemonLogLevel: daemonLogLevel,
+		daemonLogDir:   daemonLogDir,
 		logger:         logger,
 		spawnFn:        data.Spawn,
 		pollReadyFn:    data.PollReady,
@@ -74,7 +77,7 @@ func (s *Supervisor) Running() bool {
 func (s *Supervisor) Run(ctx context.Context) error {
 	backoff := domain.InitialBackoff
 	for {
-		proc, exitCh, err := s.spawnFn(s.binPath, s.daemonLogLevel, s.logger)
+		proc, exitCh, err := s.spawnFn(s.binPath, s.daemonLogLevel, s.daemonLogDir, s.logger)
 		if err != nil {
 			s.logger.Error("failed to spawn daemon", "error", err)
 			if !sleepOrDone(ctx, backoff) {

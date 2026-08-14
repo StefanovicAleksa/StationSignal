@@ -96,6 +96,40 @@ func TestLoad_ModeFallsBackToEnv(t *testing.T) {
 	assert.Equal(t, "debug", cfg.LogLevel)
 }
 
+// The log directory defaults to the daemon's own compiled-in fallback, which is what makes the two
+// processes agree when nobody configures anything — and is what internal/core/logfiles then
+// empties.
+func TestLoad_LogDirDefaultsToTheDaemonsOwnDefault(t *testing.T) {
+	bin := fakeBinary(t)
+
+	cfg, err := Load([]string{"-daemon-bin", bin})
+
+	require.NoError(t, err)
+	assert.Equal(t, "/var/log/station_signal", cfg.LogDir)
+}
+
+// Deliberately the same env var the daemon itself reads, not an API-prefixed one: it names one
+// directory both processes use, so setting it once must configure both.
+func TestLoad_LogDirFallsBackToTheSharedEnvVar(t *testing.T) {
+	bin := fakeBinary(t)
+	t.Setenv("STATION_SIGNAL_LOG_DIR", "/tmp/station_signal_logs")
+
+	cfg, err := Load([]string{"-daemon-bin", bin})
+
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/station_signal_logs", cfg.LogDir)
+}
+
+func TestLoad_LogDirFlagBeatsEnv(t *testing.T) {
+	bin := fakeBinary(t)
+	t.Setenv("STATION_SIGNAL_LOG_DIR", "/tmp/from-env")
+
+	cfg, err := Load([]string{"-daemon-bin", bin, "-log-dir", "/tmp/from-flag"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/from-flag", cfg.LogDir)
+}
+
 // An explicit level is the escape hatch for turning one box up or down without changing its mode.
 func TestLoad_ExplicitLogLevelOverridesTheModeDefault(t *testing.T) {
 	bin := fakeBinary(t)

@@ -12,7 +12,7 @@ import (
 )
 
 func TestSpawn_ExitsCleanlyForAQuickCommand(t *testing.T) {
-	_, exitCh, err := Spawn("/usr/bin/true", "info", slog.Default())
+	_, exitCh, err := Spawn("/usr/bin/true", "info", t.TempDir(), slog.Default())
 	require.NoError(t, err)
 
 	select {
@@ -24,13 +24,13 @@ func TestSpawn_ExitsCleanlyForAQuickCommand(t *testing.T) {
 }
 
 func TestSpawn_NonExistentBinaryReturnsError(t *testing.T) {
-	_, _, err := Spawn("/this/path/does/not/exist", "info", slog.Default())
+	_, _, err := Spawn("/this/path/does/not/exist", "info", t.TempDir(), slog.Default())
 
 	assert.Error(t, err)
 }
 
 func TestProcess_Terminate_GracefulProcessExitsPromptly(t *testing.T) {
-	proc, exitCh, err := Spawn("testdata/graceful.sh", "info", slog.Default())
+	proc, exitCh, err := Spawn("testdata/graceful.sh", "info", t.TempDir(), slog.Default())
 	require.NoError(t, err)
 	time.Sleep(100 * time.Millisecond) // let the fixture's trap register before signaling
 
@@ -44,7 +44,7 @@ func TestProcess_Terminate_GracefulProcessExitsPromptly(t *testing.T) {
 }
 
 func TestProcess_Kill_StubbornProcessIsForcedToExit(t *testing.T) {
-	proc, exitCh, err := Spawn("testdata/stubborn.sh", "info", slog.Default())
+	proc, exitCh, err := Spawn("testdata/stubborn.sh", "info", t.TempDir(), slog.Default())
 	require.NoError(t, err)
 	time.Sleep(100 * time.Millisecond) // let the fixture's trap register before signaling
 
@@ -67,17 +67,24 @@ func TestProcess_Kill_StubbornProcessIsForcedToExit(t *testing.T) {
 	}
 }
 
-// The daemon reads STATION_SIGNAL_LOG_LEVEL once at startup and has no other configuration
-// input, so this hand-off is the only thing keeping its verbosity in step with the API's mode.
-// It must be set explicitly rather than inherited: run_dev.sh launches this process under sudo,
-// which scrubs the environment.
-func TestSpawn_ExportsTheDaemonLogLevelToTheChild(t *testing.T) {
+// The daemon reads STATION_SIGNAL_LOG_LEVEL and STATION_SIGNAL_LOG_DIR once at startup and has no
+// other configuration input, so this hand-off is the only thing keeping its verbosity and log
+// location in step with the API's own. Both must be set explicitly rather than inherited:
+// run_dev.sh launches this process under sudo, which scrubs the environment.
+//
+// The directory half is load-bearing beyond tidiness: internal/core/logfiles empties exactly the
+// directory the API is configured with, so a daemon left to fall back to its own compiled-in
+// default could be writing somewhere else entirely and "clear the logs" would quietly miss the
+// files that actually matter.
+func TestSpawn_ExportsTheDaemonLogLevelAndLogDirToTheChild(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "echo-level.sh")
+	logDir := t.TempDir()
+	script := filepath.Join(dir, "echo-env.sh")
 	require.NoError(t, os.WriteFile(script,
-		[]byte("#!/bin/sh\nprintf '%s' \"$STATION_SIGNAL_LOG_LEVEL\" > \"$(dirname \"$0\")/level.txt\"\n"), 0o755))
+		[]byte("#!/bin/sh\nprintf '%s' \"$STATION_SIGNAL_LOG_LEVEL\" > \"$(dirname \"$0\")/level.txt\"\n"+
+			"printf '%s' \"$STATION_SIGNAL_LOG_DIR\" > \"$(dirname \"$0\")/dir.txt\"\n"), 0o755))
 
-	_, exitCh, err := Spawn(script, "debug", slog.Default())
+	_, exitCh, err := Spawn(script, "debug", logDir, slog.Default())
 	require.NoError(t, err)
 
 	select {
@@ -90,6 +97,10 @@ func TestSpawn_ExportsTheDaemonLogLevelToTheChild(t *testing.T) {
 	written, err := os.ReadFile(filepath.Join(dir, "level.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "debug", string(written))
+
+	writtenDir, err := os.ReadFile(filepath.Join(dir, "dir.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, logDir, string(writtenDir))
 }
 
 func TestProcess_TerminateAndKill_NilSafeOnZeroValue(t *testing.T) {

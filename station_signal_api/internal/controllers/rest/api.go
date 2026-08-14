@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"station_signal_api/internal/core/logfiles"
 	"station_signal_api/internal/core/session"
 	networkdomain "station_signal_api/internal/features/network/domain"
 	reportingdomain "station_signal_api/internal/features/reporting/domain"
@@ -63,6 +64,12 @@ type structureFileStore interface {
 	Touch(path string)
 }
 
+// logFileStore is the seam unit tests mock instead of the concrete *logfiles.Store — it empties
+// this stack's on-box log files so an operator can start a session with a clean capture.
+type logFileStore interface {
+	Clear() (logfiles.Result, error)
+}
+
 // API holds the dependencies every REST handler needs.
 type API struct {
 	reporting      reportingService
@@ -71,15 +78,23 @@ type API struct {
 	daemon         daemonStatus
 	structureFiles structureFileStore
 	network        networkService
-	logger         *slog.Logger
+	logFiles       logFileStore
+	// devMode gates the dev-only routes below. Held as a plain bool rather than a config.Mode so
+	// this package doesn't depend on config for one flag.
+	devMode bool
+	logger  *slog.Logger
 }
 
 // New builds an API. Pass the result to Router to get a *chi.Mux.
-func New(reporting reportingService, scanning scanningService, supervisor daemonSupervisor, daemon daemonStatus, structureFiles structureFileStore, network networkService, logger *slog.Logger) *API {
+//
+// devMode registers the dev-only routes (see Router). It is deliberately a separate parameter
+// from the logger, rather than being inferred from log level the way the access log below is —
+// see Router's own comment on the clear-logs route.
+func New(reporting reportingService, scanning scanningService, supervisor daemonSupervisor, daemon daemonStatus, structureFiles structureFileStore, network networkService, logFiles logFileStore, devMode bool, logger *slog.Logger) *API {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &API{reporting: reporting, scanning: scanning, supervisor: supervisor, daemon: daemon, structureFiles: structureFiles, network: network, logger: logger}
+	return &API{reporting: reporting, scanning: scanning, supervisor: supervisor, daemon: daemon, structureFiles: structureFiles, network: network, logFiles: logFiles, devMode: devMode, logger: logger}
 }
 
 // Router builds the chi router for every REST endpoint this API exposes. It returns
@@ -140,6 +155,17 @@ func Router(api *API) *chi.Mux {
 		r.Post("/settings/network", api.handleApplyNetworkConfig)
 		r.Post("/settings/network/confirm", api.handleConfirmNetworkConfig)
 		r.Post("/settings/network/revert", api.handleRevertNetworkConfig)
+
+		// Dev-only. Not registered at all in prod, so a prod box answers a plain 404 rather than
+		// advertising an endpoint it then refuses — there is nothing to probe for.
+		//
+		// Gated on the mode explicitly, deliberately UNLIKE the access log above: that one keys off
+		// log level so `-log-level debug` on a prod box turns it on, which is fine for verbosity but
+		// would be a bad way to decide who may wipe a substation box's logs. Turning logging up must
+		// never hand out a destructive endpoint.
+		if api.devMode {
+			r.Post("/settings/logs/clear", api.handleClearLogs)
+		}
 	})
 
 	return r

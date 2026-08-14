@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle, Save, Undo2 } from '@lucide/vue'
+import { AlertTriangle, Save, Trash2, Undo2 } from '@lucide/vue'
 
 import { useSettingsStore } from '@/stores/settings'
 import { useI18n } from '@/i18n'
 import { FALLBACK_PREFIX, isValidIpv4, normalizeAddressInput, prefixOf } from '@/utils/network'
+import { isDevMode } from '@/utils/mode'
+import { clearLogs } from '@/services/settingsApi'
+import { ApiError, type ClearLogsResult } from '@/types/api'
 import Panel from '@/components/ui/Panel.vue'
 import Button from '@/components/ui/Button.vue'
 import Disclosure from '@/components/ui/Disclosure.vue'
@@ -37,6 +40,57 @@ onUnmounted(() => {
   if (clockTimer) clearInterval(clockTimer)
   store.dispose()
 })
+
+// Dev-only log clearing. Kept as component-local state rather than in the settings store: it is
+// a self-contained one-shot action with no bearing on the network-config state machine the store
+// exists to run, and it does not survive leaving the page. Mirrors StructureFileUpload.vue.
+const clearingLogs = ref(false)
+const clearLogsResult = ref<ClearLogsResult | null>(null)
+const clearLogsError = ref<string | null>(null)
+
+// Bytes as something a human reads at a glance — the point of showing it at all is a quick "yes,
+// that actually wiped 14 MB of last week" before walking out the door.
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
+const clearLogsMessage = computed(() => {
+  const result = clearLogsResult.value
+  if (!result) return null
+  if (result.clearedCount === 0 && result.skippedCount === 0) {
+    return t('settings.advanced.clearedNothing')
+  }
+  const params = {
+    count: String(result.clearedCount),
+    size: formatBytes(result.bytesFreed),
+    skipped: String(result.skippedCount),
+  }
+  return result.skippedCount > 0
+    ? t('settings.advanced.clearedWithSkipped', params)
+    : t('settings.advanced.cleared', params)
+})
+
+async function onClearLogs() {
+  clearingLogs.value = true
+  clearLogsError.value = null
+  clearLogsResult.value = null
+  try {
+    clearLogsResult.value = await clearLogs()
+  } catch (err) {
+    clearLogsError.value =
+      err instanceof ApiError ? err.message : t('settings.advanced.clearFailed')
+  } finally {
+    clearingLogs.value = false
+  }
+}
 
 // The prefix a bare address inherits when the technician doesn't type one. Taken from the box's
 // own current configuration rather than a hardcoded /24, so a /16 box doesn't silently get a
@@ -314,6 +368,48 @@ function prefillCurrent() {
         >,
         {{ t('settings.recovery.bodyAfter', { example: '169.254.1.2/24' }) }}
       </p>
+    </Panel>
+
+    <!-- Dev builds only. isDevMode folds to a literal at build time (see utils/mode.ts), so this
+         never renders in a prod bundle — though, being a template v-if rather than an `if` in
+         script, the markup itself is still shipped. That is fine: the API does not register
+         POST /api/settings/logs/clear at all in prod, so the endpoint is a 404 there regardless of
+         what any bundle contains. This v-if decides what a technician is shown; it is not the
+         security boundary. -->
+    <Panel v-if="isDevMode">
+      <template #header>
+        <h2 class="text-sm font-semibold text-slate-800 dark:text-slate-200">
+          {{ t('settings.advanced.heading') }}
+        </h2>
+      </template>
+      <!-- No label prop: Disclosure falls back to the shared "Advanced" wording, matching the
+           three other disclosures in this app in both locales. -->
+      <Disclosure>
+        <div class="flex w-full flex-col gap-2">
+          <p class="text-sm text-slate-600 dark:text-slate-400">
+            {{ t('settings.advanced.clearLogsDescription') }}
+          </p>
+          <div class="flex items-center gap-3">
+            <Button
+              variant="danger"
+              :icon="Trash2"
+              :disabled="clearingLogs"
+              @click="onClearLogs"
+            >
+              {{ clearingLogs ? t('settings.advanced.clearing') : t('settings.advanced.clearLogs') }}
+            </Button>
+            <span v-if="clearLogsMessage" class="text-sm text-slate-600 dark:text-slate-400">
+              {{ clearLogsMessage }}
+            </span>
+            <span v-else-if="clearLogsError" class="text-sm text-red-600 dark:text-red-400">
+              {{ clearLogsError }}
+            </span>
+          </div>
+          <p v-if="clearLogsResult" class="font-mono text-xs text-slate-400 dark:text-slate-500">
+            {{ t('settings.advanced.logDir') }}: {{ clearLogsResult.logDir }}
+          </p>
+        </div>
+      </Disclosure>
     </Panel>
   </div>
 </template>

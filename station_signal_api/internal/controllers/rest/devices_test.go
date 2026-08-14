@@ -348,7 +348,7 @@ func assertErrorCode(t *testing.T, rec *httptest.ResponseRecorder, wantCode stri
 func TestHandleStartReporting_TouchesTheStructureFileItStartsWith(t *testing.T) {
 	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
 	files := &mockStructureFileStore{}
-	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, nil))
+	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, &mockLogFileStore{}, true, nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(
 		`{"host":"10.0.0.5","interfaceId":"eth0","iedName":"IED1","sclFilePath":"/data/structure_files/abc-device.icd"}`))
@@ -362,7 +362,7 @@ func TestHandleStartReporting_TouchesTheStructureFileItStartsWith(t *testing.T) 
 func TestHandleStartReporting_TouchesNothingWhenNoStructureFileIsNamed(t *testing.T) {
 	reporting := &mockReportingService{startDevice: reportingdomain.Device{ID: 1, WSPort: 9000}}
 	files := &mockStructureFileStore{}
-	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, nil))
+	mux := Router(New(reporting, nil, nil, nil, files, &mockNetworkService{}, &mockLogFileStore{}, true, nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"host":"10.0.0.5","interfaceId":"eth0"}`))
 	rec := httptest.NewRecorder()

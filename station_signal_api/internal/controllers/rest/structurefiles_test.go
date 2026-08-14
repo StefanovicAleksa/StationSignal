@@ -35,7 +35,7 @@ func multipartUploadRequest(t *testing.T, fieldName, filename string, content []
 
 func TestHandleUploadStructureFile_Success(t *testing.T) {
 	files := &mockStructureFileStore{path: "/var/lib/station_signal_api/structure_files/abc123-device.icd"}
-	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, nil)
+	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, &mockLogFileStore{}, true, nil)
 	mux := Router(api)
 
 	req := multipartUploadRequest(t, "file", "device.icd", []byte("<SCL/>"))
@@ -50,7 +50,7 @@ func TestHandleUploadStructureFile_Success(t *testing.T) {
 }
 
 func TestHandleUploadStructureFile_MissingFileField(t *testing.T) {
-	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, &mockStructureFileStore{}, &mockNetworkService{}, nil)
+	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, &mockStructureFileStore{}, &mockNetworkService{}, &mockLogFileStore{}, true, nil)
 	mux := Router(api)
 
 	req := multipartUploadRequest(t, "", "", nil)
@@ -63,7 +63,7 @@ func TestHandleUploadStructureFile_MissingFileField(t *testing.T) {
 
 func TestHandleUploadStructureFile_UnsupportedExtension(t *testing.T) {
 	files := &mockStructureFileStore{err: structurefiles.ErrUnsupportedExtension}
-	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, nil)
+	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, &mockLogFileStore{}, true, nil)
 	mux := Router(api)
 
 	req := multipartUploadRequest(t, "file", "device.exe", []byte("data"))
@@ -76,7 +76,7 @@ func TestHandleUploadStructureFile_UnsupportedExtension(t *testing.T) {
 
 func TestHandleUploadStructureFile_StoreFailure(t *testing.T) {
 	files := &mockStructureFileStore{err: errors.New("disk full")}
-	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, nil)
+	api := New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, files, &mockNetworkService{}, &mockLogFileStore{}, true, nil)
 	mux := Router(api)
 
 	req := multipartUploadRequest(t, "file", "device.icd", []byte("data"))

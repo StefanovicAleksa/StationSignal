@@ -217,3 +217,14 @@ export interface NetworkStatus {
   recoveryAddress: string
   pending?: NetworkPendingChange
 }
+
+// Result of the dev-only POST /api/settings/logs/clear. The counts are the point: they are what
+// tells an operator, before leaving for a test session, that the wipe actually happened.
+// skippedCount > 0 is information to show, not a failure — a log this stack cannot truncate (one
+// systemd created root-owned) does not cost the caller the ones it can.
+export interface ClearLogsResult {
+  logDir: string
+  clearedCount: number
+  skippedCount: number
+  bytesFreed: number
+}

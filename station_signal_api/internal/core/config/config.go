@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"station_signal_api/internal/core/logfiles"
 )
 
 // Mode is which of the two deployment postures this process runs in. It is the single knob the
@@ -48,6 +50,22 @@ type Config struct {
 	// SCL/ICD/CID structure files are stored — see internal/core/structurefiles.
 	StructureFileDir string
 
+	// LogDir is where this stack's log files live: the daemon's per-feature
+	// station-signal-<feature>.log files and, on a deployed box, the station-signal-api.log that
+	// systemd writes by redirecting this process's own stdout. Used by internal/core/logfiles to
+	// empty them, and exported to the daemon on spawn so the two cannot disagree about which
+	// directory that is (see internal/features/supervision/data.Spawn).
+	//
+	// The default matches the daemon's own compiled-in fallback in src/log.h, which is what makes
+	// the two agree when nobody sets anything.
+	LogDir string
+
+	// ClearLogsHelperPath is the absolute path to the privileged clear-logs helper script
+	// (deploy/scripts/station-signal-clearlogs.sh). Needed for exactly one file: on a deployed box
+	// station-signal-api.log is created by systemd as root, so this unprivileged process cannot
+	// truncate it itself.
+	ClearLogsHelperPath string
+
 	// NetconfigHelperPath is the absolute path to the privileged network-config helper script
 	// (deploy/scripts/station-signal-netconfig.sh) this process shells out to via sudo — see
 	// internal/features/network/data.ScriptRunner.
@@ -74,8 +92,15 @@ func Load(args []string) (Config, error) {
 		"log level: debug, info, warn, error (defaults to debug in dev mode, info in prod)")
 	structureFileDir := fs.String("structure-file-dir", envOrDefault("STATION_SIGNAL_API_STRUCTURE_FILE_DIR", defaultStructureFileDir()),
 		"directory where uploaded SCL/ICD/CID structure files are stored")
+	// Deliberately the same env var the daemon itself reads (src/log.h), not a
+	// STATION_SIGNAL_API_-prefixed one: it names a single directory both processes write into, so
+	// one variable setting it for both is the point.
+	logDir := fs.String("log-dir", envOrDefault("STATION_SIGNAL_LOG_DIR", logfiles.StandardDir),
+		"directory holding this stack's log files (shared with the daemon)")
 	netconfigHelperPath := fs.String("netconfig-helper", envOrDefault("STATION_SIGNAL_API_NETCONFIG_HELPER", "/opt/station_signal/bin/station-signal-netconfig.sh"),
 		"path to the privileged network-config helper script (invoked via sudo)")
+	clearLogsHelperPath := fs.String("clear-logs-helper", envOrDefault("STATION_SIGNAL_API_CLEAR_LOGS_HELPER", "/opt/station_signal/bin/station-signal-clearlogs.sh"),
+		"path to the privileged clear-logs helper script (invoked via sudo)")
 	netconfigRevertTimeoutSeconds := fs.Int("netconfig-revert-timeout-seconds", envIntOrDefault("STATION_SIGNAL_API_NETCONFIG_REVERT_TIMEOUT_SECONDS", 90),
 		"seconds a provisional network change waits for confirmation before auto-reverting")
 
@@ -102,7 +127,9 @@ func Load(args []string) (Config, error) {
 		HTTPAddr:                      *httpAddr,
 		LogLevel:                      resolvedLogLevel,
 		StructureFileDir:              *structureFileDir,
+		LogDir:                        *logDir,
 		NetconfigHelperPath:           *netconfigHelperPath,
+		ClearLogsHelperPath:           *clearLogsHelperPath,
 		NetconfigRevertTimeoutSeconds: *netconfigRevertTimeoutSeconds,
 	}
 

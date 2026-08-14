@@ -1,5 +1,5 @@
 import { apiClient } from './apiClient'
-import type { NetworkConfig, NetworkPendingChange, NetworkStatus } from '@/types/api'
+import type { ClearLogsResult, NetworkConfig, NetworkPendingChange, NetworkStatus } from '@/types/api'
 
 export function getNetworkStatus(): Promise<NetworkStatus> {
   return apiClient.get<NetworkStatus>('/settings/network')
@@ -98,4 +98,12 @@ export async function confirmNetworkConfigAt(baseUrl: string): Promise<void> {
   if (!res.ok) {
     throw new Error(`confirm failed with status ${res.status}`)
   }
+}
+
+// Empties the box's own log files so a following test session's capture contains only that
+// session. Dev-only: the API does not register this route at all in prod, so calling it against a
+// prod box is a 404 rather than a refusal — the Settings page hides the control there anyway (see
+// utils/mode.ts).
+export function clearLogs(): Promise<ClearLogsResult> {
+  return apiClient.post<ClearLogsResult>('/settings/logs/clear')
 }

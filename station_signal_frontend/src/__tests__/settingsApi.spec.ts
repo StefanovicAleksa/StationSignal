@@ -15,6 +15,7 @@ import {
   probeReachability,
   confirmNetworkConfigAt,
   revertNetworkConfig,
+  clearLogs,
 } from '@/services/settingsApi'
 
 describe('settingsApi', () => {
@@ -151,5 +152,20 @@ describe('settingsApi', () => {
     await revertNetworkConfig()
 
     expect(apiClient.post).toHaveBeenCalledWith('/settings/network/revert')
+  })
+
+  it('clearLogs posts to /settings/logs/clear and returns what was cleared', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      logDir: '/var/log/station_signal',
+      clearedCount: 12,
+      skippedCount: 0,
+      bytesFreed: 14680064,
+    })
+
+    const result = await clearLogs()
+
+    expect(apiClient.post).toHaveBeenCalledWith('/settings/logs/clear')
+    expect(result.clearedCount).toBe(12)
+    expect(result.bytesFreed).toBe(14680064)
   })
 })

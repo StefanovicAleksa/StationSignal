@@ -184,6 +184,21 @@ sudo visudo -cf "$STAGED_SUDOERS"
 sudo install -m 0440 -o root -g root "$STAGED_SUDOERS" /etc/sudoers.d/station-signal-netconfig
 rm -f "$STAGED_SUDOERS"
 
+# The clear-logs helper, for the Settings page's dev-only "clear log files" action. Needed for
+# exactly one file: station-signal-api.log is created by systemd as root (StandardOutput=append:
+# in the unit below), so the unprivileged API cannot truncate it itself. Unlike the netconfig
+# helper this one takes no arguments and hardcodes its directory, so nothing from the API reaches
+# root — see its own header and deploy/sudoers/station-signal-clearlogs.
+echo "==> Installing the privileged clear-logs helper (Settings page log clearing)"
+sudo cp "$DEPLOY_DIR/scripts/station-signal-clearlogs.sh" "$INSTALL_ROOT/bin/station-signal-clearlogs.sh"
+sudo chown root:root "$INSTALL_ROOT/bin/station-signal-clearlogs.sh"
+sudo chmod 0700 "$INSTALL_ROOT/bin/station-signal-clearlogs.sh"
+STAGED_SUDOERS="$(mktemp)"
+cp "$DEPLOY_DIR/sudoers/station-signal-clearlogs" "$STAGED_SUDOERS"
+sudo visudo -cf "$STAGED_SUDOERS"
+sudo install -m 0440 -o root -g root "$STAGED_SUDOERS" /etc/sudoers.d/station-signal-clearlogs
+rm -f "$STAGED_SUDOERS"
+
 echo "==> Installing avahi (mDNS) so $HOSTNAME_NAME resolves"
 command -v avahi-daemon >/dev/null 2>&1 || sudo apt-get install -y avahi-daemon
 if grep -q '^host-name=' /etc/avahi/avahi-daemon.conf; then

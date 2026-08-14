@@ -242,6 +242,18 @@ export const en = {
       bodyAfter:
         'independent of whatever address is configured above and never changed by this page. Connect a laptop directly to the box (or via a switch with nothing else on that segment), manually set your own network adapter to a static IP in the same block — e.g. {example}, no gateway needed — then browse to that address.',
     },
+    advanced: {
+      heading: 'Advanced',
+      clearLogsDescription:
+        'Empties this box\u2019s log files. Use it right before a test session so the logs you collect afterwards contain only that session.',
+      clearLogs: 'Clear log files',
+      clearing: 'Clearing\u2026',
+      cleared: 'Cleared {count} log file(s), freeing {size}.',
+      clearedWithSkipped: 'Cleared {count} log file(s), freeing {size}. {skipped} could not be cleared.',
+      clearedNothing: 'No log files to clear.',
+      clearFailed: 'Could not clear the log files',
+      logDir: 'Log directory',
+    },
   },
 
   errors: {

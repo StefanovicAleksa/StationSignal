@@ -3,7 +3,9 @@ package rest
 import (
 	"context"
 	"io"
+	"log/slog"
 
+	"station_signal_api/internal/core/logfiles"
 	networkdomain "station_signal_api/internal/features/network/domain"
 	reportingdomain "station_signal_api/internal/features/reporting/domain"
 	scanningdomain "station_signal_api/internal/features/scanning/domain"
@@ -117,6 +119,17 @@ func (m *mockNetworkService) Revert(ctx context.Context) error {
 	return m.revertErr
 }
 
+type mockLogFileStore struct {
+	result     logfiles.Result
+	err        error
+	clearCalls int
+}
+
+func (m *mockLogFileStore) Clear() (logfiles.Result, error) {
+	m.clearCalls++
+	return m.result, m.err
+}
+
 func newTestAPI(reporting *mockReportingService, scanning *mockScanningService, sup *mockDaemonSupervisor, daemon *mockDaemonStatus) *API {
 	if reporting == nil {
 		reporting = &mockReportingService{}
@@ -130,5 +143,11 @@ func newTestAPI(reporting *mockReportingService, scanning *mockScanningService, 
 	if daemon == nil {
 		daemon = &mockDaemonStatus{}
 	}
-	return New(reporting, scanning, sup, daemon, &mockStructureFileStore{}, &mockNetworkService{}, nil)
+	return New(reporting, scanning, sup, daemon, &mockStructureFileStore{}, &mockNetworkService{}, &mockLogFileStore{}, true, nil)
+}
+
+// debugLogger builds a logger with debug enabled, for the one test that has to prove the
+// clear-logs route is gated on the deployment MODE rather than on log verbosity.
+func debugLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }

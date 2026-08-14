@@ -236,6 +236,18 @@ export const sr: Messages = {
       bodyAfter:
         'nezavisnu od adrese podešene iznad i nikada je ova stranica ne menja. Povežite laptop direktno na uređaj (ili preko sviča na kome nema ničega drugog), ručno podesite svoj mrežni adapter na statičku IP adresu u istom opsegu — npr. {example}, mrežni prolaz nije potreban — pa otvorite tu adresu.',
     },
+    advanced: {
+      heading: 'Napredno',
+      clearLogsDescription:
+        'Prazni log fajlove na ovom ure\u0111aju. Koristite neposredno pre testiranja, kako bi logovi koje posle preuzmete sadr\u017eali samo tu sesiju.',
+      clearLogs: 'Obri\u0161i log fajlove',
+      clearing: 'Brisanje\u2026',
+      cleared: 'Obrisano {count} log fajl(ova), oslobo\u0111eno {size}.',
+      clearedWithSkipped: 'Obrisano {count} log fajl(ova), oslobo\u0111eno {size}. {skipped} nije moglo biti obrisano.',
+      clearedNothing: 'Nema log fajlova za brisanje.',
+      clearFailed: 'Neuspe\u0161no brisanje log fajlova',
+      logDir: 'Direktorijum sa logovima',
+    },
   },
 
   errors: {

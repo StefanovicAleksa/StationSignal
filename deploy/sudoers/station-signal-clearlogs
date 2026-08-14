@@ -1,0 +1,20 @@
+# Lets the unprivileged station-signal user (running station_signal_api) invoke exactly one
+# root-owned, fixed-behaviour script for the Settings page's dev-only "clear log files" action —
+# never a shell, never arbitrary root. The second and only other sudo grant this box has; see
+# deploy/sudoers/station-signal-netconfig for the first.
+#
+# Narrower than that one in the way that matters: station-signal-clearlogs.sh takes NO ARGUMENTS
+# and hardcodes the directory it empties, so nothing supplied by the API — or by anything that
+# managed to talk to the API — reaches this root context at all. The worst it can do, however it
+# is invoked, is truncate /var/log/station_signal's own station-signal-*.log files. It truncates
+# rather than deletes, so it cannot break the running daemon's or systemd's open file handles
+# either.
+#
+# Needed for exactly one file: station-signal-api.log is created by systemd as root (the unit's
+# StandardOutput=append:), so the unprivileged API cannot truncate it itself. Every other log in
+# that directory is written by the daemon as station-signal and is cleared without this grant.
+#
+# Install as /etc/sudoers.d/station-signal-clearlogs (mode 0440), always via `visudo -cf` first —
+# deploy/setup.sh does this automatically; never write this file into /etc/sudoers.d/ directly
+# without that syntax check, a broken sudoers file can lock out sudo entirely.
+station-signal ALL=(root) NOPASSWD: /opt/station_signal/bin/station-signal-clearlogs.sh

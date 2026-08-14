@@ -424,3 +424,54 @@ DELETE /api/devices/2 -> 200 {"deviceId":2} // ws://.../ws/devices/2 closes
 - **`DAEMON_UNREACHABLE` is usually transient**, not a hard failure — see §5.
 - **This API and the daemon it wraps are both loopback/local-network-trust-model tools.**
   Don't assume auth, TLS, or multi-tenant isolation exist anywhere in this stack.
+
+---
+
+## 9. Settings — `/api/settings`
+
+> **Note:** the network-configuration endpoints under this prefix
+> (`GET|POST /api/settings/network`, `POST /api/settings/network/confirm`,
+> `POST /api/settings/network/revert`) are implemented and used by the frontend's Settings page but
+> are **not yet documented here** — this guide predates them. Read
+> `internal/controllers/rest/network.go` until that gap is closed.
+
+### `POST /api/settings/logs/clear` — empty this box's log files (**dev mode only**)
+
+Truncates every `station-signal-*.log` in the box's log directory: the daemon's per-feature files
+and the API's own. Intended for capture hygiene — run it immediately before an on-site test session
+so the logs collected afterwards contain only that session. There is no logrotate anywhere in this
+stack, so nothing else ever reclaims these files.
+
+No request body.
+
+**Only exists in dev mode.** A prod-mode API does not register the route at all, so it answers
+`404` — not `403`. Gate the UI on the frontend's own build mode (`VITE_STATION_SIGNAL_MODE`) rather
+than probing for it.
+
+```
+POST /api/settings/logs/clear
+->  200 {
+      "logDir": "/var/log/station_signal",
+      "clearedCount": 12,
+      "skippedCount": 0,
+      "bytesFreed": 14680064
+    }
+```
+
+| field | meaning |
+|---|---|
+| `logDir` | the directory that was cleared, echoed back |
+| `clearedCount` | files successfully emptied |
+| `skippedCount` | files that matched but could not be emptied — show this, don't treat it as failure |
+| `bytesFreed` | total size of the emptied files, before emptying |
+
+**A partial clear is still `200`.** `skippedCount > 0` is information, not an error: on a deployed
+box `station-signal-api.log` is created root-owned by systemd, and if the privileged helper that
+covers that case isn't installed it stays behind while everything else is cleared. Surface the
+count; don't fail the interaction.
+
+The files are **truncated in place, never deleted** — the daemon holds each one open for its whole
+process lifetime, so unlinking would silently end its logging. Nothing restarts, and both processes
+keep logging into the same files immediately afterwards.
+
+Errors use the standard envelope (§5); a genuine failure is `INTERNAL` → `500`.

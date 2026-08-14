@@ -18,7 +18,7 @@ func newNetworkTestAPI(network *mockNetworkService) *API {
 	if network == nil {
 		network = &mockNetworkService{}
 	}
-	return New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, &mockStructureFileStore{}, network, nil)
+	return New(&mockReportingService{}, &mockScanningService{}, &mockDaemonSupervisor{}, &mockDaemonStatus{}, &mockStructureFileStore{}, network, &mockLogFileStore{}, true, nil)
 }
 
 func TestHandleGetNetworkStatus_Success(t *testing.T) {

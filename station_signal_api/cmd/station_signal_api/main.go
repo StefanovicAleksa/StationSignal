@@ -17,6 +17,7 @@ import (
 	"station_signal_api/internal/controllers/ws"
 	"station_signal_api/internal/core/config"
 	"station_signal_api/internal/core/daemonclient"
+	"station_signal_api/internal/core/logfiles"
 	"station_signal_api/internal/core/structurefiles"
 	networkdata "station_signal_api/internal/features/network/data"
 	networksvc "station_signal_api/internal/features/network/service"
@@ -49,7 +50,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	sup := supervisionsvc.New(cfg.DaemonBinPath, controlAddr, cfg.LogLevel, logger)
+	sup := supervisionsvc.New(cfg.DaemonBinPath, controlAddr, cfg.LogLevel, cfg.LogDir, logger)
 	supervisorDone := make(chan struct{})
 	go func() {
 		defer close(supervisorDone)
@@ -105,7 +106,13 @@ func main() {
 	// mid-change comes back up permanently unable to change its own address.
 	networkSvc.Reconcile(ctx)
 
-	api := rest.New(reportingSvc, scanningSvc, sup, client, structureFiles, networkSvc, logger)
+	// The privileged helper is only reachable for the standard log directory (it hardcodes that
+	// path and takes no arguments), and is simply absent on a dev laptop — where run_dev.sh already
+	// runs this process as root and plain truncation succeeds anyway.
+	logFiles := logfiles.New(cfg.LogDir).WithPrivilegedHelper(cfg.ClearLogsHelperPath)
+
+	api := rest.New(reportingSvc, scanningSvc, sup, client, structureFiles, networkSvc, logFiles,
+		cfg.Mode == config.ModeDev, logger)
 	mux := rest.Router(api)
 	ws.RegisterRoutes(mux, ws.New(reportingSvc, scanningSvc, logger))
 
