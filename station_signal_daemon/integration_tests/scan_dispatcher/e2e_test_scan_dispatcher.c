@@ -172,6 +172,56 @@ waitReadable(int sock, int timeoutMs) {
     return select(sock + 1, &readSet, NULL, NULL, &tv) > 0;
 }
 
+/* Host used only by waitUntilCursorLive's probe frames - deliberately not a
+ * value any real assertion below matches on. */
+#define CURSOR_PROBE_HOST "0.0.0.0"
+
+/*
+ * Blocks until this connection's SERVER-SIDE read cursor exists, then leaves
+ * the socket drained and ready for the real assertions.
+ *
+ * WHY THIS IS NEEDED, and why it is not a production bug. connectAndUpgrade
+ * returns the moment the client has read the HTTP "101" line, but the server
+ * sets that session's ring-buffer cursor later and on a different thread, in
+ * LWS_CALLBACK_ESTABLISHED (scan_dispatcher_ws_server.c), as
+ * `session->cursor = ScanDispatcherRingBuffer_headSeq(...)` - deliberate
+ * start-from-now semantics with no backlog replay. So a publish issued
+ * between those two points is appended to the ring, the cursor is then
+ * initialized PAST it, and it is never delivered: the frame is dropped with no
+ * error anywhere, which is exactly what
+ * `test_deviceFound_arrivesAsScanResultJson:FAIL:no frame arrived within
+ * timeout` was, and what made test_multipleDeviceFound_arriveInOrder
+ * intermittently read 10.0.0.2 as its first frame.
+ *
+ * Production does not have this hole: scan_orchestration deliberately waits
+ * SCAN_ORCHESTRATION_INITIAL_SWEEP_GRACE_MS (300ms) before its first sweep,
+ * for precisely this race (see its own CLAUDE.md bullet and CHANGELOG entry).
+ * These tests published immediately with no equivalent, so they raced a
+ * hazard the real system already handles.
+ *
+ * The fix is deterministic rather than another sleep: publish a probe frame
+ * and see whether it comes back. It cannot come back until the cursor is live,
+ * and once one does, the cursor is live by construction - no timing
+ * assumption. Every probe that queued up is then drained so the ordering
+ * assertions below still see the real frames first.
+ */
+static bool
+waitUntilCursorLive(ScanDispatcherHandle handle, int sock) {
+    for (int attempt = 0; attempt < 50; attempt++) {
+        ScanDispatcher_publishDeviceFound(handle, 0, CURSOR_PROBE_HOST, 1, false);
+
+        if (waitReadable(sock, 100)) {
+            do {
+                char* drained = readOneTextFrame(sock);
+                if (!drained) return false;
+                free(drained);
+            } while (waitReadable(sock, 100));
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 test_deviceFound_arrivesAsScanResultJson(void) {
     ScanDispatcherConfig config;
@@ -184,6 +234,8 @@ test_deviceFound_arrivesAsScanResultJson(void) {
 
     fixtureSocket = connectAndUpgrade(TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(fixtureSocket >= 0, "websocket handshake failed");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "127.0.0.1", 102, true);
 
@@ -218,6 +270,8 @@ test_multipleDeviceFound_arriveInOrder(void) {
 
     fixtureSocket = connectAndUpgrade(TEST_PORT + 1);
     TEST_ASSERT_TRUE_MESSAGE(fixtureSocket >= 0, "websocket handshake failed");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.1", 102, false);
     ScanDispatcher_publishDeviceFound(fixtureHandle, 1, "10.0.0.2", 102, false);

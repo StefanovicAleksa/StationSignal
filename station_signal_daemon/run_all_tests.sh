@@ -35,6 +35,23 @@
 # Unity-based (a single PASSED/FAILED probe, not "N Tests") - it contributes
 # exactly 1 to the total test count and 0 or 1 to the total failure count.
 #
+# The end-of-run summary also reprints every individual FAILING TEST by name.
+# Across ~40 Unity binaries and 500+ assertions, a bare "FAILED suites:
+# mms_report_client" means re-running that suite and re-reading its scrollback
+# just to learn which case broke - the one thing this script exists to save.
+# Unity's own failure lines (`file.c:LINE:test_name:FAIL: message`) are
+# captured per suite and replayed at the bottom, so a single run answers
+# "is everything working, and if not, what exactly".
+#
+# NOTE ON THE E2E SUITES AND EDITION 2.1: `integration_tests/ied_simulator`'s
+# SimServer runs as an IEC 61850 Edition 2.1 server, so every suite that links
+# it exercises the real RCB reservation handshake (see mms_report_client's own
+# CHANGELOG.md entry - on libiec61850's Edition 2 default the whole suite
+# passed against a client that reserved nothing and was consequently unusable
+# on every in-service substation IED). `run_suite` always `make clean`s first,
+# which is what guarantees a changed sim_server.c is actually recompiled into
+# every suite that links it rather than silently reusing a stale object.
+#
 # IMPORTANT (see CLAUDE.md's own note on this): this suite list is
 # hand-maintained, not auto-discovered - update the run_suite/run_smoke_test
 # calls below whenever a test suite (a new tests/<feature>/ Makefile entry,
@@ -48,6 +65,7 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FAILED=()
+FAILED_TESTS=()
 TOTAL_TESTS=0
 TOTAL_FAILURES=0
 TOTAL_IGNORED=0
@@ -74,6 +92,15 @@ run_suite() {
     TOTAL_TESTS=$((TOTAL_TESTS + suite_tests))
     TOTAL_FAILURES=$((TOTAL_FAILURES + suite_failures))
     TOTAL_IGNORED=$((TOTAL_IGNORED + suite_ignored))
+
+    # Unity prints one line per failing case: `file.c:LINE:test_name:FAIL[: msg]`.
+    # Collected here (prefixed with the suite, since bare filenames repeat
+    # across suites) purely so the end-of-run summary can name them - grep
+    # failing is fine and simply contributes nothing.
+    local failline
+    while IFS= read -r failline; do
+        [ -n "${failline}" ] && FAILED_TESTS+=("${name}: ${failline}")
+    done < <(grep -E ':FAIL' "${logfile}" || true)
 
     rm -f "${logfile}"
 }
@@ -103,6 +130,7 @@ run_smoke_test() {
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
     if ! "${bin}"; then
         FAILED+=("${name}")
+        FAILED_TESTS+=("${name}: probe reported FAILED")
         TOTAL_FAILURES=$((TOTAL_FAILURES + 1))
     fi
 
@@ -132,5 +160,10 @@ if [ ${#FAILED[@]} -eq 0 ]; then
     echo "All test suites passed."
 else
     echo "FAILED suites: ${FAILED[*]}"
+    if [ ${#FAILED_TESTS[@]} -ne 0 ]; then
+        echo
+        echo "Failing tests:"
+        printf '  %s\n' "${FAILED_TESTS[@]}"
+    fi
     exit 1
 fi

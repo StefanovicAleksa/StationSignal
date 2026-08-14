@@ -177,6 +177,48 @@ waitReadable(int sock, int timeoutMs) {
     return select(sock + 1, &readSet, NULL, NULL, &tv) > 0;
 }
 
+/*
+ * Blocks until this connection's SERVER-SIDE read cursor exists, then leaves
+ * the socket drained. Identical in purpose and mechanism to
+ * integration_tests/scan_dispatcher's own helper of the same name - see that
+ * one's full comment for the race and why it is a test hazard rather than a
+ * production bug.
+ *
+ * In short: connectAndUpgrade returns once the client has read the HTTP "101",
+ * but the server initializes this session's cursor later and on another thread
+ * (LWS_CALLBACK_ESTABLISHED, `session->cursor = ...headSeq(...)`, deliberate
+ * start-from-now with no backlog replay), so anything published in between is
+ * appended and then skipped, silently.
+ *
+ * This suite has not been observed failing on it, but only because each test
+ * happens to spend ~20 lines building an MmsReportRecord/GooseSubscriberRecord
+ * between the upgrade and the publish, which incidentally gives the service
+ * thread time to run. That is luck, not design - scan_dispatcher's copy of
+ * these same helpers, which publishes immediately, failed roughly three runs
+ * in four. Made explicit here so this suite does not start flaking the first
+ * time someone shortens the setup.
+ *
+ * CONNECTION_STATUS is used as the probe because it is the cheapest frame this
+ * dispatcher can be made to emit (no record to build or hand ownership of) and
+ * because no test in this suite asserts on that type.
+ */
+static bool
+waitUntilCursorLive(IpcDispatcherHandle handle, int sock) {
+    for (int attempt = 0; attempt < 50; attempt++) {
+        IpcDispatcher_onConnStateChange(handle, MMS_REPORT_CLIENT_CONNECTION_REJECTED);
+
+        if (waitReadable(sock, 100)) {
+            do {
+                char* drained = readOneTextFrame(sock);
+                if (!drained) return false;
+                free(drained);
+            } while (waitReadable(sock, 100));
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
     IpcDispatcherConfig config;
@@ -189,6 +231,8 @@ test_mmsReport_withStValAndQ_arrivesAsPairedDataPoint(void) {
 
     fixtureSocket = connectAndUpgrade();
     TEST_ASSERT_TRUE_MESSAGE(fixtureSocket >= 0, "websocket handshake failed");
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     MmsReportRecord* record = calloc(1, sizeof(MmsReportRecord));
     record->rcbReference = strdup("Reporter1LD1/LLN0.BR.brcbMain");
@@ -292,6 +336,8 @@ test_gooseRecord_arrivesWithGoCbRefSource(void) {
     }
     TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
     fixtureSocket = sock;
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     GooseSubscriberRecord* record = calloc(1, sizeof(GooseSubscriberRecord));
     record->goCbRef = strdup("Breaker1CB1/LLN0$GO$gcbStatus");
@@ -369,6 +415,8 @@ test_mmsReport_duplicateFromDifferentRcb_isSuppressed(void) {
     }
     TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
     fixtureSocket = sock;
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     MmsReportRecord* recordA = calloc(1, sizeof(MmsReportRecord));
     recordA->rcbReference = strdup("Reporter1LD1/LLN0.BR.rcbA");
@@ -459,6 +507,8 @@ test_mmsReportAndGooseRecord_sameContent_bothArrive(void) {
     }
     TEST_ASSERT_NOT_NULL(strstr(buf, "101"));
     fixtureSocket = sock;
+    TEST_ASSERT_TRUE_MESSAGE(waitUntilCursorLive(fixtureHandle, fixtureSocket),
+            "the server never delivered a probe frame - its read cursor for this connection never came up");
 
     MmsReportRecord* mmsRecord = calloc(1, sizeof(MmsReportRecord));
     mmsRecord->rcbReference = strdup("Reporter1LD1/LLN0.BR.brcbMain");
